@@ -87,7 +87,8 @@ basic_queue() {
 # scan_forbidden <dir...>: succeed (printing hits) if a non-comment line uses a
 # forbidden apply flag.
 scan_forbidden() {
-  grep -rnE -e '--(3way|reject|ignore-whitespace|unidiff-zero)' "$@" 2>/dev/null |
+  grep -rnE -e '--(3way|reject|ignore-whitespace|ignore-space-change|unidiff-zero)' \
+    -e '(^|[[:space:]])-3([[:space:]]|$)' "$@" 2>/dev/null |
     grep -Ev '^[^:]*:[0-9]+:[[:space:]]*#'
 }
 
@@ -104,6 +105,7 @@ applies_clean_queue_and_tree_matches_pin() {
 }
 
 rejects_moved_tag() {
+  local msg
   new_case
   write_pin "$T/UPSTREAM.tmp" "$SHA" unset
   pq_read_pin "$T/UPSTREAM.tmp"
@@ -112,10 +114,33 @@ rejects_moved_tag() {
   git -C "$URL" add -A
   git -C "$URL" commit -q -m moved
   git -C "$URL" tag -f V1 >/dev/null
-  assert_fails pq_fetch "$T/bad"
+  msg=$(pq_fetch "$T/bad" 2>&1) && return 1
+  case $msg in *"tag V1 is"*"pinned commit is"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+}
+
+fetch_accepts_annotated_tag() {
+  new_case
+  git -C "$URL" tag -d V1 >/dev/null
+  git -C "$URL" tag -a -m annotated V1 "$SHA"
+  pq_fetch "$T/ann"
+  assert_eq "$SHA" "$(git -C "$T/ann" rev-parse HEAD)"
+}
+
+fetch_refuses_non_empty_dest() {
+  local msg
+  new_case
+  mkdir "$T/full" "$T/empty"
+  echo keep >"$T/full/file"
+  msg=$(pq_fetch "$T/full" 2>&1) && return 1
+  case $msg in *"not empty"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  assert_eq keep "$(cat "$T/full/file")" "existing file untouched"
+  [ ! -e "$T/full/.git" ]
+  pq_fetch "$T/empty"
+  assert_eq "$SHA" "$(git -C "$T/empty" rev-parse HEAD)" "empty existing dest is accepted"
 }
 
 rejects_context_drift() {
+  local msg
   new_case
   replace_line "$S/js/a.txt" line5 "line5 patched"
   step 0001-edit-a
@@ -126,7 +151,8 @@ rejects_context_drift() {
   # Altered context: must fail.
   sed 's/^ line4$/ lineX/' "$T/patches/0001-edit-a.patch" >"$T/patches/0001-edit-a.new"
   mv "$T/patches/0001-edit-a.new" "$T/patches/0001-edit-a.patch"
-  assert_fails apply_queue
+  msg=$(apply_queue 2>&1) && return 1
+  case $msg in *"failed to apply"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
 }
 
 applies_trailing_whitespace_unchanged() {
@@ -205,6 +231,11 @@ forbidden_flags_absent() {
   assert_fails scan_forbidden "$BASE/scan"
   printf 'git apply --index --3way p\n' >"$BASE/scan/bad.sh"
   scan_forbidden "$BASE/scan" >/dev/null
+  local flag
+  for flag in -3 --ignore-space-change; do
+    printf 'git apply --index %s p\n' "$flag" >"$BASE/scan/bad.sh"
+    scan_forbidden "$BASE/scan" >/dev/null
+  done
 }
 
 guard() {
@@ -244,6 +275,8 @@ guard() {
 
 run_test applies_clean_queue_and_tree_matches_pin applies_clean_queue_and_tree_matches_pin
 run_test rejects_moved_tag rejects_moved_tag
+run_test fetch_accepts_annotated_tag fetch_accepts_annotated_tag
+run_test fetch_refuses_non_empty_dest fetch_refuses_non_empty_dest
 run_test rejects_context_drift rejects_context_drift
 run_test applies_trailing_whitespace_unchanged applies_trailing_whitespace_unchanged
 run_test applies_with_line_offset applies_with_line_offset
