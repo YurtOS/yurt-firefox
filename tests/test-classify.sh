@@ -126,6 +126,16 @@ leftover_defaults_to_19_dom_files() {
   assert_eq "" "$out"
 }
 
+# Paths git would quote (non-ASCII, tab) or that contain spaces are classified
+# and counted as they are.
+leftover_reads_paths_verbatim() {
+  local out
+  make_diff_repo "$BASE/r5" js/a.c "dom/café.webidl" "js/tab	name.c" "js/space name.c"
+  export PQ_DIFF_REPO=$BASE/r5
+  out=$(pq_leftover V1 yurt 1)
+  assert_eq "" "$out"
+}
+
 run_test classifies_included_prefixes classifies_included_prefixes
 run_test classifies_excluded_prefixes classifies_excluded_prefixes
 run_test unclassified_exits_2 unclassified_exits_2
@@ -134,4 +144,5 @@ run_test leftover_empty_when_all_classified leftover_empty_when_all_classified
 run_test leftover_lists_unclassified leftover_lists_unclassified
 run_test leftover_asserts_dom_count leftover_asserts_dom_count
 run_test leftover_defaults_to_19_dom_files leftover_defaults_to_19_dom_files
+run_test leftover_reads_paths_verbatim leftover_reads_paths_verbatim
 finish

@@ -33,7 +33,7 @@ new_root() {
   SHA=$(make_fixture_upstream "$URL")
   mkdir -p "$R/patches" "$R/data/ics"
   cp -R "$URL/js/ics/." "$R/data/ics/"
-  printf 'url=%s\ntag=V1\ncommit=%s\ntree=unset\n' "$URL" "$SHA" >"$R/UPSTREAM"
+  printf 'url=%s\ntag=V1\ncommit=%s\ntree=0000000000000000000000000000000000000000\n' "$URL" "$SHA" >"$R/UPSTREAM"
   git -C "$URL" checkout -q -b yurt
   sed 's/^line5$/line5 yurt/' "$URL/js/a.txt" >"$URL/js/a.tmp"
   mv "$URL/js/a.tmp" "$URL/js/a.txt"
@@ -136,6 +136,112 @@ usage_errors() {
   assert_eq 2 "$RC" "$OUT"
 }
 
+# An excluded path with a non-ASCII name and a space is reset (here: removed,
+# as it is absent at the tag) like any other; plain git would print it quoted,
+# so it would match neither list.
+excluded_unusual_name_is_reset() {
+  new_root
+  echo yurt >"$URL/other/é b.txt"
+  yurt_commit "add unusual name"
+  queue_from_yurt js
+  run_verify "$YURT"
+  assert_eq 0 "$RC" "$OUT"
+  case $OUT in *PASS*) ;; *) echo "no PASS: $OUT"; return 1 ;; esac
+}
+
+# hostile_root: new_root with a passing queue and a CRLF corpus file that the
+# yurt commit carries too, so config that rewrites line endings or ignores
+# files would change the queue tree.
+hostile_root() {
+  new_root
+  printf 'crlf\r\n' >"$R/data/ics/crlf.txt"
+  printf 'crlf\r\n' >"$URL/js/ics/crlf.txt"
+  yurt_commit "crlf corpus"
+  printf '*.txt\n' >"$R.ignore"
+  queue_from_yurt js/a.txt
+}
+
+# The verdict does not depend on the caller's git config.
+verify_ignores_user_config() {
+  local how kv failed=
+  hostile_root
+  for how in count home; do
+    for kv in core.autocrlf=input format.suffix=.txt "core.excludesFile=$R.ignore" core.quotePath=true; do
+      RC=0
+      OUT=$(with_git_config "$how" "${kv%%=*}" "${kv#*=}" env PQ_ROOT="$R" "$VERIFY" "$YURT" 2>&1) || RC=$?
+      case $RC:$OUT in 0:*PASS*) ;; *) failed="$failed [$how $kv: rc $RC: $OUT]" ;; esac
+    done
+  done
+  assert_eq "" "$failed" "settings that changed the verdict"
+}
+
+# Exported GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE neither change the verdict nor
+# touch the repository they name.
+verify_ignores_repository_env() {
+  local before
+  hostile_root
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  RC=0
+  OUT=$(with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE" env PQ_ROOT="$R" "$VERIFY" "$YURT" 2>&1) || RC=$?
+  assert_eq 0 "$RC" "$OUT"
+  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
+}
+
+# With a readonly GIT_DIR/GIT_WORK_TREE in the calling shell, verify-migration
+# stops before running git.
+verify_refuses_readonly_repository_env() {
+  local before rc=0
+  hostile_root
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  OUT=$(with_readonly_git_env "$R.decoy" 'PQ_ROOT=$1; s=$2; export PQ_ROOT; set -- "$3"; . "$s"' "$R" "$VERIFY" "$YURT" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || { echo "verify-migration ran: $OUT"; return 1; }
+  case $OUT in *"GIT_DIR"*) ;; *) echo "no reason given: $OUT"; return 1 ;; esac
+  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
+}
+
+# Sourced into a shell with a strict-mode IFS, a comma or an empty IFS, and with
+# GIT_DIR exported, verify-migration still passes.
+verify_sourced_under_caller_ifs() {
+  local ifs before n=0
+  hostile_root
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  for ifs in $'\n\t' ',' ''; do
+    n=$((n + 1))
+    RC=0
+    OUT=$(with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE" \
+      bash -c 'IFS=$1; PQ_ROOT=$2; export PQ_ROOT; s=$3; set -- "$4"; . "$s"' _ "$ifs" "$R" "$VERIFY" "$YURT" 2>&1) || RC=$?
+    assert_eq 0 "$RC" "IFS case $n: $OUT"
+    assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched (IFS case $n)"
+  done
+}
+
+# A git step that fails, or a list that cannot be read, fails the run; it is
+# never counted as a difference or a leftover and never reported as a pass.
+verify_fails_closed() {
+  local c failed=
+  hostile_root
+  for c in "--git-path 1" "diff 1" "ls-tree 1" "update-index 1" "write-tree 1" "write-tree 2" "read-tree 1"; do
+    rm -rf "$R.shim"
+    # shellcheck disable=SC2086
+    set -- $c
+    make_failing_shim "$R.shim" git "$1" "$2"
+    RC=0
+    OUT=$(PATH="$R.shim:$PATH" PQ_ROOT=$R "$VERIFY" "$YURT" 2>&1) || RC=$?
+    case $RC:$OUT in 0:* | *PASS*) failed="$failed [$c: rc $RC: $OUT]" ;; esac
+    case $OUT in *"shim: git fails"*) ;; *) failed="$failed [$c: shim not reached: $OUT]" ;; esac
+  done
+  assert_eq "" "$failed" "git failures not propagated"
+  mkdir "$BASE/lists-noexclude"
+  cp "$PQ_LISTS_DIR/include.txt" "$BASE/lists-noexclude/"
+  RC=0
+  OUT=$(PQ_LISTS_DIR="$BASE/lists-noexclude" PQ_ROOT=$R "$VERIFY" "$YURT" 2>&1) || RC=$?
+  [ "$RC" -ne 0 ] || { echo "passed without exclude.txt: $OUT"; return 1; }
+  case $OUT in *"lists-noexclude/exclude.txt"*) ;; *) echo "unreadable list not named: $OUT"; return 1 ;; esac
+}
+
 run_test empty_queue_fails_listing_included_change empty_queue_fails_listing_included_change
 run_test matching_queue_passes matching_queue_passes
 run_test excluded_deletion_is_reset excluded_deletion_is_reset
@@ -144,4 +250,10 @@ run_test corpus_mismatch_fails corpus_mismatch_fails
 run_test leftover_fails_even_with_equal_trees leftover_fails_even_with_equal_trees
 run_test dom_count_is_enforced dom_count_is_enforced
 run_test usage_errors usage_errors
+run_test excluded_unusual_name_is_reset excluded_unusual_name_is_reset
+run_test verify_ignores_user_config verify_ignores_user_config
+run_test verify_ignores_repository_env verify_ignores_repository_env
+run_test verify_refuses_readonly_repository_env verify_refuses_readonly_repository_env
+run_test verify_sourced_under_caller_ifs verify_sourced_under_caller_ifs
+run_test verify_fails_closed verify_fails_closed
 finish
