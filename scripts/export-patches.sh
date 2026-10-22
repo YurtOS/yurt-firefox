@@ -49,7 +49,7 @@ create_scratch() {
 }
 
 write_patches() {
-  local scratch work touched f commits written
+  local scratch work touched f commits c n rc written want
   scratch=$(cd "$1" 2>/dev/null && pwd -P) || { echo "export-patches: no such scratch: $1" >&2; return 1; }
   pq_git -C "$scratch" rev-parse --git-dir >/dev/null 2>&1 ||
     { echo "export-patches: $scratch is not a git checkout" >&2; return 1; }
@@ -64,6 +64,24 @@ write_patches() {
     return 1
   fi
 
+  # format-patch drops merge commits and writes an empty commit as a patch that
+  # does not apply, so neither can be exported.
+  commits=$(pq_git -C "$scratch" rev-list "$PQ_COMMIT..HEAD") || return 1
+  n=0
+  for c in $commits; do
+    n=$((n + 1)) rc=0
+    pq_git -C "$scratch" rev-parse -q --verify "$c^2" >/dev/null || rc=$?
+    [ "$rc" -ne 0 ] ||
+      { echo "export-patches: $c is a merge commit; make the scratch history linear" >&2; return 1; }
+    rc=0
+    pq_git -C "$scratch" diff-tree --quiet "$c" || rc=$?
+    case $rc in
+      0) echo "export-patches: $c is an empty commit; drop it from the scratch history" >&2; return 1 ;;
+      1) ;;
+      *) return 1 ;;
+    esac
+  done
+
   work=$(mktemp -d) || return 1
   trap 'rm -rf "$work"' RETURN
   mkdir "$work/patches" || return 1
@@ -72,15 +90,25 @@ write_patches() {
   pq_git -C "$scratch" format-patch -q --binary --no-signature --zero-commit --no-numbered \
     --abbrev=12 --no-stat --no-thread --suffix=.patch --no-cover-letter --no-add-header \
     --no-to --no-cc -o "$work/patches" "$PQ_COMMIT..HEAD" || return 1
-  commits=$(pq_git -C "$scratch" rev-list --count "$PQ_COMMIT..HEAD") || return 1
   written=$(find "$work/patches" -maxdepth 1 -type f -name '*.patch' | wc -l | tr -d ' ')
-  [ "$written" = "$commits" ] ||
-    { echo "export-patches: format-patch wrote $written .patch files for $commits commits" >&2; return 1; }
+  [ "$written" -eq "$n" ] ||
+    { echo "export-patches: format-patch wrote $written .patch files for $n commits" >&2; return 1; }
 
   # Same path as check-queue: fresh clone, apply, corpus, stage, write-tree.
   pq_fetch "$work/tree" || return 1
   pq_apply "$work/tree" "$work/patches" "$ROOT/data/ics" || return 1
   PQ_TREE_NEW=$(pq_tree "$work/tree") || return 1
+
+  # The replayed queue must be exactly the scratch: its HEAD tree plus the
+  # corpus, staged the same way. Anything else lost or added content.
+  pq_git -C "$work/tree" fetch -q "$scratch" HEAD || return 1
+  pq_git -C "$work/tree" read-tree FETCH_HEAD || return 1
+  pq_add_corpus "$work/tree" "$ROOT/data/ics" || return 1
+  want=$(pq_tree "$work/tree") || return 1
+  [ "$PQ_TREE_NEW" = "$want" ] || {
+    echo "export-patches: the replayed patches give tree $PQ_TREE_NEW, which does not match scratch HEAD plus the corpus ($want); nothing written" >&2
+    return 1
+  }
 
   mkdir -p "$ROOT/patches" || return 1
   find "$ROOT/patches" -maxdepth 1 -type f -name '*.patch' -exec rm -f {} + || return 1

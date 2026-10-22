@@ -76,11 +76,10 @@ pq_fetch() {
 # pq_apply can leave <worktree> partially patched and dirty; the caller must
 # discard it (delete the clone) and must not retry on it.
 pq_apply() {
-  local wt patches ics ics_path patch top mine status
+  local wt patches ics patch top mine status
   wt=$(cd "$1" 2>/dev/null && pwd -P) || { echo "pq: no such worktree: $1" >&2; return 1; }
   patches=$(cd "$2" 2>/dev/null && pwd -P) || { echo "pq: no such patches dir: $2" >&2; return 1; }
   ics=$(cd "$3" 2>/dev/null && pwd -P) || { echo "pq: no such corpus dir: $3" >&2; return 1; }
-  ics_path=${PQ_ICS_PATH:-js/src/ics}
 
   top=$(pq_git -C "$wt" rev-parse --show-toplevel 2>/dev/null) && top=$(cd "$top" && pwd -P) ||
     { echo "pq: $wt is not a git worktree" >&2; return 1; }
@@ -100,9 +99,16 @@ pq_apply() {
       { echo "pq: failed to apply $patch" >&2; return 1; }
   done < <(find "$patches" -maxdepth 1 -type f -name '*.patch' | LC_ALL=C sort)
 
-  mkdir -p "$wt/$ics_path" || return 1
-  cp -R "$ics/." "$wt/$ics_path/" || return 1
-  pq_git -C "$wt" add -- "$ics_path" || return 1
+  pq_add_corpus "$wt" "$ics"
+}
+
+# pq_add_corpus <worktree> <data-ics-dir>: lay the corpus over $PQ_ICS_PATH
+# (default js/src/ics) and stage that path only.
+pq_add_corpus() {
+  local ics_path=${PQ_ICS_PATH:-js/src/ics}
+  mkdir -p "$1/$ics_path" || return 1
+  cp -R "$2/." "$1/$ics_path/" || return 1
+  pq_git -C "$1" add -- "$ics_path"
 }
 
 # pq_tree <worktree>: print the tree hash of the index.
