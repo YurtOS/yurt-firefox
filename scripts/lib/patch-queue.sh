@@ -96,7 +96,7 @@ pq_read_pin() {
   for key in commit tree; do
     if [ "$key" = commit ]; then value=$PQ_COMMIT; else value=$PQ_TREE; fi
     case $value in
-      *[!0-9a-f]*) ;;
+      *[!0123456789abcdef]*) ;;
       *) [ "${#value}" -ne 40 ] || continue ;;
     esac
     echo "pq: $key in $file is not 40 lowercase hex digits: $value" >&2
