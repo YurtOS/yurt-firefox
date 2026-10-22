@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Check out this repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Shellcheck
         # Warnings and errors only. The existing library has known SC1007 and
@@ -48,10 +50,12 @@ jobs:
       - name: Fresh fetch, apply the queue, compare the tree hash
         run: scripts/check-queue.sh
 
-      - name: Check out NightMonkey at NIGHTMONKEY_PIN
+      - name: Read NIGHTMONKEY_PIN
         id: pin
         run: |
           pin=$(tr -d '[:space:]' < NIGHTMONKEY_PIN)
+          printf '%s\n' "$pin" | grep -Eq '^[0-9a-f]{40}$' ||
+            { echo "NIGHTMONKEY_PIN must hold one full 40-hex SHA, got '$pin'" >&2; exit 1; }
           echo "sha=$pin" >> "$GITHUB_OUTPUT"
 
       - name: Check out NightMonkey
