@@ -382,6 +382,20 @@ refuses_readonly_repository_env() {
   [ ! -e "$T/ro" ]
 }
 
+# Variables that become readonly after the library loaded cleanly are refused
+# by pq_git on every call: pq_fetch fails and the decoy is untouched.
+refuses_readonly_after_load() {
+  local before out rc=0
+  new_case
+  make_decoy "$T/decoy"
+  before=$(repo_state "$T/decoy")
+  out=$(bash -c '. "$1" && export GIT_DIR="$4/.git" GIT_WORK_TREE="$4" && readonly GIT_DIR GIT_WORK_TREE &&
+    pq_read_pin "$2" && pq_fetch "$3"' _ "$ROOT/scripts/lib/patch-queue.sh" "$T/UPSTREAM.tmp" "$T/late" "$T/decoy" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || { echo "pq_fetch ran: $out"; return 1; }
+  case $out in *"GIT_DIR is readonly"*) ;; *) echo "no reason given: $out"; return 1 ;; esac
+  assert_eq "$before" "$(repo_state "$T/decoy")" "decoy untouched"
+}
+
 # A readonly GIT_CONFIG_GLOBAL naming the user's config cannot be pointed at
 # /dev/null, so loading the library fails and pq_fetch refuses to run.
 refuses_readonly_global_config() {
@@ -507,6 +521,7 @@ run_test guard guard
 run_test ignores_repository_env ignores_repository_env
 run_test guard_holds_under_caller_ifs guard_holds_under_caller_ifs
 run_test refuses_readonly_repository_env refuses_readonly_repository_env
+run_test refuses_readonly_after_load refuses_readonly_after_load
 run_test refuses_readonly_global_config refuses_readonly_global_config
 run_test refuses_old_git refuses_old_git
 run_test tree_ignores_user_config tree_ignores_user_config
