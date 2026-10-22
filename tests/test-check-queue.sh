@@ -182,16 +182,19 @@ refuses_readonly_repository_env() {
 # With git older than 2.32 on PATH, check-queue (both modes) and export-patches
 # stop with a clear message.
 scripts_refuse_old_git() {
-  local args rc
+  local n
   new_root
   write_upstream "$(queue_tree)"
   make_git_shim "$R.old" 2.31.9
-  for args in "$CHECK" "$CHECK --fixtures" "$ROOT/scripts/export-patches.sh $R/scratch"; do
-    rc=0
-    # shellcheck disable=SC2086
-    OUT=$(PATH="$R.old:$PATH" PQ_ROOT=$R bash $args 2>&1) || rc=$?
-    [ "$rc" -ne 0 ] || { echo "ran: $args: $OUT"; return 1; }
-    case $OUT in *"2.31.9"*"2.32"*) ;; *) echo "no reason given ($args): $OUT"; return 1 ;; esac
+  for n in 1 2 3; do
+    RC=0
+    case $n in
+      1) OUT=$(PATH="$R.old:$PATH" PQ_ROOT=$R bash "$CHECK" 2>&1) || RC=$? ;;
+      2) OUT=$(PATH="$R.old:$PATH" PQ_ROOT=$R bash "$CHECK" --fixtures 2>&1) || RC=$? ;;
+      3) OUT=$(PATH="$R.old:$PATH" PQ_ROOT=$R bash "$ROOT/scripts/export-patches.sh" "$R/scratch" 2>&1) || RC=$? ;;
+    esac
+    [ "$RC" -ne 0 ] || { echo "case $n ran: $OUT"; return 1; }
+    case $OUT in *"2.31.9"*"2.32"*) ;; *) echo "case $n: no reason given: $OUT"; return 1 ;; esac
   done
   [ ! -e "$R/scratch" ]
 }
