@@ -88,6 +88,15 @@ with_git_env() {
   )
 }
 
+# with_readonly_git_env <repo> <script> [args...]: run the bash <script> (args in
+# $1...) in a shell where exported GIT_DIR and GIT_WORK_TREE name <repo> and are
+# readonly, so nothing in that shell can unset them.
+with_readonly_git_env() {
+  local repo=$1 script=$2
+  shift 2
+  GIT_DIR="$repo/.git" GIT_WORK_TREE="$repo" bash -c "readonly GIT_DIR GIT_WORK_TREE; $script" _ "$@"
+}
+
 # make_decoy <dir>: a repository that code under test must never touch.
 make_decoy() {
   mkdir -p "$1" || return 1

@@ -334,6 +334,30 @@ ignores_repository_env() {
   done
 }
 
+# A repository-selection variable that cannot be unset (readonly) makes loading
+# the library fail, and pq_git refuse to run even if the caller ignores that.
+refuses_readonly_repository_env() {
+  local before out rc call lib=$ROOT/scripts/lib/patch-queue.sh
+  new_case
+  basic_queue
+  pq_fetch "$T/clean"
+  make_decoy "$T/decoy"
+  before=$(repo_state "$T/decoy")
+  rc=0
+  out=$(with_readonly_git_env "$T/decoy" '. "$1"' "$lib" 2>&1) || rc=$?
+  assert_eq 1 "$rc" "sourcing: $out"
+  case $out in *"GIT_DIR"*) ;; *) echo "no reason given: $out"; return 1 ;; esac
+  for call in 'pq_fetch "$3"' 'pq_apply "$4" "$5" "$6"'; do
+    rc=0
+    out=$(with_readonly_git_env "$T/decoy" '. "$1" 2>/dev/null; pq_read_pin "$2" && '"$call" \
+      "$lib" "$T/UPSTREAM.tmp" "$T/ro" "$T/clean" "$T/patches" "$T/ics" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "$call ran: $out"; return 1; }
+    case $out in *"GIT_DIR"*) ;; *) echo "$call: no reason given: $out"; return 1 ;; esac
+    assert_eq "$before" "$(repo_state "$T/decoy")" "decoy untouched ($call)"
+  done
+  [ ! -e "$T/ro" ]
+}
+
 # User config that would change the applied tree must not: the result equals
 # the clean-config run.
 tree_ignores_user_config() {
@@ -399,6 +423,7 @@ run_test overlap_and_delete overlap_and_delete
 run_test forbidden_flags_absent forbidden_flags_absent
 run_test guard guard
 run_test ignores_repository_env ignores_repository_env
+run_test refuses_readonly_repository_env refuses_readonly_repository_env
 run_test tree_ignores_user_config tree_ignores_user_config
 run_test strict_under_user_config strict_under_user_config
 finish

@@ -408,6 +408,20 @@ export_ignores_repository_env() {
   same_as_clean env
 }
 
+# With a readonly GIT_DIR/GIT_WORK_TREE in the calling shell, export-patches
+# stops before running git, so the repository they name is not touched.
+export_refuses_readonly_repository_env() {
+  local before out rc=0
+  new_root
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  out=$(with_readonly_git_env "$R.decoy" 'PQ_ROOT=$1; s=$2; export PQ_ROOT; set -- "$3"; . "$s"' "$R" "$EXPORT" "$S" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || { echo "export-patches ran: $out"; return 1; }
+  case $out in *"GIT_DIR"*) ;; *) echo "no reason given: $out"; return 1 ;; esac
+  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
+  [ ! -e "$S" ]
+}
+
 # The scratch builds when the committer identity is only in the user's config.
 scratch_builds_without_committer_env() {
   hostile_root
@@ -442,6 +456,7 @@ run_test refuses_replay_that_differs_from_head refuses_replay_that_differs_from_
 run_test export_ignores_user_config export_ignores_user_config
 run_test export_ignores_scratch_config export_ignores_scratch_config
 run_test export_ignores_repository_env export_ignores_repository_env
+run_test export_refuses_readonly_repository_env export_refuses_readonly_repository_env
 run_test scratch_builds_without_committer_env scratch_builds_without_committer_env
 run_test fixtures_run_the_export_suite fixtures_run_the_export_suite
 finish

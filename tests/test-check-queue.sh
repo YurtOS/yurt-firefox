@@ -165,6 +165,20 @@ passes_under_hostile_git() {
   assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
 }
 
+# With a readonly GIT_DIR/GIT_WORK_TREE in the calling shell, check-queue stops
+# before running git, so the repository they name is not touched.
+refuses_readonly_repository_env() {
+  local before rc=0
+  new_root
+  write_upstream "$(queue_tree)"
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  OUT=$(with_readonly_git_env "$R.decoy" 'PQ_ROOT=$1; s=$2; export PQ_ROOT; set --; . "$s"' "$R" "$CHECK" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || { echo "check-queue ran: $OUT"; return 1; }
+  case $OUT in *"GIT_DIR"*) ;; *) echo "no reason given: $OUT"; return 1 ;; esac
+  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
+}
+
 run_test refuses_without_upstream refuses_without_upstream
 run_test refuses_placeholder_upstream refuses_placeholder_upstream
 run_test refuses_example_url refuses_example_url
@@ -175,4 +189,5 @@ run_test runs_census_when_configured runs_census_when_configured
 run_test census_skipped_is_announced census_skipped_is_announced
 run_test passes_census_when_clean passes_census_when_clean
 run_test passes_under_hostile_git passes_under_hostile_git
+run_test refuses_readonly_repository_env refuses_readonly_repository_env
 finish
