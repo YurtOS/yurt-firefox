@@ -89,7 +89,6 @@ t_queue() {
   body "$f" | grep -q 'steps.pin.outputs.sha' || { echo "drift checkout does not use the pin" >&2; return 1; }
   body "$f" | grep -q 'rhysd/actionlint/releases/download' || { echo "queue.yml does not install actionlint" >&2; return 1; }
   body "$f" | grep -q 'sha256sum -c' || { echo "queue.yml does not verify actionlint" >&2; return 1; }
-  body "$f" | grep -q 'CI=true\|CI: true' || true
 }
 
 run_test "workflows exist" t_exist
