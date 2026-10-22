@@ -15,6 +15,8 @@ BUILD="$ROOT/scripts/build-engine.sh"
 DRIFT="$ROOT/scripts/check-mozconfig-drift.sh"
 export PQ_ICS_PATH=js/ics
 
+sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
+
 BASE=$(mktemp -d)
 trap 'rm -rf "$BASE"' EXIT
 
@@ -69,7 +71,7 @@ dry_run_creates_tree_and_manifest() {
   assert_eq 0 "$RC" "$OUT"
   [ -f "$BASE/wd1/firefox/js/ics/one.txt" ]
   [ -f "$BASE/wd1/firefox/js/a.txt" ]
-  python3 - "$BASE/wd1/build-manifest.json" "$SHA" "$(shasum -a 256 "$R/mozconfig" | cut -d' ' -f1)" <<'PY'
+  python3 - "$BASE/wd1/build-manifest.json" "$SHA" "$(sha256 <"$R/mozconfig" | cut -d' ' -f1)" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
 for k in ("tag", "commit", "queue_sha256", "data_ics_sha256", "mozconfig_sha256",
@@ -121,13 +123,44 @@ queue_hash_tracks_patch_set() {
 }
 
 drift_rejects_short_or_malformed_pin() {
+  local head bad
   new_nm
-  printf 'abc123\n' >"$R/NIGHTMONKEY_PIN"
-  run_drift
-  [ "$RC" -ne 0 ]
-  printf '%sZ\n' "$(git -C "$NM" rev-parse HEAD | cut -c1-39)" >"$R/NIGHTMONKEY_PIN"
-  run_drift
-  [ "$RC" -ne 0 ]
+  head=$(git -C "$NM" rev-parse HEAD)
+  for bad in abc123 "$(printf '%s' "$head" | cut -c1-39)Z" "$(printf '%s' "$head" | tr a-f A-F)"; do
+    printf '%s\n' "$bad" >"$R/NIGHTMONKEY_PIN"
+    run_drift
+    [ "$RC" -ne 0 ] || { echo "accepted pin $bad"; return 1; }
+    case $OUT in *"40-hex"*) ;; *) echo "wrong reason for pin $bad: $OUT"; return 1 ;; esac
+  done
+}
+
+# hash_of <manifest> <key>: one value from a manifest.
+hash_of() {
+  python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"
+}
+
+# Changing the content of an existing patch or corpus file, not only adding a
+# file, changes the queue or corpus hash.
+hashes_track_content_edits() {
+  local q1 i1
+  new_root
+  printf 'diff --git a/other/b.txt b/other/b.txt\n--- a/other/b.txt\n+++ b/other/b.txt\n@@ -1 +1 @@\n-b\n+c\n' >"$R/patches/0001-x.patch"
+  repin
+  run_build --dry-run --workdir "$BASE/wd13/firefox"
+  assert_eq 0 "$RC" "$OUT"
+  q1=$(hash_of "$BASE/wd13/build-manifest.json" queue_sha256)
+  i1=$(hash_of "$BASE/wd13/build-manifest.json" data_ics_sha256)
+  printf 'diff --git a/other/b.txt b/other/b.txt\n--- a/other/b.txt\n+++ b/other/b.txt\n@@ -1 +1 @@\n-b\n+d\n' >"$R/patches/0001-x.patch"
+  repin
+  run_build --dry-run --workdir "$BASE/wd14/firefox"
+  assert_eq 0 "$RC" "$OUT"
+  [ "$q1" != "$(hash_of "$BASE/wd14/build-manifest.json" queue_sha256)" ] || { echo "queue hash ignores patch bytes"; return 1; }
+  assert_eq "$i1" "$(hash_of "$BASE/wd14/build-manifest.json" data_ics_sha256)" "corpus hash unchanged"
+  echo uno >"$R/data/ics/one.txt"
+  repin
+  run_build --dry-run --workdir "$BASE/wd15/firefox"
+  assert_eq 0 "$RC" "$OUT"
+  [ "$i1" != "$(hash_of "$BASE/wd15/build-manifest.json" data_ics_sha256)" ] || { echo "corpus hash ignores file bytes"; return 1; }
 }
 
 refuses_non_empty_workdir() {
@@ -287,6 +320,7 @@ run_test dry_run_creates_tree_and_manifest dry_run_creates_tree_and_manifest
 run_test dry_run_does_not_bootstrap dry_run_does_not_bootstrap
 run_test hashes_track_inputs hashes_track_inputs
 run_test queue_hash_tracks_patch_set queue_hash_tracks_patch_set
+run_test hashes_track_content_edits hashes_track_content_edits
 run_test refuses_non_empty_workdir refuses_non_empty_workdir
 run_test defaults_workdir_to_workspace defaults_workdir_to_workspace
 run_test mozconfig_matches_pin_in_repo mozconfig_matches_pin_in_repo
