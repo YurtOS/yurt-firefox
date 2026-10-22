@@ -43,9 +43,11 @@ create_scratch() {
   echo "export-patches: scratch checkout ready at $scratch"
 }
 
-# Pass the tool config that would change the patch text or its prefixes.
+# Patch bytes must not depend on the user's or the system's git config
+# (subject prefix, context, diff algorithm, prefixes, sign-off ...).
 fp() {
-  git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c format.signOff=false "$@"
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c format.signOff=false "$@"
 }
 
 write_patches() {
