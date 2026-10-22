@@ -163,16 +163,19 @@ pq_classify() {
 # 19) changed paths are under dom/.
 pq_leftover() {
   local tag=$1 yurt=$2 expected_dom=${3:-19} path leftover= dom=0 rc=0 files
-  files=$(pq_git -C "${PQ_DIFF_REPO:-.}" diff --name-only --no-renames "$tag" "$yurt") ||
-    { echo "pq: cannot diff $tag $yurt" >&2; return 1; }
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
+  # NUL-separated, so that git does not quote unusual paths; a shell variable
+  # cannot hold NULs, hence the file.
+  files=$(mktemp) || return 1
+  pq_git -C "${PQ_DIFF_REPO:-.}" diff --name-only -z --no-renames "$tag" "$yurt" >"$files" ||
+    { rm -f "$files"; echo "pq: cannot diff $tag $yurt" >&2; return 1; }
+  while IFS= read -r -d '' path; do
     case $path in dom/*) dom=$((dom + 1)) ;; esac
     pq_classify "$path" >/dev/null 2>&1 || {
-      [ $? -eq 2 ] || return 1
+      [ $? -eq 2 ] || { rm -f "$files"; return 1; }
       leftover="$leftover$path"$'\n'
     }
-  done <<<"$files"
+  done <"$files"
+  rm -f "$files"
   if [ -n "$leftover" ]; then
     printf '%s' "$leftover"
     echo "pq: paths in $tag..$yurt are in neither include.txt nor exclude.txt" >&2
