@@ -32,18 +32,17 @@ defaults:
   run:
     shell: bash
 
-env:
-  WASMTIME_VERSION: v50.0.0
-  WASMTIME_SHA256: 77c19ee0437991f9ac7837b9c269d9c7076744f85dad263fea5214cc2723c7ff
-
 jobs:
   jit-test:
-    # Pull requests run the gate only when labeled `gate`.
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'gate')
+    # Pull requests run the gate only when labeled `gate`. Adding some other
+    # label to a gated PR does not start a run (which, by cancel-in-progress,
+    # would cancel the one in flight).
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'gate') && (github.event.action != 'labeled' || github.event.label.name == 'gate'))
     runs-on: ubuntu-24.04
-    # Engine build (~8 min with warm toolchains) + NightMonkey build + one
-    # 125 minute jit-test lane. One job per lane keeps each runner's disk and
-    # time budget independent.
+    # Engine build (~8 min) + NightMonkey build (~9 min) + one jit-test lane.
+    # ci-suite.sh caps a lane at 60 min (timeout 3600s); the step's 125 min is
+    # a backstop. One job per lane keeps each runner's disk and time budget
+    # independent.
     timeout-minutes: 200
     strategy:
       fail-fast: false
@@ -57,6 +56,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # The logs dir is the uploaded artifact. Create it, with the pin, before
+      # anything can fail, so an early failure is not masked by "no files found".
+      - name: Prepare logs
+        run: |
+          mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
+          cp NIGHTMONKEY_PIN "$RUNNER_TEMP/nightmonkey-logs/NIGHTMONKEY_PIN"
+          echo "NightMonkey pin: $(tr -d '[:space:]' < NIGHTMONKEY_PIN)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
@@ -66,15 +73,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pip python3-venv build-essential cmake
-
-      - name: Install pinned wasmtime
-        run: |
-          url="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
-          curl --retry 3 -fsSL -o "$RUNNER_TEMP/wasmtime.tar.xz" "$url"
-          echo "${WASMTIME_SHA256}  $RUNNER_TEMP/wasmtime.tar.xz" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/wasmtime"
-          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP/wasmtime" --strip-components=1
-          echo "$RUNNER_TEMP/wasmtime" >> "$GITHUB_PATH"
 
       - name: Read the pins
         id: pin
@@ -96,6 +94,17 @@ jobs:
 
       - name: Build the engine from the queue
         run: scripts/build-engine.sh
+
+      # Tie the logs to what was tested: the engine's manifest (tag, commit,
+      # queue tree, input and toolchain digests) next to the pin.
+      - name: Record provenance
+        run: |
+          cp "$GITHUB_WORKSPACE/build-manifest.json" "$RUNNER_TEMP/nightmonkey-logs/build-manifest.json"
+          {
+            echo '```json'
+            cat "$GITHUB_WORKSPACE/build-manifest.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check out NightMonkey at NIGHTMONKEY_PIN
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -123,6 +132,8 @@ jobs:
         with:
           workspaces: nightmonkey -> build/cargo
           key: gate-ubuntu-24.04
+          # Nightly and dispatch runs on main seed it; gated PRs only read it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build NightMonkey
         working-directory: nightmonkey
