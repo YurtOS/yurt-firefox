@@ -20,7 +20,7 @@ ZERO=0000000000000000000000000000000000000000
 run_fixtures() {
   local t failed=0
   for t in test-fixture.sh test-apply.sh test-export.sh test-classify.sh test-check-queue.sh \
-    test-verify-migration.sh; do
+    test-verify-migration.sh test-build-engine.sh; do
     echo "== $t"
     if [ "$t" = test-check-queue.sh ]; then
       bash "$SELF/tests/$t" --fixtures || failed=1
