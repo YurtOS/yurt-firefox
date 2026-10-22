@@ -18,15 +18,43 @@ export PQ_ICS_PATH=js/ics
 BASE=$(mktemp -d)
 trap 'rm -rf "$BASE"' EXIT
 
-# new_root: a fake repo root R (UPSTREAM, patches/, data/ics, mozconfig, pin).
+# new_root: a fake repo root R (UPSTREAM, patches/, data/ics, mozconfig, pin),
+# its UPSTREAM pinning the applied tree.
 new_root() {
   R=$(mktemp -d "$BASE/root.XXXXXX")
   URL="$R/up"
   SHA=$(make_fixture_upstream "$URL")
   mkdir -p "$R/patches" "$R/data/ics"
   echo one >"$R/data/ics/one.txt"
-  printf 'url=%s\ntag=V1\ncommit=%s\ntree=%s\n' "$URL" "$SHA" "$(git -C "$URL" rev-parse 'V1^{tree}')" >"$R/UPSTREAM"
   cp "$ROOT/mozconfig" "$R/mozconfig"
+  repin
+}
+
+# write_upstream <tree>: pin tag V1 of the fixture with the given tree.
+write_upstream() {
+  printf 'url=%s\ntag=V1\ncommit=%s\ntree=%s\n' "$URL" "$SHA" "$1" >"$R/UPSTREAM"
+}
+
+# applied_tree: the tree of V1 with R's patches and data/ics laid over
+# $PQ_ICS_PATH, computed with plain git (not the library under test).
+applied_tree() {
+  local t p
+  t=$(mktemp -d "$BASE/pin.XXXXXX")
+  git clone -q "$URL" "$t/w" 2>/dev/null || return 1
+  git -C "$t/w" checkout -q V1 2>/dev/null || return 1
+  for p in "$R"/patches/*.patch; do
+    [ ! -e "$p" ] || git -C "$t/w" apply --index "$p" || return 1
+  done
+  mkdir -p "$t/w/$PQ_ICS_PATH" || return 1
+  cp -R "$R/data/ics/." "$t/w/$PQ_ICS_PATH/" || return 1
+  git -C "$t/w" add -- "$PQ_ICS_PATH" || return 1
+  git -C "$t/w" write-tree
+}
+
+# repin: pin UPSTREAM to the current applied tree (after changing R's inputs).
+repin() {
+  TREE=$(applied_tree) || return 1
+  write_upstream "$TREE"
 }
 
 # run_build <args...>: sets OUT and RC.
@@ -71,6 +99,7 @@ hashes_track_inputs() {
   a=$(grep data_ics_sha256 "$BASE/build-manifest.json")
   rm -rf "$BASE/wd3"
   echo two >"$R/data/ics/two.txt"
+  repin
   run_build --dry-run --workdir "$BASE/wd3"
   assert_eq 0 "$RC" "$OUT"
   b=$(grep data_ics_sha256 "$BASE/build-manifest.json")
@@ -84,6 +113,7 @@ queue_hash_tracks_patch_set() {
   rm -rf "$BASE/wd6"
   # A new patch changes the hash.
   printf 'diff --git a/other/b.txt b/other/b.txt\n--- a/other/b.txt\n+++ b/other/b.txt\n@@ -1 +1 @@\n-b\n+c\n' >"$R/patches/0001-x.patch"
+  repin
   run_build --dry-run --workdir "$BASE/wd6"
   assert_eq 0 "$RC" "$OUT"
   b=$(grep queue_sha256 "$BASE/build-manifest.json")
@@ -179,6 +209,53 @@ drift_ignores_repository_env() {
   assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
 }
 
+# The applied tree must be the one UPSTREAM pins; the run fails before writing
+# a manifest otherwise.
+refuses_tree_mismatch() {
+  new_root
+  write_upstream "$(git -C "$URL" rev-parse 'V1^{tree}')"
+  run_build --dry-run --workdir "$BASE/wd7/firefox"
+  [ "$RC" -ne 0 ] || { echo "accepted a wrong tree: $OUT"; return 1; }
+  case $OUT in *"tree"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
+  [ ! -e "$BASE/wd7/build-manifest.json" ]
+}
+
+# Placeholder pins are refused with exit 2 before fetching, as check-queue does.
+refuses_placeholder_upstream() {
+  local zero=0000000000000000000000000000000000000000
+  new_root
+  write_upstream "$zero"
+  run_build --dry-run --workdir "$BASE/wd8"
+  assert_eq 2 "$RC" "$OUT"
+  case $OUT in *"not initialised"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
+  [ ! -e "$BASE/wd8" ]
+  printf 'url=https://example.invalid/firefox.git\ntag=X\ncommit=TODO\ntree=TODO\n' >"$R/UPSTREAM"
+  run_build --dry-run --workdir "$BASE/wd8"
+  assert_eq 2 "$RC" "$OUT"
+  [ ! -e "$BASE/wd8" ]
+}
+
+# The manifest records the applied tree and where the corpus was laid, so builds
+# of different trees never share a manifest.
+manifest_records_tree_and_ics_path() {
+  local a
+  new_root
+  run_build --dry-run --workdir "$BASE/wd9/firefox"
+  assert_eq 0 "$RC" "$OUT"
+  python3 - "$BASE/wd9/build-manifest.json" "$TREE" <<'PY2'
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert m["tree"] == sys.argv[2], m
+assert m["ics_path"] == "js/ics", m
+PY2
+  a=$(cat "$BASE/wd9/build-manifest.json")
+  PQ_ICS_PATH=somewhere/else
+  repin
+  run_build --dry-run --workdir "$BASE/wd10/firefox"
+  assert_eq 0 "$RC" "$OUT"
+  [ "$a" != "$(cat "$BASE/wd10/build-manifest.json")" ]
+}
+
 run_test dry_run_creates_tree_and_manifest dry_run_creates_tree_and_manifest
 run_test dry_run_does_not_bootstrap dry_run_does_not_bootstrap
 run_test hashes_track_inputs hashes_track_inputs
@@ -191,4 +268,7 @@ run_test drift_fails_when_different drift_fails_when_different
 run_test drift_reads_the_pinned_sha_not_head drift_reads_the_pinned_sha_not_head
 run_test drift_rejects_short_or_malformed_pin drift_rejects_short_or_malformed_pin
 run_test drift_ignores_repository_env drift_ignores_repository_env
+run_test refuses_tree_mismatch refuses_tree_mismatch
+run_test refuses_placeholder_upstream refuses_placeholder_upstream
+run_test manifest_records_tree_and_ics_path manifest_records_tree_and_ics_path
 finish
