@@ -386,10 +386,11 @@ guard_holds_under_caller_ifs() {
   done
 }
 
-# PQ_GUARDED_EXTRA: names the guard clears beyond git's own list of
-# repository-local variables.
+# PQ_GUARDED_EXTRA: names the guard clears beyond this git's own list of
+# repository-local variables, including GIT_INTERNAL_SUPER_PREFIX, which git
+# 2.32-2.40 list too.
 PQ_GUARDED_EXTRA="GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR GIT_ATTR_SOURCE
-  GIT_DEFAULT_HASH GIT_DIFF_OPTS GIT_EXTERNAL_DIFF"
+  GIT_DEFAULT_HASH GIT_DIFF_OPTS GIT_EXTERNAL_DIFF GIT_INTERNAL_SUPER_PREFIX"
 
 # Every name in `git rev-parse --local-env-vars`, plus PQ_GUARDED_EXTRA, is
 # exported with a poison value before the library is sourced; a git shim on
