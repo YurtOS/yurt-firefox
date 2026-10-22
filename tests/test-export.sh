@@ -353,7 +353,7 @@ write_with_shim() {
 publish_failure_changes_nothing() {
   local c
   publish_root
-  for c in "cp .patch 1" "cp .patch 2" "mv /patches/ 2" "mv /patches/ 4" "mv /UPSTREAM 1"; do
+  for c in "cp .patch 1" "cp .patch 2" "awk /UPSTREAM 1" "mv /patches/ 2" "mv /patches/ 4" "mv /UPSTREAM 1"; do
     # shellcheck disable=SC2086
     set -- $c
     write_with_shim "$1" "$2" "$3"
@@ -378,6 +378,43 @@ publish_and_restore_failure_keeps_old_patches() {
   case $OUT in *"old patches are in $stage/old"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
   diff -r "$R.saved/patches" "$stage/old"
   diff "$R.saved/UPSTREAM" "$R/UPSTREAM"
+}
+
+# --- a failed scratch build leaves nothing behind ---------------------------
+
+# A scratch build that fails part way would leave a scratch with part of the
+# queue, which --write would then export as the whole queue. It is removed (or,
+# if the directory existed empty, emptied) instead.
+failed_scratch_build_is_removed() {
+  local msg
+  publish_root
+  rm -rf "$S"
+  # The second patch now creates the file the first one created: am fails on it.
+  sed 's#other/w\.txt#other/x.txt#g' "$R/patches/0002-add-w.patch" >"$R/patches/0002-add-w.new"
+  mv "$R/patches/0002-add-w.new" "$R/patches/0002-add-w.patch"
+  msg=$(export_cmd "$S" 2>&1) && { echo "built: $msg"; return 1; }
+  [ ! -e "$S" ] || { echo "partial scratch left: $msg"; return 1; }
+  mkdir "$S"
+  msg=$(export_cmd "$S" 2>&1) && { echo "built: $msg"; return 1; }
+  [ -d "$S" ] && [ -z "$(ls -A "$S")" ] || { echo "existing directory not emptied: $msg"; return 1; }
+  # A directory with content is refused and left alone.
+  rm -rf "$S"
+  mkdir "$S"
+  echo keep >"$S/file"
+  msg=$(export_cmd "$S" 2>&1) && { echo "built: $msg"; return 1; }
+  assert_eq file "$(ls -A "$S")" "non-empty directory untouched"
+}
+
+# If patches/ cannot be listed, the scratch build fails and leaves nothing,
+# instead of building a scratch without the queue.
+scratch_build_fails_when_patches_cannot_be_listed() {
+  local msg
+  publish_root
+  rm -rf "$S"
+  make_failing_shim "$R.shim" find "${R##*/}/patches" 1
+  msg=$(PATH="$R.shim:$PATH" export_cmd "$S" 2>&1) && { echo "built: $msg"; return 1; }
+  case $msg in *"cannot list"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  [ ! -e "$S" ]
 }
 
 # --- hostile environment and config -----------------------------------------
@@ -565,6 +602,8 @@ run_test refuses_empty_commit_clearly refuses_empty_commit_clearly
 run_test refuses_replay_that_differs_from_head refuses_replay_that_differs_from_head
 run_test publish_failure_changes_nothing publish_failure_changes_nothing
 run_test publish_and_restore_failure_keeps_old_patches publish_and_restore_failure_keeps_old_patches
+run_test failed_scratch_build_is_removed failed_scratch_build_is_removed
+run_test scratch_build_fails_when_patches_cannot_be_listed scratch_build_fails_when_patches_cannot_be_listed
 run_test export_ignores_user_config export_ignores_user_config
 run_test export_ignores_scratch_config export_ignores_scratch_config
 run_test export_ignores_user_env export_ignores_user_env

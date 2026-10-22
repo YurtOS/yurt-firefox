@@ -322,6 +322,34 @@ guard() {
   assert_eq "$EXPECTED" "$(pq_tree "$T/good")"
 }
 
+# --- failures are not swallowed ----------------------------------------------
+
+# If the patches directory cannot be listed, pq_apply fails instead of applying
+# no patches.
+apply_fails_when_patches_cannot_be_listed() {
+  local msg
+  new_case
+  basic_queue
+  pq_fetch "$T/w"
+  make_failing_shim "$T/shim" find "${T##*/}/patches" 1
+  msg=$(PATH="$T/shim:$PATH" pq_apply "$T/w" "$T/patches" "$T/ics" 2>&1) && { echo "applied: $msg"; return 1; }
+  case $msg in *"cannot list"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+}
+
+# If the destination cannot be listed, pq_fetch refuses it instead of taking it
+# for empty.
+fetch_fails_when_dest_cannot_be_listed() {
+  local msg
+  new_case
+  mkdir "$T/full"
+  echo keep >"$T/full/file"
+  make_failing_shim "$T/shim" ls "${T##*/}/full" 1
+  msg=$(PATH="$T/shim:$PATH" pq_fetch "$T/full" 2>&1) && { echo "fetched: $msg"; return 1; }
+  case $msg in *"cannot list"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  assert_eq keep "$(cat "$T/full/file")"
+  [ ! -e "$T/full/.git" ]
+}
+
 # --- hostile environment and config -----------------------------------------
 
 # Exported GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE must not redirect the library to
@@ -518,6 +546,8 @@ run_test corpus_in_hash corpus_in_hash
 run_test overlap_and_delete overlap_and_delete
 run_test forbidden_flags_absent forbidden_flags_absent
 run_test guard guard
+run_test apply_fails_when_patches_cannot_be_listed apply_fails_when_patches_cannot_be_listed
+run_test fetch_fails_when_dest_cannot_be_listed fetch_fails_when_dest_cannot_be_listed
 run_test ignores_repository_env ignores_repository_env
 run_test guard_holds_under_caller_ifs guard_holds_under_caller_ifs
 run_test refuses_readonly_repository_env refuses_readonly_repository_env
