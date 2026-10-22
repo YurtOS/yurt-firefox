@@ -78,8 +78,8 @@ guest's JavaScript to Wasm (`--night-inprocess`). The interpreter lane runs the
 same binary without it. The name has nothing to do with SpiderMonkey's AOT IC
 corpus: the mozconfig does not pass `--enable-aot-ics`, so the corpus
 (`data/ics`, laid in as `js/src/ics`) is not read by this build (see
-PROVENANCE.md). The A/B byte-identity above, `data/ics` included, shows it did
-not change the output.
+PROVENANCE.md). A and B carry the same corpus, so their byte-identity does not
+by itself show that the corpus is inert. That rests on the flag being off.
 
 Every total equals the baseline CI run. Full jstests are not part of the
 baseline and were not run. Logs on the box: `~/qual/logs/*.log` and
