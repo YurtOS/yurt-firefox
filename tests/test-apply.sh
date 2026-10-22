@@ -29,7 +29,7 @@ new_case() {
   SHA=$(make_fixture_upstream "$URL")
   mkdir -p "$T/patches" "$T/ics"
   S="$T/scratch"
-  write_pin "$T/UPSTREAM.tmp" "$SHA" unset
+  write_pin "$T/UPSTREAM.tmp" "$SHA" 0000000000000000000000000000000000000000
   pq_read_pin "$T/UPSTREAM.tmp"
   pq_fetch "$S"
 }
@@ -104,10 +104,32 @@ applies_clean_queue_and_tree_matches_pin() {
   assert_eq one "$(cat "$W/js/ics/one.txt")"
 }
 
+pin_is_validated() {
+  local f=$BASE/pin sha=0123456789abcdef0123456789abcdef01234567 bad msg
+  # CRLF line endings are tolerated.
+  printf 'url=https://h.test/r\r\ntag=V1\r\ncommit=%s\r\ntree=%s\r\n' "$sha" "$sha" >"$f"
+  pq_read_pin "$f"
+  assert_eq "https://h.test/r|V1|$sha|$sha" "$PQ_URL|$PQ_TAG|$PQ_COMMIT|$PQ_TREE" "CRLF stripped"
+  # commit and tree are 40 lowercase hex digits.
+  for bad in unset "${sha%?}" "${sha}0" "$(printf '%s' "$sha" | tr a-f A-F)" "${sha%?}g"; do
+    printf 'url=https://h.test/r\ntag=V1\ncommit=%s\ntree=%s\n' "$bad" "$sha" >"$f"
+    msg=$(pq_read_pin "$f" 2>&1) && { echo "accepted commit=$bad"; return 1; }
+    case $msg in *"commit"*) ;; *) echo "wrong reason (commit=$bad): $msg"; return 1 ;; esac
+    printf 'url=https://h.test/r\ntag=V1\ncommit=%s\ntree=%s\n' "$sha" "$bad" >"$f"
+    msg=$(pq_read_pin "$f" 2>&1) && { echo "accepted tree=$bad"; return 1; }
+    case $msg in *"tree"*) ;; *) echo "wrong reason (tree=$bad): $msg"; return 1 ;; esac
+  done
+  # The example placeholder is read as it is; check-queue reports it.
+  pq_read_pin "$ROOT/UPSTREAM.example"
+  printf 'url=https://example.invalid/firefox.git\ntag=X\ncommit=TODO\ntree=TODO\n' >"$f"
+  pq_read_pin "$f"
+  assert_eq "TODO|TODO" "$PQ_COMMIT|$PQ_TREE" "placeholder read"
+}
+
 rejects_moved_tag() {
   local msg
   new_case
-  write_pin "$T/UPSTREAM.tmp" "$SHA" unset
+  write_pin "$T/UPSTREAM.tmp" "$SHA" 0000000000000000000000000000000000000000
   pq_read_pin "$T/UPSTREAM.tmp"
   pq_fetch "$T/ok"
   echo moved >"$URL/moved.txt"
@@ -351,6 +373,7 @@ strict_under_user_config() {
 }
 
 run_test applies_clean_queue_and_tree_matches_pin applies_clean_queue_and_tree_matches_pin
+run_test pin_is_validated pin_is_validated
 run_test rejects_moved_tag rejects_moved_tag
 run_test fetch_accepts_annotated_tag fetch_accepts_annotated_tag
 run_test fetch_refuses_non_empty_dest fetch_refuses_non_empty_dest

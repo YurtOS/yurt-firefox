@@ -34,7 +34,7 @@ new_root() {
   SHA=$(make_fixture_upstream "$URL")
   mkdir -p "$R/patches" "$R/data/ics"
   echo one >"$R/data/ics/one.txt"
-  printf 'url=%s\ntag=V1\ncommit=%s\ntree=unset\n' "$URL" "$SHA" >"$R/UPSTREAM"
+  printf 'url=%s\ntag=V1\ncommit=%s\ntree=0000000000000000000000000000000000000000\n' "$URL" "$SHA" >"$R/UPSTREAM"
   S="$R/scratch"
 }
 
@@ -138,7 +138,7 @@ refuses_commit_touching_ics() {
   msg=$(export_cmd --write "$S" 2>&1) && return 1
   case $msg in *"js/ics"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
   assert_eq 0 "$(ls "$R"/patches | wc -l | tr -d ' ')" "no patches written"
-  grep -q '^tree=unset$' "$R/UPSTREAM"
+  grep -q '^tree=0000000000000000000000000000000000000000$' "$R/UPSTREAM"
 }
 
 am_tree_equals_apply_tree() {
