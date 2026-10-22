@@ -222,6 +222,26 @@ patch_bytes_ignore_user_and_system_config() {
   diff -r "$BASE/hermetic" "$R/patches"
 }
 
+# A missing patches/ directory is an error in both modes (an empty one is a
+# valid empty queue).
+missing_patches_dir_is_an_error() {
+  local msg
+  new_root
+  rmdir "$R/patches"
+  msg=$(export_cmd "$S" 2>&1) && { echo "create succeeded: $msg"; return 1; }
+  case $msg in *"no patches directory"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  [ ! -e "$S/.git" ] || { echo "scratch built without a queue"; return 1; }
+  mkdir "$R/patches"
+  export_cmd "$S"
+  echo x >"$S/other/x.txt"
+  scratch_commit "add x"
+  rmdir "$R/patches"
+  msg=$(export_cmd --write "$S" 2>&1) && { echo "write succeeded: $msg"; return 1; }
+  case $msg in *"no patches directory"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  [ ! -e "$R/patches" ] || { echo "patches directory recreated"; return 1; }
+  grep -q '^tree=unset$' "$R/UPSTREAM"
+}
+
 fixtures_run_the_export_suite() {
   grep -q 'test-export\.sh' "$ROOT/scripts/check-queue.sh"
 }
@@ -234,5 +254,6 @@ run_test binary_hunk_survives binary_hunk_survives
 run_test re_export_is_byte_identical re_export_is_byte_identical
 run_test no_commits_clears_stale_patches no_commits_clears_stale_patches
 run_test patch_bytes_ignore_user_and_system_config patch_bytes_ignore_user_and_system_config
+run_test missing_patches_dir_is_an_error missing_patches_dir_is_an_error
 run_test fixtures_run_the_export_suite fixtures_run_the_export_suite
 finish
