@@ -71,3 +71,10 @@ baseline and were not run. Logs on the box: `~/qual/logs/*.log` and
 - A first same-path attempt ran out of disk (38 GB volume, each objdir tree is
   about 5.5 GB); the partial tree and stale builds were deleted and B was
   rebuilt into a fresh directory. The results above come from complete runs only.
+- B was built with `build-engine.sh` as of `bcb94b8`. Later changes to it (PR #4
+  review: the applied tree must equal UPSTREAM's `tree=`, the manifest is written
+  by python3 and also records `tree` and `ics_path`, the caller's git environment
+  is cleaned for mach, hermetic `pq_git` in the library) do not touch the build
+  inputs: `UPSTREAM`, `patches/`, `data/ics`, `mozconfig` and `NIGHTMONKEY_PIN`
+  are unchanged since `bcb94b8`, and the current `dir_hash` gives the same queue
+  sha256 (`457bec9a...2ed49`). B has not been rebuilt with the current script.
