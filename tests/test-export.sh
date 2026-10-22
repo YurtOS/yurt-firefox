@@ -227,7 +227,8 @@ patch_format_is_pinned() {
 }
 
 # Every git command the dev loop runs, logged by a PATH shim: am runs with
-# --no-3way and nothing runs with a fuzzy apply flag.
+# --no-3way, add stages the corpus path only, and nothing runs with a fuzzy
+# apply flag.
 dev_loop_git_flags() {
   local log=$BASE/git.log
   queued_root
@@ -235,15 +236,14 @@ dev_loop_git_flags() {
   printf '#!/bin/sh\nprintf "%%s\\n" " $* " >>"%s"\nexec "%s" "$@"\n' "$log" "$(command -v git)" >"$BASE/shim/git"
   chmod +x "$BASE/shim/git"
   rm -rf "$S"
-  (
-    PATH="$BASE/shim:$PATH"
-    export_cmd "$S" >/dev/null
-    echo y >"$S/other/y.txt"
-    scratch_commit "add y"
-    export_cmd --write "$S" >/dev/null
-  )
+  PATH="$BASE/shim:$PATH" export_cmd "$S" >/dev/null
+  echo y >"$S/other/y.txt"
+  scratch_commit "add y"
+  PATH="$BASE/shim:$PATH" export_cmd --write "$S" >/dev/null
   grep -q ' am ' "$log"
   if grep ' am ' "$log" | grep -v -- ' --no-3way '; then echo "am without --no-3way"; return 1; fi
+  grep -q ' add ' "$log"
+  if grep ' add ' "$log" | grep -v -- ' add -- js/ics $'; then echo "add of more than the corpus path"; return 1; fi
   if grep -E -- ' (--3way|-3|--reject|--ignore-whitespace|--ignore-space-change|--unidiff-zero) ' "$log"; then
     echo "fuzzy apply flag"
     return 1
@@ -450,7 +450,8 @@ export_refuses_readonly_repository_env() {
   [ ! -e "$S" ]
 }
 
-# The scratch builds when the committer identity is only in the user's config.
+# The scratch builds when the committer identity is only in the user's config,
+# which pq_git does not read.
 scratch_builds_without_committer_env() {
   hostile_root
   restore_clean
@@ -460,9 +461,13 @@ scratch_builds_without_committer_env() {
     export HOME
     git config --global user.name Dev
     git config --global user.email dev@example.invalid
+    git config --global user.useConfigOnly true
     export_cmd "$S" >/dev/null
   )
   assert_eq 3 "$(git -C "$S" rev-list --count V1..HEAD)" "queue applied"
+  # The hermetic am cannot see the user's identity, so it uses the script's.
+  assert_eq "export-patches <export-patches@localhost>" \
+    "$(git -C "$S" log --format='%cn <%ce>' V1..HEAD | sort -u)" "committer of the am commits"
 }
 
 fixtures_run_the_export_suite() {
