@@ -109,7 +109,7 @@ applies_clean_queue_and_tree_matches_pin() {
 }
 
 pin_is_validated() {
-  local f=$BASE/pin sha=0123456789abcdef0123456789abcdef01234567 bad msg
+  local f=$BASE/pin sha=0123456789abcdef0123456789abcdef01234567 bad msg loc
   # CRLF line endings are tolerated.
   printf 'url=https://h.test/r\r\ntag=V1\r\ncommit=%s\r\ntree=%s\r\n' "$sha" "$sha" >"$f"
   pq_read_pin "$f"
@@ -122,6 +122,13 @@ pin_is_validated() {
     printf 'url=https://h.test/r\ntag=V1\ncommit=%s\ntree=%s\n' "$sha" "$bad" >"$f"
     msg=$(pq_read_pin "$f" 2>&1) && { echo "accepted tree=$bad"; return 1; }
     case $msg in *"tree"*) ;; *) echo "wrong reason (tree=$bad): $msg"; return 1 ;; esac
+  done
+  # Upper case is rejected whatever the locale: in some locales a glob range
+  # such as a-f collates A-E inside it.
+  for loc in C en_US.UTF-8 C.UTF-8; do
+    printf 'url=https://h.test/r\ntag=V1\ncommit=%s\ntree=%s\n' ABCDEABCDEABCDEABCDEABCDEABCDEABCDEABCDE "$sha" >"$f"
+    msg=$(LC_ALL=$loc; pq_read_pin "$f" 2>&1) && { echo "accepted A-E commit under $loc"; return 1; }
+    case $msg in *"commit"*) ;; *) echo "wrong reason ($loc): $msg"; return 1 ;; esac
   done
   # The example placeholder is read as it is; check-queue reports it.
   pq_read_pin "$ROOT/UPSTREAM.example"
