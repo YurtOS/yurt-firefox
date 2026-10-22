@@ -23,5 +23,5 @@ Step results in that job:
 The scheduled `Full jstests` workflow on `yurt` was failing at the same time
 (runs 39534388550 and 39712757121); it is not part of this baseline.
 
-`dist-files.txt` (the `dist` file list of this build) needs a build and is
-captured in Task 10.
+`dist-files.txt` (the `dist` file list of this build, 2,590 entries) was
+captured in Task 10; see [qualification.md](qualification.md).
