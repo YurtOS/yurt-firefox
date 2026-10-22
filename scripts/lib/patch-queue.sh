@@ -37,9 +37,31 @@ pq_git_env() {
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
 }
 
+# pq_require_git: fail unless git is 2.32 or later. Older git ignores
+# GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM, so pq_git would read the user's config.
+pq_require_git() {
+  local v major minor
+  v=$( (pq_git_env && exec git --version) ) || { echo "pq: cannot run git --version" >&2; return 1; }
+  v=${v#git version }
+  major=${v%%.*} minor=${v#*.}
+  minor=${minor%%[!0123456789]*}
+  case $major:$minor in
+    *[!0123456789:]* | :* | *:) echo "pq: cannot parse the git version: $v" >&2; return 1 ;;
+  esac
+  [ "$major" -gt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -ge 32 ]; } ||
+    { echo "pq: git $v is too old; 2.32 or later is needed (GIT_CONFIG_GLOBAL)" >&2; return 1; }
+}
+
+# pq_git_ready: fail, saying why, unless pq_git can run hermetically here.
+pq_git_ready() {
+  (pq_git_env) || return 1
+  [ "${PQ_GIT_CHECKED:-}" = 1 ] || pq_require_git
+}
+
 # pq_git <git args...>: git with no inherited repository selection or config.
 pq_git() (
   pq_git_env || exit 1
+  [ "${PQ_GIT_CHECKED:-}" = 1 ] || pq_require_git || exit 1
   exec git -c core.autocrlf=false -c core.safecrlf=false -c core.quotePath=false \
     -c core.excludesFile=/dev/null -c core.attributesFile=/dev/null \
     -c apply.whitespace=nowarn -c apply.ignoreWhitespace=no \
@@ -108,7 +130,7 @@ pq_fetch() {
 pq_apply() {
   local wt patches ics patch top mine status
   # The probes below discard git's stderr; say first why git cannot run.
-  (pq_git_env) || return 1
+  pq_git_ready || return 1
   wt=$(cd "$1" 2>/dev/null && pwd -P) || { echo "pq: no such worktree: $1" >&2; return 1; }
   patches=$(cd "$2" 2>/dev/null && pwd -P) || { echo "pq: no such patches dir: $2" >&2; return 1; }
   ics=$(cd "$3" 2>/dev/null && pwd -P) || { echo "pq: no such corpus dir: $3" >&2; return 1; }
@@ -205,5 +227,8 @@ pq_leftover() {
   return $rc
 }
 
-# Refuse to load where pq_git cannot run hermetically.
-(pq_git_env) || return 1
+# Refuse to load where pq_git cannot run hermetically; once git is known to be
+# new enough, pq_git skips the version check.
+PQ_GIT_CHECKED=
+pq_git_ready || return 1
+PQ_GIT_CHECKED=1
