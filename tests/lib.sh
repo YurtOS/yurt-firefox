@@ -127,6 +127,29 @@ make_git_shim() {
   chmod +x "$1/git"
 }
 
+# make_failing_shim <dir> <command> <pattern> <nth> [once|from]: a <command> in
+# <dir> that counts its calls whose arguments contain <pattern> and fails (exit
+# 1, no output) on the <nth> of them ("once", the default) or on every one from
+# the <nth> on ("from"); all other calls run the real command.
+make_failing_shim() {
+  local dir=$1 cmd=$2 pattern=$3 nth=$4 mode=${5:-once} test
+  case $mode in
+    once) test='-eq' ;;
+    from) test='-ge' ;;
+    *) echo "make_failing_shim: unknown mode $mode" >&2; return 1 ;;
+  esac
+  mkdir -p "$dir" || return 1
+  printf '#!/bin/sh
+case " $* " in *"%s"*)
+  n=$(cat "%s" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"%s"
+  if [ "$n" %s %s ]; then echo "shim: %s fails" >&2; exit 1; fi ;;
+esac
+exec "%s" "$@"
+' \
+    "$pattern" "$dir/$cmd.count" "$dir/$cmd.count" "$test" "$nth" "$cmd" "$(command -v "$cmd")" >"$dir/$cmd" || return 1
+  chmod +x "$dir/$cmd"
+}
+
 # make_decoy <dir>: a repository that code under test must never touch.
 make_decoy() {
   mkdir -p "$1" || return 1

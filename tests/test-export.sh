@@ -319,6 +319,67 @@ EOF
   queue_unchanged
 }
 
+# --- publishing is all or nothing ------------------------------------------
+
+# publish_root: new_root with a two-patch queue exported and saved in $R.saved,
+# and a third commit in the scratch, so the next --write replaces two patches
+# with three.
+publish_root() {
+  new_root
+  export_cmd "$S" >/dev/null
+  echo x >"$S/other/x.txt"
+  scratch_commit "add x"
+  echo w >"$S/other/w.txt"
+  scratch_commit "add w"
+  export_cmd --write "$S" >/dev/null
+  mkdir "$R.saved"
+  cp -R "$R/patches" "$R/UPSTREAM" "$R.saved/"
+  echo y >"$S/other/y.txt"
+  scratch_commit "add y"
+}
+
+# write_with_shim <command> <pattern> <nth> [once|from]: run --write with that
+# failing shim on PATH; sets OUT and RC.
+write_with_shim() {
+  rm -rf "$R.shim"
+  make_failing_shim "$R.shim" "$@"
+  RC=0
+  OUT=$(PATH="$R.shim:$PATH" export_cmd --write "$S" 2>&1) || RC=$?
+}
+
+# A failure while staging the new queue (cp) or while swapping it in (mv, in
+# each phase) exits non-zero, leaves patches/ and UPSTREAM as they were and
+# leaves no staging directory behind.
+publish_failure_changes_nothing() {
+  local c
+  publish_root
+  for c in "cp .patch 1" "cp .patch 2" "mv /patches/ 2" "mv /patches/ 4" "mv /UPSTREAM 1"; do
+    # shellcheck disable=SC2086
+    set -- $c
+    write_with_shim "$1" "$2" "$3"
+    [ "$RC" -ne 0 ] || { echo "[$c] export succeeded: $OUT"; return 1; }
+    queue_unchanged || { echo "[$c] $OUT"; return 1; }
+    if find "$R" -maxdepth 1 -name '.export-stage.*' | grep -q .; then echo "[$c] staging left"; return 1; fi
+  done
+  # The same --write succeeds without a shim, so the failures were the shims'.
+  export_cmd --write "$S" >/dev/null
+  assert_eq 3 "$(find "$R/patches" -name '*.patch' | wc -l | tr -d ' ')" "three patches"
+}
+
+# If the old patches cannot be moved back either, the export says where they
+# are and keeps them there; UPSTREAM is unchanged.
+publish_and_restore_failure_keeps_old_patches() {
+  local stage
+  publish_root
+  write_with_shim mv /patches/ 4 from
+  [ "$RC" -ne 0 ] || { echo "export succeeded: $OUT"; return 1; }
+  stage=$(find "$R" -maxdepth 1 -name '.export-stage.*')
+  [ -n "$stage" ] || { echo "no staging directory kept: $OUT"; return 1; }
+  case $OUT in *"old patches are in $stage/old"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
+  diff -r "$R.saved/patches" "$stage/old"
+  diff "$R.saved/UPSTREAM" "$R/UPSTREAM"
+}
+
 # --- hostile environment and config -----------------------------------------
 
 # hostile_root: new_root with a CRLF corpus file and an exported queue of two
@@ -502,6 +563,8 @@ run_test dev_loop_git_flags dev_loop_git_flags
 run_test refuses_merge_commit refuses_merge_commit
 run_test refuses_empty_commit_clearly refuses_empty_commit_clearly
 run_test refuses_replay_that_differs_from_head refuses_replay_that_differs_from_head
+run_test publish_failure_changes_nothing publish_failure_changes_nothing
+run_test publish_and_restore_failure_keeps_old_patches publish_and_restore_failure_keeps_old_patches
 run_test export_ignores_user_config export_ignores_user_config
 run_test export_ignores_scratch_config export_ignores_scratch_config
 run_test export_ignores_user_env export_ignores_user_env
