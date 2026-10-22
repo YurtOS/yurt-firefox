@@ -86,10 +86,12 @@ write_patches() {
   trap 'rm -rf "$work"' RETURN
   mkdir "$work/patches" || return 1
   # One .patch file per commit, nothing in it but the commit: no cover letter,
-  # extra headers, threading, diffstat or signature, whatever the scratch config.
+  # extra headers, threading, diffstat or signature, and the default context,
+  # renames, prefixes, subject and encoding, whatever the scratch config.
   pq_git -C "$scratch" format-patch -q --binary --no-signature --zero-commit --no-numbered \
     --abbrev=12 --no-stat --no-thread --suffix=.patch --no-cover-letter --no-add-header \
-    --no-to --no-cc -o "$work/patches" "$PQ_COMMIT..HEAD" || return 1
+    --no-to --no-cc --no-attach -U3 -M --src-prefix=a/ --dst-prefix=b/ --subject-prefix=PATCH \
+    --encoding=UTF-8 -o "$work/patches" "$PQ_COMMIT..HEAD" || return 1
   written=$(find "$work/patches" -maxdepth 1 -type f -name '*.patch' | wc -l | tr -d ' ')
   [ "$written" -eq "$n" ] ||
     { echo "export-patches: format-patch wrote $written .patch files for $n commits" >&2; return 1; }
