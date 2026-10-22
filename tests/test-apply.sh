@@ -267,6 +267,12 @@ guard() {
   msg=$(pq_apply "$T/mine/js" "$T/patches" "$T/ics" 2>&1) && return 1
   case $msg in *"not a repository toplevel"*) ;; *) echo "wrong reason (sub): $msg"; return 1 ;; esac
 
+  # A status that cannot be read is not clean.
+  pq_fetch "$T/corrupt"
+  echo garbage >"$T/corrupt/.git/index"
+  msg=$(pq_apply "$T/corrupt" "$T/patches" "$T/ics" 2>&1) && return 1
+  case $msg in *"cannot read the status"*) ;; *) echo "wrong reason (status): $msg"; return 1 ;; esac
+
   # A clean pq_fetch clone is accepted and gets the queue.
   pq_fetch "$T/good"
   pq_apply "$T/good" "$T/patches" "$T/ics"
