@@ -49,7 +49,7 @@ create_scratch() {
 }
 
 write_patches() {
-  local scratch work touched f commits c n rc written want
+  local scratch work touched commits c n rc written want
   scratch=$(cd "$1" 2>/dev/null && pwd -P) || { echo "export-patches: no such scratch: $1" >&2; return 1; }
   pq_git -C "$scratch" rev-parse --git-dir >/dev/null 2>&1 ||
     { echo "export-patches: $scratch is not a git checkout" >&2; return 1; }
@@ -68,7 +68,9 @@ write_patches() {
   # does not apply, so neither can be exported.
   commits=$(pq_git -C "$scratch" rev-list "$PQ_COMMIT..HEAD") || return 1
   n=0
-  for c in $commits; do
+  # Read line by line: a caller that sources this script may have changed IFS.
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
     n=$((n + 1)) rc=0
     pq_git -C "$scratch" rev-parse -q --verify "$c^2" >/dev/null || rc=$?
     [ "$rc" -ne 0 ] ||
@@ -80,10 +82,10 @@ write_patches() {
       1) ;;
       *) return 1 ;;
     esac
-  done
+  done <<<"$commits"
 
   work=$(mktemp -d) || return 1
-  trap 'rm -rf "$work"' RETURN
+  trap 'rm -rf "$work"; trap - RETURN' RETURN
   mkdir "$work/patches" || return 1
   # One .patch file per commit, nothing in it but the commit: no cover letter,
   # extra headers, threading, diffstat or signature, and the default context,
@@ -114,10 +116,8 @@ write_patches() {
 
   mkdir -p "$ROOT/patches" || return 1
   find "$ROOT/patches" -maxdepth 1 -type f -name '*.patch' -exec rm -f {} + || return 1
-  for f in "$work"/patches/*.patch; do
-    [ -e "$f" ] || continue
-    cp "$f" "$ROOT/patches/" || return 1
-  done
+  # find, not a glob: a caller that sources this script may have set -f.
+  find "$work/patches" -maxdepth 1 -type f -name '*.patch' -exec cp {} "$ROOT/patches/" \; || return 1
   awk -v t="$PQ_TREE_NEW" '/^tree=/ { print "tree=" t; next } { print }' "$ROOT/UPSTREAM" >"$work/UPSTREAM" &&
     cp "$work/UPSTREAM" "$ROOT/UPSTREAM" || return 1
   echo "export-patches: wrote $(find "$ROOT/patches" -maxdepth 1 -name '*.patch' | wc -l | tr -d ' ') patches; tree=$PQ_TREE_NEW"

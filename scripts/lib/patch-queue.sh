@@ -23,23 +23,21 @@
 # git refuses a repository owned by another user ("dubious ownership"), as a CI
 # container checkout can be; the census over PQ_YURT_REPO then fails closed.
 
-# Repository selection, config, and the variables that change attributes, new
-# repositories or diff output, which git would otherwise take from the caller.
-PQ_GIT_UNSET="GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
-  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
-  GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_NO_REPLACE_OBJECTS
-  GIT_REPLACE_REF_BASE GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR
-  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
-  GIT_ATTR_SOURCE GIT_DEFAULT_HASH GIT_DIFF_OPTS GIT_EXTERNAL_DIFF"
-
 # pq_git_env: make this shell's environment hermetic for git, or fail naming the
 # variable that could not be changed (a readonly variable survives `unset`, and
 # git would then act on the repository it names). Run it in a subshell.
+# The names are literal words, so neither the caller's IFS nor set -f can split
+# or drop them: repository selection, config, and the variables that change
+# attributes, new repositories or diff output.
 pq_git_env() {
   local v
-  # shellcheck disable=SC2086
-  unset $PQ_GIT_UNSET 2>/dev/null
-  for v in $PQ_GIT_UNSET; do
+  for v in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX \
+    GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_NO_REPLACE_OBJECTS \
+    GIT_REPLACE_REF_BASE GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR \
+    GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
+    GIT_ATTR_SOURCE GIT_DEFAULT_HASH GIT_DIFF_OPTS GIT_EXTERNAL_DIFF; do
+    unset "$v" 2>/dev/null
     [ -z "${!v+set}" ] || { echo "pq: $v is readonly and cannot be unset; refusing to run git" >&2; return 1; }
   done
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
@@ -232,7 +230,7 @@ pq_leftover() {
     echo "pq: dom/ file count: expected $expected_dom, found $dom" >&2
     rc=1
   fi
-  return $rc
+  return "$rc"
 }
 
 # Refuse to load where pq_git cannot run hermetically; once git is known to be

@@ -44,7 +44,7 @@ run_queue() {
   fi
 
   work=$(mktemp -d) || return 1
-  trap 'rm -rf "$work"' RETURN
+  trap 'rm -rf "$work"; trap - RETURN' RETURN
   pq_fetch "$work/tree" || return 1
   pq_apply "$work/tree" "$ROOT/patches" "$ROOT/data/ics" || return 1
   tree=$(pq_tree "$work/tree") || return 1
