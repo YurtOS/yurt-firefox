@@ -101,6 +101,7 @@ with_readonly_git_env() {
 # variable exported.
 with_env() {
   (
+    # shellcheck disable=SC2163 # $1 is name=value
     export "$1"
     shift
     "$@"

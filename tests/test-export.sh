@@ -384,17 +384,11 @@ export_ignores_user_config() {
 
 # Exported variables that change diff output do not change the export.
 export_ignores_user_env() {
-  local kv failed=
   hostile_root
-  for kv in GIT_DIFF_OPTS=-u5; do
-    restore_clean
-    {
-      with_env "$kv" export_cmd "$S" >/dev/null </dev/null &&
-        with_env "$kv" export_cmd --write "$S" >/dev/null </dev/null &&
-        same_as_clean "$kv" >/dev/null
-    } || failed="$failed [$kv]"
-  done
-  assert_eq "" "$failed" "variables that changed the export"
+  restore_clean
+  with_env GIT_DIFF_OPTS=-u5 export_cmd "$S" >/dev/null
+  with_env GIT_DIFF_OPTS=-u5 export_cmd --write "$S" >/dev/null
+  same_as_clean GIT_DIFF_OPTS=-u5
 }
 
 # scratch_settings: hostile_settings plus keys that change patch bytes only when
