@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,6 +36,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-pip python3-venv build-essential
 
+      - name: Install pinned wasmtime (verified before the build, to fail fast)
+        run: |
+          url="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+          curl --retry 3 -fsSL -o "$RUNNER_TEMP/wasmtime.tar.xz" "$url"
+          echo "${WASMTIME_SHA256}  $RUNNER_TEMP/wasmtime.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/wasmtime"
+          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP/wasmtime" --strip-components=1
+          echo "$RUNNER_TEMP/wasmtime" >> "$GITHUB_PATH"
+
       - name: Read the pinned tag commit
         id: pin
         run: |
@@ -42,14 +52,18 @@ jobs:
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
       # ~/.mozbuild (toolchains, sysroot) is the cache that pays off. The shallow
-      # clone and the objdir are not cached: build-engine.sh always fetches into
-      # a fresh, empty workdir (the objdir lives inside it, and a fresh checkout
-      # invalidates its timestamps). main populates this cache so PRs can read it.
-      - name: Cache ~/.mozbuild
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # clone cache is deferred (controller ruling), and the objdir is not
+      # cached: build-engine.sh always fetches into a fresh, empty workdir (the
+      # objdir lives inside it, and a fresh checkout invalidates its
+      # timestamps). Restore runs on every event; save runs only on main pushes
+      # or manual dispatch (main seeds the cache for PRs), and with always() so
+      # a failed build still keeps the expensive toolchain bootstrap.
+      - name: Restore ~/.mozbuild
+        id: mozbuild
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.mozbuild
-          key: mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-${{ hashFiles('mozconfig', 'scripts/build-engine.sh', 'patches/*.patch') }}
+          key: mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-${{ hashFiles('mozconfig', 'scripts/build-engine.sh', 'scripts/lib/patch-queue.sh', 'patches/*.patch') }}
           restore-keys: |
             mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-
 
@@ -59,14 +73,12 @@ jobs:
           scripts/build-engine.sh
           echo "engine build took $(( ($(date +%s) - start) / 60 )) minutes" | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Install pinned wasmtime
-        run: |
-          url="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
-          curl -fsSL -o "$RUNNER_TEMP/wasmtime.tar.xz" "$url"
-          echo "${WASMTIME_SHA256}  $RUNNER_TEMP/wasmtime.tar.xz" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/wasmtime"
-          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP/wasmtime" --strip-components=1
-          echo "$RUNNER_TEMP/wasmtime" >> "$GITHUB_PATH"
+      - name: Save ~/.mozbuild
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: always() && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main')
+        with:
+          path: ~/.mozbuild
+          key: mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-${{ hashFiles('mozconfig', 'scripts/build-engine.sh', 'scripts/lib/patch-queue.sh', 'patches/*.patch') }}
 
       - name: Smoke
         working-directory: firefox/obj-nightmonkey-sm

@@ -23,9 +23,24 @@ jobs:
 
       - name: Shellcheck
         # Warnings and errors only. The existing library has known SC1007 and
-        # SC1091 findings (and the SC2120 optional-argument helper in the
-        # check-queue test); those are excluded here rather than fixed.
+        # SC1091 findings, and tests/test-check-queue.sh has an SC2120 warning
+        # (run_check is written to take optional arguments that no caller
+        # passes); those are excluded here rather than fixed.
         run: shellcheck -S warning -e SC1007,SC1091,SC2120 scripts/*.sh scripts/lib/*.sh tests/*.sh
+
+      - name: Install actionlint
+        # Pinned and checksum-verified: tests/test-workflows.sh fails, rather
+        # than skips, when CI=true and actionlint is missing.
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          tgz="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --retry 3 -fsSL -o "$tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/actionlint" actionlint
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
 
       - name: Fixture suites
         run: scripts/check-queue.sh --fixtures
