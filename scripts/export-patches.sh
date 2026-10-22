@@ -31,10 +31,15 @@ create_scratch() {
   fi
   pq_read_pin "$ROOT/UPSTREAM" || return 1
   pq_fetch "$scratch" || return 1
+  # pq_git ignores the user's config, so name the committer of the am commits;
+  # format-patch does not export it.
+  export GIT_COMMITTER_NAME=${GIT_COMMITTER_NAME:-export-patches}
+  export GIT_COMMITTER_EMAIL=${GIT_COMMITTER_EMAIL:-export-patches@localhost}
   # Not --3way: a patch that does not apply cleanly is a broken queue. --keep-cr
-  # keeps CRLF files intact in the mailbox round trip.
+  # keeps CRLF files intact in the mailbox round trip, and --whitespace=nowarn
+  # applies lines as they are, like pq_apply.
   while IFS= read -r patch; do
-    git -C "$scratch" am -q --no-3way --keep-cr "$patch" ||
+    pq_git -C "$scratch" am -q --no-3way --whitespace=nowarn --keep-cr "$patch" ||
       { echo "export-patches: failed to apply $patch" >&2; return 1; }
   done < <(find "$ROOT/patches" -maxdepth 1 -type f -name '*.patch' | LC_ALL=C sort)
   mkdir -p "$scratch/.git/info" "$scratch/$ICS_PATH" || return 1
@@ -43,21 +48,16 @@ create_scratch() {
   echo "export-patches: scratch checkout ready at $scratch"
 }
 
-# Pass the tool config that would change the patch text or its prefixes.
-fp() {
-  git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c format.signOff=false "$@"
-}
-
 write_patches() {
-  local scratch work touched f
+  local scratch work touched f commits written
   scratch=$(cd "$1" 2>/dev/null && pwd -P) || { echo "export-patches: no such scratch: $1" >&2; return 1; }
-  git -C "$scratch" rev-parse --git-dir >/dev/null 2>&1 ||
+  pq_git -C "$scratch" rev-parse --git-dir >/dev/null 2>&1 ||
     { echo "export-patches: $scratch is not a git checkout" >&2; return 1; }
   pq_read_pin "$ROOT/UPSTREAM" || return 1
-  git -C "$scratch" merge-base --is-ancestor "$PQ_COMMIT" HEAD ||
+  pq_git -C "$scratch" merge-base --is-ancestor "$PQ_COMMIT" HEAD ||
     { echo "export-patches: $scratch HEAD does not descend from pinned commit $PQ_COMMIT" >&2; return 1; }
 
-  touched=$(git -C "$scratch" log --no-renames --name-only --format= "$PQ_COMMIT..HEAD" -- "$ICS_PATH") || return 1
+  touched=$(pq_git -C "$scratch" log --no-renames --name-only --format= "$PQ_COMMIT..HEAD" -- "$ICS_PATH") || return 1
   if [ -n "$touched" ]; then
     printf '%s\n' "$touched" >&2
     echo "export-patches: commits touch $ICS_PATH; the corpus lives in data/ics" >&2
@@ -67,8 +67,15 @@ write_patches() {
   work=$(mktemp -d) || return 1
   trap 'rm -rf "$work"' RETURN
   mkdir "$work/patches" || return 1
-  fp -C "$scratch" format-patch -q --binary --no-signature --zero-commit --no-numbered \
-    --abbrev=12 -o "$work/patches" "$PQ_COMMIT..HEAD" || return 1
+  # One .patch file per commit, nothing in it but the commit: no cover letter,
+  # extra headers, threading, diffstat or signature, whatever the scratch config.
+  pq_git -C "$scratch" format-patch -q --binary --no-signature --zero-commit --no-numbered \
+    --abbrev=12 --no-stat --no-thread --suffix=.patch --no-cover-letter --no-add-header \
+    --no-to --no-cc -o "$work/patches" "$PQ_COMMIT..HEAD" || return 1
+  commits=$(pq_git -C "$scratch" rev-list --count "$PQ_COMMIT..HEAD") || return 1
+  written=$(find "$work/patches" -maxdepth 1 -type f -name '*.patch' | wc -l | tr -d ' ')
+  [ "$written" = "$commits" ] ||
+    { echo "export-patches: format-patch wrote $written .patch files for $commits commits" >&2; return 1; }
 
   # Same path as check-queue: fresh clone, apply, corpus, stage, write-tree.
   pq_fetch "$work/tree" || return 1

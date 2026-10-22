@@ -5,6 +5,33 @@
 # Functions return non-zero with a "pq:" message on stderr instead of relying on
 # `set -e`, which does not apply inside callers' `if`/`||` contexts. None of them
 # reset, clean or check out a tree the caller supplied.
+#
+# Every git call, here and in the scripts, goes through pq_git. The tree hash and
+# the patch bytes must be the same for every developer and for CI, and plain git
+# lets the caller change both: an exported GIT_DIR, GIT_WORK_TREE or
+# GIT_INDEX_FILE (hooks and dotfile setups export them) makes `git -C <dir>` act
+# on another repository, and user, system or `-c` config (apply.whitespace,
+# apply.ignoreWhitespace, format.suffix, format.thread, core.autocrlf,
+# core.excludesFile, status.showUntrackedFiles, diff.orderFile, ...) changes what
+# apply, am, status, add and format-patch do. pq_git clears the
+# repository-selection environment, ignores user and system config, and sets the
+# keys that matter with -c, which also wins over a repository's own config.
+
+# pq_git <git args...>: git with no inherited repository selection or config.
+pq_git() (
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX \
+    GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_NO_REPLACE_OBJECTS \
+    GIT_REPLACE_REF_BASE GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR \
+    GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
+  exec git -c core.autocrlf=false -c core.safecrlf=false -c core.quotePath=false \
+    -c core.excludesFile=/dev/null -c core.attributesFile=/dev/null \
+    -c apply.whitespace=nowarn -c apply.ignoreWhitespace=no \
+    -c status.showUntrackedFiles=all -c diff.orderFile=/dev/null \
+    -c diff.noprefix=false -c diff.mnemonicPrefix=false \
+    -c format.signOff=false -c format.thread=false -c format.suffix=.patch "$@"
+)
 
 # pq_read_pin <upstream-file>: set PQ_URL PQ_TAG PQ_COMMIT PQ_TREE from key=value lines.
 pq_read_pin() {
@@ -36,10 +63,10 @@ pq_fetch() {
     echo "pq: destination is not empty: $dest" >&2
     return 1
   fi
-  git init -q "$dest" || return 1
-  git -C "$dest" fetch -q --depth 1 "$PQ_URL" tag "$PQ_TAG" || return 1
-  git -C "$dest" checkout -q --detach FETCH_HEAD || return 1
-  head=$(git -C "$dest" rev-parse HEAD) || return 1
+  pq_git init -q "$dest" || return 1
+  pq_git -C "$dest" fetch -q --depth 1 "$PQ_URL" tag "$PQ_TAG" || return 1
+  pq_git -C "$dest" checkout -q --detach FETCH_HEAD || return 1
+  head=$(pq_git -C "$dest" rev-parse HEAD) || return 1
   [ "$head" = "$PQ_COMMIT" ] ||
     { echo "pq: tag $PQ_TAG is $head, pinned commit is $PQ_COMMIT" >&2; return 1; }
 }
@@ -55,31 +82,31 @@ pq_apply() {
   ics=$(cd "$3" 2>/dev/null && pwd -P) || { echo "pq: no such corpus dir: $3" >&2; return 1; }
   ics_path=${PQ_ICS_PATH:-js/src/ics}
 
-  top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) && top=$(cd "$top" && pwd -P) ||
+  top=$(pq_git -C "$wt" rev-parse --show-toplevel 2>/dev/null) && top=$(cd "$top" && pwd -P) ||
     { echo "pq: $wt is not a git worktree" >&2; return 1; }
   [ "$top" = "$wt" ] || { echo "pq: $wt is not a repository toplevel" >&2; return 1; }
-  if mine=$(git rev-parse --show-toplevel 2>/dev/null); then
+  if mine=$(pq_git rev-parse --show-toplevel 2>/dev/null); then
     mine=$(cd "$mine" && pwd -P)
     [ "$mine" != "$wt" ] || { echo "pq: refusing the caller's repository: $wt" >&2; return 1; }
   fi
-  [ "$(git -C "$wt" rev-parse HEAD)" = "$PQ_COMMIT" ] ||
+  [ "$(pq_git -C "$wt" rev-parse HEAD)" = "$PQ_COMMIT" ] ||
     { echo "pq: $wt is not at pinned commit $PQ_COMMIT" >&2; return 1; }
-  [ -z "$(git -C "$wt" status --porcelain)" ] ||
+  [ -z "$(pq_git -C "$wt" status --porcelain --untracked-files=all)" ] ||
     { echo "pq: $wt is not clean" >&2; return 1; }
 
   while IFS= read -r patch; do
-    git -C "$wt" apply --index --whitespace=nowarn "$patch" ||
+    pq_git -C "$wt" apply --index --whitespace=nowarn "$patch" ||
       { echo "pq: failed to apply $patch" >&2; return 1; }
   done < <(find "$patches" -maxdepth 1 -type f -name '*.patch' | LC_ALL=C sort)
 
   mkdir -p "$wt/$ics_path" || return 1
   cp -R "$ics/." "$wt/$ics_path/" || return 1
-  git -C "$wt" add -- "$ics_path" || return 1
+  pq_git -C "$wt" add -- "$ics_path" || return 1
 }
 
 # pq_tree <worktree>: print the tree hash of the index.
 pq_tree() {
-  git -C "$1" write-tree
+  pq_git -C "$1" write-tree
 }
 
 # pq_classify <path>: print "include" or "exclude" for the longest prefix in
@@ -114,7 +141,7 @@ pq_classify() {
 # 19) changed paths are under dom/.
 pq_leftover() {
   local tag=$1 yurt=$2 expected_dom=${3:-19} path leftover= dom=0 rc=0 files
-  files=$(git -C "${PQ_DIFF_REPO:-.}" diff --name-only --no-renames "$tag" "$yurt") ||
+  files=$(pq_git -C "${PQ_DIFF_REPO:-.}" diff --name-only --no-renames "$tag" "$yurt") ||
     { echo "pq: cannot diff $tag $yurt" >&2; return 1; }
   while IFS= read -r path; do
     [ -n "$path" ] || continue
