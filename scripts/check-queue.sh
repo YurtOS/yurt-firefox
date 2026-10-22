@@ -19,7 +19,7 @@ ZERO=0000000000000000000000000000000000000000
 
 run_fixtures() {
   local t failed=0
-  for t in test-fixture.sh test-apply.sh test-classify.sh test-check-queue.sh; do
+  for t in test-fixture.sh test-apply.sh test-export.sh test-classify.sh test-check-queue.sh; do
     echo "== $t"
     if [ "$t" = test-check-queue.sh ]; then
       bash "$SELF/tests/$t" --fixtures || failed=1
@@ -58,6 +58,8 @@ run_queue() {
     PQ_DIFF_REPO=$PQ_YURT_REPO pq_leftover "$PQ_TAG" "${PQ_YURT_REF:-yurt}" "${PQ_DOM_COUNT:-19}" ||
       { echo "check-queue: census failed" >&2; return 1; }
     echo "check-queue: census ok"
+  else
+    echo "check-queue: census skipped (PQ_YURT_REPO unset)"
   fi
 }
 

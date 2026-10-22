@@ -165,10 +165,10 @@ binary_hunk_survives() {
   scratch_commit "change blob"
   export_cmd --write "$S"
   printf '\000\377\000\001\002\003\004' >"$BASE/blob.expected"
-  fresh_apply_tree "$BASE/fresh" >/dev/null
-  cmp "$BASE/blob.expected" "$BASE/fresh/other/blob.bin"
-  assert_eq "$(pin_tree)" "$(fresh_am_tree "$BASE/viaam")"
-  cmp "$BASE/blob.expected" "$BASE/viaam/other/blob.bin"
+  fresh_apply_tree "$BASE/binapply" >/dev/null
+  cmp "$BASE/blob.expected" "$BASE/binapply/other/blob.bin"
+  assert_eq "$(pin_tree)" "$(fresh_am_tree "$BASE/binam")"
+  cmp "$BASE/blob.expected" "$BASE/binam/other/blob.bin"
 }
 
 re_export_is_byte_identical() {
