@@ -16,10 +16,8 @@ sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum 
 [ -f "$ROOT/mozconfig" ] || { echo "drift: no $ROOT/mozconfig" >&2; exit 1; }
 [ -f "$ROOT/NIGHTMONKEY_PIN" ] || { echo "drift: no $ROOT/NIGHTMONKEY_PIN" >&2; exit 1; }
 pin=$(tr -d '[:space:]' <"$ROOT/NIGHTMONKEY_PIN")
-case $pin in
-  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) [ "${#pin}" -eq 40 ] ;;
-  *) false ;;
-esac || { echo "drift: NIGHTMONKEY_PIN must hold one full 40-hex SHA" >&2; exit 1; }
+printf '%s\n' "$pin" | grep -Eq '^[0-9a-f]{40}$' ||
+  { echo "drift: NIGHTMONKEY_PIN must hold one full 40-hex SHA" >&2; exit 1; }
 
 if [ -n "${NM_REPO:-}" ]; then
   theirs=$(git -C "$NM_REPO" show "$pin:$SRC" | sha256 | cut -d' ' -f1) ||

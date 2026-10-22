@@ -14,7 +14,7 @@ ROOT=${PQ_ROOT:-$SELF}
 # shellcheck source=lib/patch-queue.sh
 . "$SELF/scripts/lib/patch-queue.sh"
 
-# Rust per NightMonkey's rust-toolchain.toml.
+# Rust per NightMonkey's rust-toolchain.toml; wasm32-wasip1 and rust-src as in its CI.
 RUST_VERSION=1.98.1
 SYSROOT_ARTIFACT=sysroot-wasm32-wasi
 
@@ -36,6 +36,7 @@ sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum 
 dir_hash() {
   local dir=$1
   shift
+  [ -d "$dir" ] || { echo "build-engine: no such directory: $dir" >&2; return 1; }
   (cd "$dir" && find . "$@" -type f | LC_ALL=C sort | while IFS= read -r f; do
     printf '%s  %s\n' "$(sha256 <"$f" | cut -d' ' -f1)" "${f#./}"
   done) | sha256 | cut -d' ' -f1
@@ -52,38 +53,60 @@ pq_apply "$workdir" "$ROOT/patches" "$ROOT/data/ics"
 workdir=$(cd "$workdir" && pwd -P)
 
 toolchain_json=
+rust_version=
 if [ "$dry" -eq 1 ]; then
   step "toolchain bootstrap skipped (dry run)"
   step "mach build skipped (dry run)"
 else
+  # Mirrors NightMonkey's engine.yml (Install Rust, Bootstrap SpiderMonkey).
+  [ "$(uname -s)" = Linux ] || { echo "build-engine: real builds are Linux only" >&2; exit 1; }
   step "rust $RUST_VERSION"
-  rustup toolchain install "$RUST_VERSION" --profile minimal
-  case $(uname -s) in
-    Darwin) clang=macosx64-clang ;;
-    *) clang=linux64-clang ;;
-  esac
-  step "toolchain bootstrap: $clang $SYSROOT_ARTIFACT"
-  log=$(mktemp)
-  (cd "$workdir" && ./mach artifact toolchain --from-build "$clang" --from-build "$SYSROOT_ARTIFACT") 2>&1 | tee "$log"
-  # The artifact names and the digests of the files mach downloaded into the
-  # state dir (matched by artifact name).
+  rustup toolchain install "$RUST_VERSION" --profile minimal \
+    -c rustfmt -c clippy -c rust-src -t wasm32-wasip1
+  export RUSTUP_TOOLCHAIN=$RUST_VERSION
+  rust_version=$(rustc --version)
+  case $rust_version in "rustc $RUST_VERSION "*) ;; *)
+    echo "build-engine: rustc is '$rust_version', want $RUST_VERSION" >&2; exit 1 ;; esac
+
+  # Host toolchains (clang, sysroot, cbindgen, ...) come from mach bootstrap; it
+  # writes <workdir>/mozconfig, which MOZCONFIG below overrides, so drop it.
+  step "mach bootstrap (js)"
+  (cd "$workdir" && ./mach --no-interactive bootstrap --application-choice=js)
+  rm -f "$workdir/mozconfig"
+  # Bootstrap fetches host-target toolchains only; the wasm32-wasi sysroot is
+  # fetched explicitly. mach unpacks into the cwd, so run it from the state dir.
+  # The artifact manifest records the URL and sha256 of what was fetched; the
+  # clang is the one bootstrap already installed (same cached artifact).
   state=${MOZBUILD_STATE_PATH:-$HOME/.mozbuild}
-  for name in "$clang" "$SYSROOT_ARTIFACT"; do
-    digest=
-    file=$(find "$state" -type f -name "*${name}*" 2>/dev/null | LC_ALL=C sort | head -n 1)
-    [ -z "$file" ] || digest=$(sha256 <"$file" | cut -d' ' -f1)
-    toolchain_json="${toolchain_json:+$toolchain_json, }{\"name\": \"$name\", \"sha256\": \"$digest\"}"
-  done
-  rm -f "$log"
+  step "artifact toolchain: linux64-clang $SYSROOT_ARTIFACT"
+  artifacts=$(mktemp)
+  trap 'rm -f "$artifacts"' EXIT
+  (cd "$state" && "$workdir/mach" --log-no-times artifact toolchain \
+    --from-build linux64-clang --from-build "$SYSROOT_ARTIFACT" --artifact-manifest "$artifacts")
+  toolchain_json=$(python3 - "$artifacts" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+if not m:
+    sys.exit("build-engine: mach recorded no toolchain artifacts")
+out = []
+for url in sorted(m):
+    digest = m[url].get("sha256", "")
+    if len(digest) != 64:
+        sys.exit("build-engine: no sha256 for " + url)
+    out.append(json.dumps({"name": url.rsplit("/", 1)[1], "url": url, "sha256": digest}))
+print(", ".join(out))
+PY
+  ) || exit 1
   step "mach build"
   (cd "$workdir" && MOZCONFIG="$ROOT/mozconfig" ./mach build)
 fi
 
+queue_hash=$(dir_hash "$ROOT/patches" -maxdepth 1 -name '*.patch')
+ics_hash=$(dir_hash "$ROOT/data/ics")
 manifest=$(dirname "$workdir")/build-manifest.json
 printf '{\n  "tag": "%s",\n  "commit": "%s",\n  "queue_sha256": "%s",\n  "data_ics_sha256": "%s",\n  "mozconfig_sha256": "%s",\n  "toolchain_artifacts": [%s],\n  "rust_version": "%s"\n}\n' \
   "$PQ_TAG" "$PQ_COMMIT" \
-  "$(dir_hash "$ROOT/patches" -maxdepth 1 -name '*.patch')" \
-  "$(dir_hash "$ROOT/data/ics")" \
+  "$queue_hash" "$ics_hash" \
   "$(sha256 <"$ROOT/mozconfig" | cut -d' ' -f1)" \
-  "$toolchain_json" "$RUST_VERSION" >"$manifest"
+  "$toolchain_json" "$rust_version" >"$manifest"
 step "wrote $manifest"
