@@ -22,3 +22,13 @@ verify, export and build it. It replaces the `YurtOS/firefox` fork. Only the
 - Never commit `js/src/ics` content to a patch; the corpus lives in `data/ics/`.
 - Firefox builds run on CI or on EC2 launched with
   `/Users/sunny/work/yurtos/bin/ec2slot`, never on the laptop.
+
+## Worktree hygiene
+
+- Work in your own worktree. When you finish a PR (merged or closed) or a
+  review, remove the worktree you created for it (`git worktree remove`).
+  Confirm it is clean and the branch is pushed first, and push unpushed work to
+  a branch rather than losing it.
+- Delete only your own worktrees and build output, never another session's.
+  Build directories run to tens of GB per worktree; ask an owner before pruning
+  theirs.
