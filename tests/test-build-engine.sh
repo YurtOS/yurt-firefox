@@ -163,6 +163,24 @@ hashes_track_content_edits() {
   [ "$i1" != "$(hash_of "$BASE/wd15/build-manifest.json" data_ics_sha256)" ] || { echo "corpus hash ignores file bytes"; return 1; }
 }
 
+# A file whose digest cannot be computed fails the run; it never contributes an
+# empty digest. The sha256sum shim fails on input containing FAILME.
+hash_read_error_fails() {
+  local real
+  new_root
+  echo FAILME >"$R/data/ics/bad.txt"
+  repin
+  if real=$(command -v sha256sum); then :; else real="$(command -v shasum) -a 256"; fi
+  mkdir -p "$R.shim"
+  printf '#!/bin/sh\nt=$(mktemp) || exit 1\ncat >"$t"\nif grep -q FAILME "$t"; then rm -f "$t"; echo "shim: sha256sum fails" >&2; exit 1; fi\n%s <"$t"; rc=$?; rm -f "$t"; exit $rc\n' \
+    "$real" >"$R.shim/sha256sum"
+  chmod +x "$R.shim/sha256sum"
+  RC=0
+  OUT=$(PATH="$R.shim:$PATH" PQ_ROOT=$R "$BUILD" --dry-run --workdir "$BASE/wd16/firefox" 2>&1) || RC=$?
+  [ "$RC" -ne 0 ] || { echo "hashed past a read error: $OUT"; return 1; }
+  [ ! -e "$BASE/wd16/build-manifest.json" ]
+}
+
 refuses_non_empty_workdir() {
   new_root
   mkdir -p "$BASE/wd4/firefox"
@@ -321,6 +339,7 @@ run_test dry_run_does_not_bootstrap dry_run_does_not_bootstrap
 run_test hashes_track_inputs hashes_track_inputs
 run_test queue_hash_tracks_patch_set queue_hash_tracks_patch_set
 run_test hashes_track_content_edits hashes_track_content_edits
+run_test hash_read_error_fails hash_read_error_fails
 run_test refuses_non_empty_workdir refuses_non_empty_workdir
 run_test defaults_workdir_to_workspace defaults_workdir_to_workspace
 run_test mozconfig_matches_pin_in_repo mozconfig_matches_pin_in_repo
