@@ -25,10 +25,17 @@ pq_read_pin() {
     { echo "pq: $file must set url, tag, commit and tree" >&2; return 1; }
 }
 
+# Repository root of this library, for the default lists directory.
+PQ_LIB_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+
 # pq_fetch <dest>: shallow-fetch PQ_TAG into a new repo at <dest>; fail if it
-# is not PQ_COMMIT.
+# is not PQ_COMMIT. <dest> must not exist or must be an empty directory.
 pq_fetch() {
   local dest=$1 head
+  if [ -e "$dest" ] && { [ ! -d "$dest" ] || [ -n "$(ls -A "$dest")" ]; }; then
+    echo "pq: destination is not empty: $dest" >&2
+    return 1
+  fi
   git init -q "$dest" || return 1
   git -C "$dest" fetch -q --depth 1 "$PQ_URL" tag "$PQ_TAG" || return 1
   git -C "$dest" checkout -q --detach FETCH_HEAD || return 1
@@ -38,7 +45,9 @@ pq_fetch() {
 }
 
 # pq_apply <worktree> <patches-dir> <data-ics-dir>: apply the queue, then lay
-# the corpus over $PQ_ICS_PATH (default js/src/ics) and stage it.
+# the corpus over $PQ_ICS_PATH (default js/src/ics) and stage it. A failed
+# pq_apply can leave <worktree> partially patched and dirty; the caller must
+# discard it (delete the clone) and must not retry on it.
 pq_apply() {
   local wt patches ics ics_path patch top mine
   wt=$(cd "$1" 2>/dev/null && pwd -P) || { echo "pq: no such worktree: $1" >&2; return 1; }
@@ -71,4 +80,58 @@ pq_apply() {
 # pq_tree <worktree>: print the tree hash of the index.
 pq_tree() {
   git -C "$1" write-tree
+}
+
+# pq_classify <path>: print "include" or "exclude" for the longest prefix in
+# $PQ_LISTS_DIR (default <root>/lists) include.txt/exclude.txt that matches
+# <path> on whole path components; exit 2 if none does.
+pq_classify() {
+  local path=$1 dir=${PQ_LISTS_DIR:-$PQ_LIB_ROOT/lists} class prefix best= best_len=-1
+  for class in include exclude; do
+    [ -f "$dir/$class.txt" ] || { echo "pq: no $dir/$class.txt" >&2; return 1; }
+    while IFS= read -r prefix || [ -n "$prefix" ]; do
+      case $prefix in '' | '#'*) continue ;; esac
+      prefix=${prefix%/}
+      case $path in
+        "$prefix" | "$prefix"/*)
+          if [ "${#prefix}" -gt "$best_len" ]; then
+            best=$class best_len=${#prefix}
+          fi
+          ;;
+      esac
+    done <"$dir/$class.txt"
+  done
+  if [ -z "$best" ]; then
+    echo "pq: unclassified path: $path" >&2
+    return 2
+  fi
+  echo "$best"
+}
+
+# pq_leftover <tag-ref> <yurt-ref> [dom-count]: print the paths changed between
+# the refs (in $PQ_DIFF_REPO, default the current directory) that are in neither
+# list, and fail if there are any. Also fail unless exactly [dom-count] (default
+# 19) changed paths are under dom/.
+pq_leftover() {
+  local tag=$1 yurt=$2 expected_dom=${3:-19} path leftover= dom=0 rc=0 files
+  files=$(git -C "${PQ_DIFF_REPO:-.}" diff --name-only --no-renames "$tag" "$yurt") ||
+    { echo "pq: cannot diff $tag $yurt" >&2; return 1; }
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case $path in dom/*) dom=$((dom + 1)) ;; esac
+    pq_classify "$path" >/dev/null 2>&1 || {
+      [ $? -eq 2 ] || return 1
+      leftover="$leftover$path"$'\n'
+    }
+  done <<<"$files"
+  if [ -n "$leftover" ]; then
+    printf '%s' "$leftover"
+    echo "pq: paths in $tag..$yurt are in neither include.txt nor exclude.txt" >&2
+    rc=1
+  fi
+  if [ "$dom" -ne "$expected_dom" ]; then
+    echo "pq: dom/ file count: expected $expected_dom, found $dom" >&2
+    rc=1
+  fi
+  return $rc
 }
