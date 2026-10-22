@@ -17,12 +17,14 @@
 # repository-selection environment, ignores user and system config, and sets the
 # keys that matter with -c, which also wins over a repository's own config.
 
-# Repository selection and config that git would otherwise take from the caller.
+# Repository selection, config, and the variables that change attributes, new
+# repositories or diff output, which git would otherwise take from the caller.
 PQ_GIT_UNSET="GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
   GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_NO_REPLACE_OBJECTS
   GIT_REPLACE_REF_BASE GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR
-  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT"
+  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+  GIT_ATTR_SOURCE GIT_DEFAULT_HASH GIT_DIFF_OPTS GIT_EXTERNAL_DIFF"
 
 # pq_git_env: make this shell's environment hermetic for git, or fail naming the
 # variable that could not be changed (a readonly variable survives `unset`, and
