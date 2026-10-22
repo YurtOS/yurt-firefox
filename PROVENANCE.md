@@ -22,6 +22,19 @@ content. `git diff --name-only <tag> <yurt>` has 1,441 paths: 1,396 included
 (1,231 of them the corpus under `js/src/ics`, carried as `data/ics`), 45
 excluded (19 under `dom/`), none in neither list.
 
+## Qualification (Task 10, 2026-10-22)
+
+Full record in [baseline/qualification.md](baseline/qualification.md). The
+`dist` file list of the fork build (A, built with NightMonkey's
+`scripts/build-spidermonkey.sh` at `ffb918ff3c26`) is identical to the queue
+build's (B, `scripts/build-engine.sh`): 2,590 entries, `baseline/dist-files.txt`.
+Built at the same path, `lib/*.a` and `bin/js` are byte-identical (sha256 in
+the record); built at different paths they differ only by embedded paths.
+NightMonkey at `ffb918ff3c26` against B (queue tree as `firefox/`): guest tier
+options all PASS, local 131/0 on both lanes, baseline and MIR-stress tiers
+131/0, jit-tests 12906 passed / 0 failed (aot strict) and 13095 passed / 0
+failed (interpreter), the same totals as the baseline CI run.
+
 ## Excluded paths
 
 As in `lists/exclude.txt`: `dom/` (19 files of webidl/streams browser plumbing,
