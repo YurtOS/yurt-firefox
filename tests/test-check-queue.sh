@@ -4,6 +4,8 @@
 # cases call check-queue.sh only in non-fixture mode.
 set -euo pipefail
 
+unset PQ_YURT_REPO PQ_YURT_REF PQ_DOM_COUNT PQ_LISTS_DIR PQ_DIFF_REPO
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib.sh
 . "$ROOT/tests/lib.sh"
@@ -107,10 +109,33 @@ runs_census_when_configured() {
   case $OUT in *new/thing.c*) ;; *) echo "leftover not reported: $OUT"; return 1 ;; esac
 }
 
+census_skipped_is_announced() {
+  new_root
+  write_upstream "$(queue_tree)"
+  run_check
+  assert_eq 0 "$RC" "$OUT"
+  case $OUT in *"census skipped (PQ_YURT_REPO unset)"*) ;; *) echo "no skip notice: $OUT"; return 1 ;; esac
+}
+
+passes_census_when_clean() {
+  new_root
+  write_upstream "$(queue_tree)"
+  git -C "$URL" checkout -q -b yurt
+  echo y >"$URL/js/y.txt"
+  git -C "$URL" add -A
+  git -C "$URL" commit -q -m included
+  export PQ_YURT_REPO=$URL PQ_YURT_REF=yurt PQ_DOM_COUNT=0
+  run_check
+  assert_eq 0 "$RC" "$OUT"
+  case $OUT in *"census ok"*) ;; *) echo "no census ok: $OUT"; return 1 ;; esac
+}
+
 run_test refuses_without_upstream refuses_without_upstream
 run_test refuses_placeholder_upstream refuses_placeholder_upstream
 run_test passes_when_tree_matches passes_when_tree_matches
 run_test fails_on_tree_mismatch fails_on_tree_mismatch
 run_test fails_on_moved_tag fails_on_moved_tag
 run_test runs_census_when_configured runs_census_when_configured
+run_test census_skipped_is_announced census_skipped_is_announced
+run_test passes_census_when_clean passes_census_when_clean
 finish

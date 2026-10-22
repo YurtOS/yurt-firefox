@@ -2,6 +2,8 @@
 # Tests for pq_classify and pq_leftover in scripts/lib/patch-queue.sh.
 set -euo pipefail
 
+unset PQ_YURT_REPO PQ_YURT_REF PQ_DOM_COUNT PQ_LISTS_DIR PQ_DIFF_REPO
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib.sh
 . "$ROOT/tests/lib.sh"
