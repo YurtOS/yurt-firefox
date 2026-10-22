@@ -335,6 +335,8 @@ hostile_root() {
   scratch_commit "two files, trailing whitespace"
   echo d >"$S/other/d.txt"
   scratch_commit "add d"
+  git -C "$S" mv other/b.txt other/b-renamed.txt
+  scratch_commit "rename b"
   export_cmd --write "$S" >/dev/null
   mkdir "$R.clean"
   cp -R "$R/patches" "$R/UPSTREAM" "$R.clean/"
@@ -395,7 +397,18 @@ export_ignores_user_env() {
   assert_eq "" "$failed" "variables that changed the export"
 }
 
-# Settings in the scratch checkout's own config do not change the export either.
+# scratch_settings: hostile_settings plus keys that change patch bytes only when
+# set in the scratch checkout's own config (the user-config cases cannot reach
+# them). Needs hostile_root.
+scratch_settings() {
+  hostile_settings
+  printf '%s\n' diff.context=5 diff.renames=false \
+    format.attach=true format.subjectPrefix=HOSTILE diff.srcPrefix=x/ diff.dstPrefix=y/ \
+    i18n.logOutputEncoding=UTF-16
+}
+
+# The scratch_settings keys, set in the scratch checkout's own config, do not
+# change the export. Keys not listed there are not covered.
 export_ignores_scratch_config() {
   local kv failed=
   hostile_root
@@ -406,7 +419,7 @@ export_ignores_scratch_config() {
     { export_cmd --write "$S" >/dev/null </dev/null && same_as_clean "scratch $kv" >/dev/null; } ||
       failed="$failed [$kv]"
     git -C "$S" config --unset "${kv%%=*}"
-  done < <(hostile_settings)
+  done < <(scratch_settings)
   assert_eq "" "$failed" "scratch settings that changed the export"
 }
 
@@ -449,7 +462,7 @@ scratch_builds_without_committer_env() {
     git config --global user.email dev@example.invalid
     export_cmd "$S" >/dev/null
   )
-  assert_eq 2 "$(git -C "$S" rev-list --count V1..HEAD)" "queue applied"
+  assert_eq 3 "$(git -C "$S" rev-list --count V1..HEAD)" "queue applied"
 }
 
 fixtures_run_the_export_suite() {
