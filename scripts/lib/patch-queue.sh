@@ -33,12 +33,17 @@ pq_git() (
     -c format.signOff=false -c format.thread=false -c format.suffix=.patch "$@"
 )
 
-# pq_read_pin <upstream-file>: set PQ_URL PQ_TAG PQ_COMMIT PQ_TREE from key=value lines.
+# pq_read_pin <upstream-file>: set PQ_URL PQ_TAG PQ_COMMIT PQ_TREE from key=value
+# lines (CR line endings tolerated). commit and tree must be 40 lowercase hex
+# digits, except in the example.invalid placeholder, which check-queue reports.
 pq_read_pin() {
-  local file=$1 key value
+  local file=$1 line key value
   PQ_URL= PQ_TAG= PQ_COMMIT= PQ_TREE=
   [ -f "$file" ] || { echo "pq: no upstream file: $file" >&2; return 1; }
-  while IFS='=' read -r key value || [ -n "$key" ]; do
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    key=${line%%=*} value=
+    case $line in *=*) value=${line#*=} ;; esac
     case $key in
       url) PQ_URL=$value ;;
       tag) PQ_TAG=$value ;;
@@ -50,6 +55,16 @@ pq_read_pin() {
   done <"$file"
   [ -n "$PQ_URL" ] && [ -n "$PQ_TAG" ] && [ -n "$PQ_COMMIT" ] && [ -n "$PQ_TREE" ] ||
     { echo "pq: $file must set url, tag, commit and tree" >&2; return 1; }
+  case $PQ_URL in *example.invalid*) return 0 ;; esac
+  for key in commit tree; do
+    if [ "$key" = commit ]; then value=$PQ_COMMIT; else value=$PQ_TREE; fi
+    case $value in
+      *[!0-9a-f]*) ;;
+      *) [ "${#value}" -ne 40 ] || continue ;;
+    esac
+    echo "pq: $key in $file is not 40 lowercase hex digits: $value" >&2
+    return 1
+  done
 }
 
 # Repository root of this library, for the default lists directory.
