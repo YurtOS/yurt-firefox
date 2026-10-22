@@ -1,0 +1,11 @@
+# Path prefixes that belong in the patch queue. One per line, whole path
+# components, relative to the Firefox root. The longest matching prefix across
+# this file and exclude.txt decides.
+js
+build/moz.configure
+mfbt/RandomNum.cpp
+modules/libpref
+third_party/weval
+third_party/wizer
+# system_error for the WASI system-wrapper generation
+config/system-headers.mozbuild

@@ -1,0 +1,13 @@
+# Path prefixes that are deliberately not in the patch queue. Same format as
+# include.txt.
+# webidl/streams plumbing for the browser only (19 files)
+dom
+# browser-only WPT expectations
+testing/web-platform/meta
+.github
+.agents
+# symlink to .agents/skills
+.claude/skills
+docs/agents
+AGENTS.md
+CLAUDE.md

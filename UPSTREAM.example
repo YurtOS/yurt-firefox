@@ -1,0 +1,9 @@
+# Copy to UPSTREAM and fill in. key=value lines, no spaces around '='.
+# url:    git URL of the Firefox repository to fetch from
+# tag:    release tag the queue is based on
+# commit: commit that tag must point at (a moved tag is rejected)
+# tree:   tree hash of that commit with the patch queue and data/ics applied
+url=https://example.invalid/firefox.git
+tag=FIREFOX_X_Y_Z_RELEASE
+commit=0000000000000000000000000000000000000000
+tree=0000000000000000000000000000000000000000
