@@ -204,6 +204,24 @@ no_commits_clears_stale_patches() {
   assert_eq "$(hand_tree "$S")" "$(pin_tree)"
 }
 
+# User and system git config must not change the exported patch bytes.
+patch_bytes_ignore_user_and_system_config() {
+  new_root
+  export_cmd "$S"
+  sed -i.bak 's/^line5$/line5 patched/' "$S/js/a.txt" && rm "$S/js/a.txt.bak"
+  scratch_commit "patch a"
+  export_cmd --write "$S"
+  cp -R "$R/patches" "$BASE/hermetic"
+  printf '[format]\n\tsubjectPrefix = LEAK\n[diff]\n\tcontext = 1\n' >"$BASE/global.config"
+  printf '[diff]\n\tcontext = 0\n\tsrcPrefix = s/\n' >"$BASE/system.config"
+  (
+    unset GIT_CONFIG_NOSYSTEM
+    export GIT_CONFIG_GLOBAL="$BASE/global.config" GIT_CONFIG_SYSTEM="$BASE/system.config"
+    export_cmd --write "$S"
+  )
+  diff -r "$BASE/hermetic" "$R/patches"
+}
+
 fixtures_run_the_export_suite() {
   grep -q 'test-export\.sh' "$ROOT/scripts/check-queue.sh"
 }
@@ -215,5 +233,6 @@ run_test am_tree_equals_apply_tree am_tree_equals_apply_tree
 run_test binary_hunk_survives binary_hunk_survives
 run_test re_export_is_byte_identical re_export_is_byte_identical
 run_test no_commits_clears_stale_patches no_commits_clears_stale_patches
+run_test patch_bytes_ignore_user_and_system_config patch_bytes_ignore_user_and_system_config
 run_test fixtures_run_the_export_suite fixtures_run_the_export_suite
 finish
