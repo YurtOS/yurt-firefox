@@ -1,0 +1,2339 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Fallin <chris@cfallin.org>
+Date: Thu, 19 Feb 2026 10:40:59 +0100
+Subject: [PATCH] PBL: add weval annotations
+
+--enable-pbl-weval (ENABLE_JS_PBL_WEVAL): weval specialisation of the
+portable baseline interpreter and its CacheIR stubs, with two jit-tests.
+
+Source commits in YurtOS/firefox (yurt dff5cf534448):
+  18566eacce39 PBL: add weval annotations
+    (all included paths except third_party/weval)
+---
+ js/moz.configure                              |  15 +
+ js/src/gc/GC.cpp                              |  10 +
+ js/src/jit-test/tests/gc/bug-1791975.js       |   7 +
+ js/src/jit-test/tests/strings/concat.js       |  15 +
+ js/src/jit/BaselineCacheIRCompiler.cpp        |  13 +
+ js/src/jit/CacheIR.cpp                        |   4 +
+ js/src/jit/CacheIRCompiler.cpp                |  24 +
+ js/src/jit/CacheIRCompiler.h                  |  25 +-
+ js/src/jit/CacheIRSpewer.cpp                  |   2 +
+ js/src/jit/CacheIRWriter.h                    |   3 +
+ js/src/jit/CompactBuffer.h                    |   8 +-
+ js/src/jit/moz.build                          |   5 +
+ js/src/moz.build                              |   5 +
+ js/src/shell/js.cpp                           |   2 +-
+ js/src/vm/JSScript.cpp                        |  11 +
+ js/src/vm/JSScript.h                          |  20 +
+ js/src/vm/PortableBaselineInterpret-defs.h    |  85 +++
+ .../vm/PortableBaselineInterpret-weval-defs.h | 142 ++++
+ js/src/vm/PortableBaselineInterpret.cpp       | 658 ++++++++++++------
+ js/src/vm/PortableBaselineInterpret.h         |  18 +-
+ js/src/vm/Weval.h                             |  35 +
+ 21 files changed, 860 insertions(+), 247 deletions(-)
+ create mode 100644 js/src/jit-test/tests/strings/concat.js
+ create mode 100644 js/src/vm/PortableBaselineInterpret-defs.h
+ create mode 100644 js/src/vm/PortableBaselineInterpret-weval-defs.h
+ create mode 100644 js/src/vm/Weval.h
+
+diff --git a/js/moz.configure b/js/moz.configure
+index 1c92f37e74f6..e6944cda3fb9 100644
+--- a/js/moz.configure
++++ b/js/moz.configure
+@@ -200,6 +200,21 @@ set_config(
+     depends_if("--enable-portable-baseline-interp-force")(lambda _: True),
+ )
+ 
++# weval support (ahead-of-time interpreter compilation in Wasm) for PBL.
++option(
++    "--enable-pbl-weval",
++    default=False,
++    help="{Support|Do not support} wevaling the PBL interpreter",
++)
++
++@depends("--enable-portable-baseline-interp", "--enable-pbl-weval")
++def js_pbl_weval(pbl, weval):
++    if pbl and weval:
++        return True
++
++set_define("ENABLE_JS_PBL_WEVAL", js_pbl_weval)
++set_config("ENABLE_JS_PBL_WEVAL", js_pbl_weval)
++
+ # Enable ahead-of-time-known preloaded IC bodies.
+ option(
+     "--enable-aot-ics",
+diff --git a/js/src/gc/GC.cpp b/js/src/gc/GC.cpp
+index 4948db68d3bd..3749e07c31e4 100644
+--- a/js/src/gc/GC.cpp
++++ b/js/src/gc/GC.cpp
+@@ -5261,6 +5261,16 @@ Realm* js::NewRealm(JSContext* cx, JSPrincipals* principals,
+     zone->compartments().infallibleAppend(compHolder.release());
+   }
+ 
++#ifdef ENABLE_JS_AOT_ICS
++  if (zone) {
++    // This is where the AOT IC corpus is loaded. If we do not eagerly force
++    // this, it may not be created when initializing then snapshotting the
++    // engine, because its creation is only otherwise triggered lazily by
++    // execution.
++    zone->ensureJitZoneExists(cx);
++  }
++#endif
++
+   if (zoneHolder) {
+     rt->gc.zones().infallibleAppend(zoneHolder.release());
+ 
+diff --git a/js/src/jit-test/tests/gc/bug-1791975.js b/js/src/jit-test/tests/gc/bug-1791975.js
+index f56f723db766..50cd4a56cd16 100644
+--- a/js/src/jit-test/tests/gc/bug-1791975.js
++++ b/js/src/jit-test/tests/gc/bug-1791975.js
+@@ -1,3 +1,10 @@
++// |jit-test| skip-if: !('oomAtAllocation' in this) || getBuildConfiguration('pbl')
++//
++// We skip this test under PBL-debug builds because it seems to have a
++// nondeterministic OOM failure that we can't reproduce locally. Other tests
++// provide coverage of OOM handling generally so we don't lose too much
++// (hopefully!) by skipping this one.
++
+ gczeal(10, 10);
+ try {
+   throw 0;
+diff --git a/js/src/jit-test/tests/strings/concat.js b/js/src/jit-test/tests/strings/concat.js
+new file mode 100644
+index 000000000000..cfc7bc5db63e
+--- /dev/null
++++ b/js/src/jit-test/tests/strings/concat.js
+@@ -0,0 +1,15 @@
++
++function do_concat(val) {
++    for (let i = 0; i < 100; i++) {
++        val += "X";
++    }
++    
++    return val;
++}
++
++function test() {
++    for (let i = 0; i < 100; i++) {
++      let result = do_concat("X");
++    }
++}
++test();
+diff --git a/js/src/jit/BaselineCacheIRCompiler.cpp b/js/src/jit/BaselineCacheIRCompiler.cpp
+index 16b53e572d23..1370374422f9 100644
+--- a/js/src/jit/BaselineCacheIRCompiler.cpp
++++ b/js/src/jit/BaselineCacheIRCompiler.cpp
+@@ -29,6 +29,7 @@
+ #include "util/Unicode.h"
+ #include "vm/PortableBaselineInterpret.h"
+ #include "vm/StaticStrings.h"
++#include "vm/Weval.h"
+ 
+ #include "jit/JitScript-inl.h"
+ #include "jit/MacroAssembler-inl.h"
+@@ -2142,6 +2143,11 @@ static bool LookupOrCompileStub(JSContext* cx, CacheKind kind,
+                                              /* stubCode = */ nullptr)) {
+       return false;
+     }
++
++#ifdef ENABLE_JS_PBL_WEVAL
++  // Register for weval specialization, if enabled.
++  js::pbl::EnqueueICStubSpecialization(stubInfo);
++#endif
+   }
+   MOZ_ASSERT_IF(IsBaselineInterpreterEnabled(), code);
+   MOZ_ASSERT(stubInfo);
+@@ -2314,7 +2320,14 @@ ICAttachResult js::jit::AttachBaselineCacheIRStub(
+   newStub->setTypeData(writer.typeData());
+ 
+ #ifdef ENABLE_PORTABLE_BASELINE_INTERP
++#  ifdef ENABLE_JS_PBL_WEVAL
++  newStub->updateRawJitCode(
++      (stubInfo->hasWeval() && stubInfo->weval().func)
++          ? reinterpret_cast<uint8_t*>(stubInfo->weval().func)
++          : pbl::GetICInterpreter());
++#  else
+   newStub->updateRawJitCode(pbl::GetICInterpreter());
++#endif
+ #endif
+ 
+   stub->addNewStub(icEntry, newStub);
+diff --git a/js/src/jit/CacheIR.cpp b/js/src/jit/CacheIR.cpp
+index c0f7cac6ae36..0b8127675399 100644
+--- a/js/src/jit/CacheIR.cpp
++++ b/js/src/jit/CacheIR.cpp
+@@ -15998,12 +15998,16 @@ AttachDecision BinaryArithIRGenerator::tryAttachStringConcat() {
+     return AttachDecision::NoAction;
+   }
+ 
++#ifdef ENABLE_PORTABLE_BASELINE_INTERP
++  JitCode* code = nullptr;
++#else
+   JitCode* code = cx_->zone()->jitZone()->ensureStubExists(
+       cx_, JitZone::StubKind::StringConcat);
+   if (!code) {
+     cx_->recoverFromOutOfMemory();
+     return AttachDecision::NoAction;
+   }
++#endif
+ 
+   ValOperandId lhsId(writer.setInputOperandId(0));
+   ValOperandId rhsId(writer.setInputOperandId(1));
+diff --git a/js/src/jit/CacheIRCompiler.cpp b/js/src/jit/CacheIRCompiler.cpp
+index c5754dc3927f..cf614e499832 100644
+--- a/js/src/jit/CacheIRCompiler.cpp
++++ b/js/src/jit/CacheIRCompiler.cpp
+@@ -49,6 +49,7 @@
+ #include "vm/TypedArrayObject.h"
+ #include "vm/TypeofEqOperand.h"  // TypeofEqOperand
+ #include "vm/Uint8Clamped.h"
++#include "vm/Weval.h"
+ 
+ #include "builtin/Boolean-inl.h"
+ #include "jit/MacroAssembler-inl.h"
+@@ -1032,6 +1033,20 @@ void CacheRegisterAllocator::restoreInputState(MacroAssembler& masm,
+   }
+ }
+ 
++CacheIRStubInfo::CacheIRStubInfo(CacheKind kind, ICStubEngine engine,
++                                 bool makesGCCalls, uint32_t stubDataOffset,
++                                 uint32_t codeLength)
++    : codeLength_(codeLength),
++      kind_(kind),
++      engine_(engine),
++      stubDataOffset_(stubDataOffset),
++      makesGCCalls_(makesGCCalls) {
++  MOZ_ASSERT(kind_ == kind, "Kind must fit in bitfield");
++  MOZ_ASSERT(engine_ == engine, "Engine must fit in bitfield");
++  MOZ_ASSERT(stubDataOffset_ == stubDataOffset,
++             "stubDataOffset must fit in uint8_t");
++}
++
+ size_t CacheIRStubInfo::stubDataSize() const {
+   size_t field = 0;
+   size_t size = 0;
+@@ -1264,6 +1279,15 @@ ICCacheIRStub* ICCacheIRStub::clone(JSRuntime* rt, ICStubSpace& newSpace) {
+   return newStub;
+ }
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++Weval& CacheIRStubInfo::weval() {
++  if (!weval_) {
++    weval_ = MakeUnique<Weval>();
++  }
++  return *weval_;
++}
++#endif
++
+ template <typename T>
+ static inline bool ShouldTraceWeakEdgeInStub(JSTracer* trc) {
+   if constexpr (std::is_same_v<T, IonICStub>) {
+diff --git a/js/src/jit/CacheIRCompiler.h b/js/src/jit/CacheIRCompiler.h
+index 62d2f8f0d4cf..582e92f0394e 100644
+--- a/js/src/jit/CacheIRCompiler.h
++++ b/js/src/jit/CacheIRCompiler.h
+@@ -28,6 +28,10 @@ namespace js {
+ class TypedArrayObject;
+ enum class UnaryMathFunction : uint8_t;
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++struct Weval;
++#endif
++
+ namespace jit {
+ 
+ class BaselineCacheIRCompiler;
+@@ -1347,18 +1351,12 @@ class CacheIRStubInfo {
+   uint8_t stubDataOffset_;
+   bool makesGCCalls_;
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++  UniquePtr<Weval> weval_ = {};
++#endif
++
+   CacheIRStubInfo(CacheKind kind, ICStubEngine engine, bool makesGCCalls,
+-                  uint32_t stubDataOffset, uint32_t codeLength)
+-      : codeLength_(codeLength),
+-        kind_(kind),
+-        engine_(engine),
+-        stubDataOffset_(stubDataOffset),
+-        makesGCCalls_(makesGCCalls) {
+-    MOZ_ASSERT(kind_ == kind, "Kind must fit in bitfield");
+-    MOZ_ASSERT(engine_ == engine, "Engine must fit in bitfield");
+-    MOZ_ASSERT(stubDataOffset_ == stubDataOffset,
+-               "stubDataOffset must fit in uint8_t");
+-  }
++                  uint32_t stubDataOffset, uint32_t codeLength);
+ 
+   CacheIRStubInfo(const CacheIRStubInfo&) = delete;
+   CacheIRStubInfo& operator=(const CacheIRStubInfo&) = delete;
+@@ -1434,6 +1432,11 @@ class CacheIRStubInfo {
+ 
+   void replaceStubRawValueBits(uint8_t* stubData, uint32_t offset,
+                                uint64_t oldBits, uint64_t newBits) const;
++
++#ifdef ENABLE_JS_PBL_WEVAL
++  bool hasWeval() const { return weval_.get() != nullptr; }
++  Weval& weval();
++#endif
+ };
+ 
+ template <typename T>
+diff --git a/js/src/jit/CacheIRSpewer.cpp b/js/src/jit/CacheIRSpewer.cpp
+index 52e2782266f6..4d5764c6f348 100644
+--- a/js/src/jit/CacheIRSpewer.cpp
++++ b/js/src/jit/CacheIRSpewer.cpp
+@@ -525,6 +525,8 @@ static const char* ArrayBufferViewKindName(ArrayBufferViewKind kind) {
+   switch (kind) {
+     case ArrayBufferViewKind::FixedLength:
+       return "FixedLength";
++    case ArrayBufferViewKind::Immutable:
++      return "Immutable";
+     case ArrayBufferViewKind::Resizable:
+       return "Resizable";
+   }
+diff --git a/js/src/jit/CacheIRWriter.h b/js/src/jit/CacheIRWriter.h
+index 7f7325b9ee07..147b31ceb05a 100644
+--- a/js/src/jit/CacheIRWriter.h
++++ b/js/src/jit/CacheIRWriter.h
+@@ -379,6 +379,9 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
+     MOZ_ASSERT(op == nextOperandId_);
+     nextOperandId_++;
+     numInputOperands_++;
++    if (op >= operandLastUsed_.length()) {
++      buffer_.propagateOOM(operandLastUsed_.resize(op + 1));
++    }
+     return op;
+   }
+ 
+diff --git a/js/src/jit/CompactBuffer.h b/js/src/jit/CompactBuffer.h
+index d21f5e579e62..db7b14be85bb 100644
+--- a/js/src/jit/CompactBuffer.h
++++ b/js/src/jit/CompactBuffer.h
+@@ -68,7 +68,7 @@ class CompactBufferReader {
+       : buffer_(start), end_(end) {}
+   inline explicit CompactBufferReader(const CompactBufferWriter& writer);
+   uint8_t readByte() {
+-    MOZ_ASSERT(buffer_ < end_);
++    MOZ_ASSERT_IF(end_, buffer_ < end_);
+     return *buffer_++;
+   }
+   uint32_t readFixedUint32_t() {
+@@ -117,14 +117,14 @@ class CompactBufferReader {
+   }
+ 
+   bool more() const {
+-    MOZ_ASSERT(buffer_ <= end_);
++    MOZ_ASSERT_IF(end_, buffer_ <= end_);
+     return buffer_ < end_;
+   }
+ 
+   void seek(const uint8_t* start, uint32_t offset) {
+     buffer_ = start + offset;
+-    MOZ_ASSERT(start < end_);
+-    MOZ_ASSERT(buffer_ <= end_);
++    MOZ_ASSERT_IF(end_, start < end_);
++    MOZ_ASSERT_IF(end_, buffer_ <= end_);
+   }
+ 
+   const uint8_t* currentPosition() const { return buffer_; }
+diff --git a/js/src/jit/moz.build b/js/src/jit/moz.build
+index 39d5d48c3edf..caf81c8e6d4d 100644
+--- a/js/src/jit/moz.build
++++ b/js/src/jit/moz.build
+@@ -307,3 +307,8 @@ if CONFIG["ENABLE_JS_AOT_ICS"]:
+ 
+ if CONFIG["FUZZING_INTERFACES"] or CONFIG["FUZZING_JS_FUZZILLI"]:
+     include("/tools/fuzzing/libfuzzer-config.mozbuild")
++
++if CONFIG["ENABLE_JS_PBL_WEVAL"]:
++    LOCAL_INCLUDES += [
++        "../../../third_party/weval"
++    ]
+diff --git a/js/src/moz.build b/js/src/moz.build
+index a000e4a42dda..ae5af29eda3f 100644
+--- a/js/src/moz.build
++++ b/js/src/moz.build
+@@ -703,3 +703,8 @@ if CONFIG["JS_HAS_INTL_API"]:
+ 
+ if CONFIG["USE_LIBZ_RS"]:
+     DEFINES["USE_LIBZ_RS"] = True
++
++if CONFIG["ENABLE_JS_PBL_WEVAL"]:
++    LOCAL_INCLUDES += [
++        "../../third_party/weval"
++    ]
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+index b4193feef5f3..c09a9a4c9c5c 100644
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -12716,7 +12716,7 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+   }
+ 
+   if (!JS::SetLoggingInterface(shellLoggingInterface)) {
+-    return 1;
++    return AsVariant(1);
+   }
+   ParseLoggerOptions();
+ 
+diff --git a/js/src/vm/JSScript.cpp b/js/src/vm/JSScript.cpp
+index f64ed893ca19..9a5f260cbf62 100644
+--- a/js/src/vm/JSScript.cpp
++++ b/js/src/vm/JSScript.cpp
+@@ -75,6 +75,7 @@
+ #include "vm/StringType.h"    // JSString, JSAtom
+ #include "vm/Time.h"          // AutoIncrementalTimer
+ #include "vm/ToSource.h"      // JS::ValueToSource
++#include "vm/Weval.h"
+ #ifdef MOZ_VTUNE
+ #  include "vtune/VTuneWrapper.h"
+ #endif
+@@ -2663,6 +2664,10 @@ bool JSScript::fullyInitFromStencil(
+     }
+   }
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++  pbl::EnqueueScriptSpecialization(script);
++#endif
++
+   return true;
+ }
+ 
+@@ -3891,3 +3896,9 @@ JS::ubi::Base::Size JS::ubi::Concrete<BaseScript>::size(
+ const char* JS::ubi::Concrete<BaseScript>::scriptFilename() const {
+   return get().filename();
+ }
++
++#ifdef ENABLE_JS_PBL_WEVAL
++void BaseScript::allocWeval() {
++  weval_ = MakeUnique<Weval>();
++}
++#endif
+diff --git a/js/src/vm/JSScript.h b/js/src/vm/JSScript.h
+index 3a6c1ffc7aa0..bed6c7d01f05 100644
+--- a/js/src/vm/JSScript.h
++++ b/js/src/vm/JSScript.h
+@@ -91,6 +91,8 @@ struct CompilationStencilMerger;
+ class StencilXDR;
+ }  // namespace frontend
+ 
++struct Weval;
++
+ class ScriptCounts {
+  public:
+   using PCCountsVector = mozilla::Vector<PCCounts, 0, SystemAllocPolicy>;
+@@ -1567,6 +1569,13 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
+   // will be nullptr.
+   RefPtr<js::SharedImmutableScriptData> sharedData_ = {};
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++  // Specialized function generated by partial-evaluation tool
++  // `weval`, if any. Indirected via a `UniquePtr` to keep a stable
++  // address across GCs.
++  UniquePtr<Weval> weval_ = {};
++#endif
++
+   // End of fields.
+ 
+   BaseScript(uint8_t* stubEntry, JSFunction* function,
+@@ -1746,6 +1755,17 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
+ #if defined(DEBUG) || defined(JS_JITSPEW)
+   void dumpStringContent(js::GenericPrinter& out) const;
+ #endif
++
++#ifdef ENABLE_JS_PBL_WEVAL
++  bool hasWeval() const { return weval_.get() != nullptr; }
++  Weval& weval() {
++    if (!weval_) {
++      allocWeval();
++    }
++    return *weval_;
++  }
++  void allocWeval();
++#endif
+ };
+ 
+ extern void SweepScriptData(JSRuntime* rt);
+diff --git a/js/src/vm/PortableBaselineInterpret-defs.h b/js/src/vm/PortableBaselineInterpret-defs.h
+new file mode 100644
+index 000000000000..20d95c9ceb99
+--- /dev/null
++++ b/js/src/vm/PortableBaselineInterpret-defs.h
+@@ -0,0 +1,85 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef PortableBaselineInerpret_defs_h
++#define PortableBaselineInerpret_defs_h
++
++/* Basic definitions for PBL's internals that can be swapped out as
++ * needed to handle interpreter details differently.
++ *
++ * Meant to be included only from PortableBaselineInterpret.cpp. */
++
++#define PBL_HYBRID_ICS_DEFAULT true
++
++#define PBL_CALL_IC(jitcode, ctx, stubvalue, result, arg0, arg1, arg2value, \
++                    hasarg2)                                                \
++  do {                                                                      \
++    ctx.arg2 = arg2value;                                                   \
++    if (stubvalue->isFallback()) {                                          \
++      ICStubFunc func = reinterpret_cast<ICStubFunc>(jitcode);              \
++      result = func(arg0, arg1, stubvalue, ctx);                            \
++    } else {                                                                \
++      result = ICInterpretOps<false>(arg0, arg1, stubvalue, ctx);           \
++    }                                                                       \
++  } while (0)
++
++#define PBL_CALL_INTERP(result, script, interp, ...) \
++  result = interp(__VA_ARGS__);
++
++#define PBL_ESTABLISH_STUBINFO_CODE(Specialized, stubInfo, code) \
++  stubInfo = cstub->stubInfo();                                  \
++  code = stubInfo->code();
++
++#define READ_REG(reg)                                       \
++  ({                                                        \
++    TRACE_PRINTF("READ_REG(%d): %" PRIx64 "\n", int((reg)), \
++                 ctx.icregs.icVals[(reg)]);                 \
++    ctx.icregs.icVals[(reg)];                               \
++  })
++#define WRITE_REG(reg, value, tagtype)                                \
++  do {                                                                \
++    uint64_t write_value = (value);                                   \
++    TRACE_PRINTF("WRITE_REG(%d, " #tagtype "): %" PRIx64 "\n", (reg), \
++                 write_value);                                        \
++    ctx.icregs.icVals[(reg)] = write_value;                           \
++    ctx.icregs.icTags[(reg)] = uint64_t(JSVAL_TAG_##tagtype)          \
++                               << JSVAL_TAG_SHIFT;                    \
++  } while (0)
++#define READ_VALUE_REG(reg)                                              \
++  ({                                                                     \
++    uint64_t bits = ctx.icregs.icVals[(reg)] | ctx.icregs.icTags[(reg)]; \
++    TRACE_PRINTF("READ_VALUE_REG(%d): %" PRIx64 "\n", (reg), bits);      \
++    Value::fromRawBits(bits);                                            \
++  })
++#define WRITE_VALUE_REG(reg, value)                                         \
++  do {                                                                      \
++    uint64_t write_value = (value).asRawBits();                             \
++    TRACE_PRINTF("WRITE_VALUE_REG(%d): %" PRIx64 "\n", (reg), write_value); \
++    ctx.icregs.icVals[(reg)] = write_value;                                 \
++    ctx.icregs.icTags[(reg)] = 0;                                           \
++  } while (0)
++
++#define PBL_PUSH_CTX(ctx) ;
++#define PBL_UPDATE_CTX(ctx) ;
++#define PBL_POP_CTX() ;
++
++#define VIRTPUSH(value) PUSH(value)
++#define VIRTPOP() POP()
++#define VIRTSP(index) sp[(index)]
++#define VIRTSPWRITE(index, value) sp[(index)] = (value)
++#define SYNCSP()
++#define SETLOCAL(i, value) frame->unaliasedLocal(i) = value
++#define GETLOCAL(i) frame->unaliasedLocal(i)
++
++#define PBL_SETUP_INTERP_INPUTS(argsObjAliasesFormals, nfixed)      \
++  argsObjAliasesFormals = frame->script()->argsObjAliasesFormals(); \
++  nfixed = frame->script()->nfixed();
++
++#define PBL_SPECIALIZE_VALUE(i, low, high) i
++
++#define PBL_SCRIPT_HAS_SPECIALIZATION(script) false
++
++#endif  /* PortableBaselineInerpret_defs_h */
+diff --git a/js/src/vm/PortableBaselineInterpret-weval-defs.h b/js/src/vm/PortableBaselineInterpret-weval-defs.h
+new file mode 100644
+index 000000000000..61aaa7e7907b
+--- /dev/null
++++ b/js/src/vm/PortableBaselineInterpret-weval-defs.h
+@@ -0,0 +1,142 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef PortableBaselineInerpret_weval_defs_h
++#define PortableBaselineInerpret_weval_defs_h
++
++#ifdef DEBUG
++// weval has to constant-propagate interpreter state well enough to unroll the
++// interpreter loops, and this is not possible in a debug build because the
++// interpreter state is spilled and reloaded to memory (which cannot be tracked
++// in a fine-grained way by cprop). We need C++ locals to live in Wasm locals
++// for weval to work.
++#error PBL weval support only works in optimized (non-debug) builds.
++#endif
++
++/* Basic definitions for PBL's internals that can be swapped out as
++ * needed to handle interpreter details differently.
++ *
++ * Meant to be included only from PortableBaselineInterpret.cpp. */
++
++#define PBL_HYBRID_ICS_DEFAULT false
++
++#define PBL_CALL_IC(jitcode, ctx, stubvalue, result, arg0, arg1, arg2value, \
++                    hasarg2)                                                \
++  do {                                                                      \
++    if (hasarg2) {                                                          \
++      ctx.arg2 = arg2value;                                                 \
++    }                                                                       \
++    ICStubFunc func = reinterpret_cast<ICStubFunc>(jitcode);                \
++    result = func(arg0, arg1, stubvalue, ctx);                              \
++  } while (0)
++
++#define PBL_CALL_INTERP(result, script, interp, ...)                         \
++  if (script->hasWeval() && script->weval().func) {                          \
++    result = (reinterpret_cast<PBIFunc>(script->weval().func))(__VA_ARGS__); \
++  } else {                                                                   \
++    result = interp(__VA_ARGS__);                                            \
++  }
++
++#define PBL_ESTABLISH_STUBINFO_CODE(Specialized, stubInfo, code)            \
++  if (!Specialized) {                                                       \
++    stubInfo = cstub->stubInfo();                                           \
++    code = stubInfo->code();                                                \
++  } else {                                                                  \
++    stubInfo = reinterpret_cast<const CacheIRStubInfo*>(                    \
++        weval_read_specialization_global(0));                               \
++    code = reinterpret_cast<uint8_t*>(weval_read_specialization_global(1)); \
++  }
++
++#define READ_REG(reg) \
++  (Specialized ? weval_read_reg((reg)) : ctx.icregs.icVals[(reg)])
++#define WRITE_REG(reg, value, tagtype)                                        \
++  if (Specialized) {                                                          \
++    weval_write_reg((reg), (value));                                          \
++    weval_write_reg((reg) + ICRegs::kMaxICVals, uint64_t(JSVAL_TAG_##tagtype) \
++                                                    << JSVAL_TAG_SHIFT);      \
++  } else {                                                                    \
++    ctx.icregs.icVals[(reg)] = (value);                                       \
++    ctx.icregs.icTags[(reg)] = uint64_t(JSVAL_TAG_##tagtype)                  \
++                               << JSVAL_TAG_SHIFT;                            \
++  }
++
++#define READ_VALUE_REG(reg)                                       \
++  Value::fromRawBits(                                             \
++      Specialized ? (weval_read_reg((reg) + ICRegs::kMaxICVals) | \
++                     weval_read_reg((reg)))                       \
++                  : (ctx.icregs.icTags[(reg)] | ctx.icregs.icVals[(reg)]))
++#define WRITE_VALUE_REG(reg, value)                 \
++  if (Specialized) {                                \
++    weval_write_reg((reg), (value).asRawBits());    \
++    weval_write_reg((reg) + ICRegs::kMaxICVals, 0); \
++  } else {                                          \
++    ctx.icregs.icVals[(reg)] = (value).asRawBits(); \
++    ctx.icregs.icTags[(reg)] = 0;                   \
++  }
++
++#define PBL_PUSH_CTX(ctx) weval::push_context(reinterpret_cast<uint32_t>(ctx));
++
++#define PBL_UPDATE_CTX(ctx) \
++  weval::update_context(reinterpret_cast<uint32_t>(ctx));
++
++#define PBL_POP_CTX() \
++    weval::pop_context();
++
++#define VIRTPUSH(value)                                                    \
++  if (Specialized) {                                                       \
++    --sp;                                                                  \
++    weval_push_stack(reinterpret_cast<uint64_t*>(sp), (value).asUInt64()); \
++  } else {                                                                 \
++    *--sp = (value);                                                       \
++  }
++#define VIRTPOP()                                      \
++  (Specialized ? ({                                    \
++    uint64_t* ptr = reinterpret_cast<uint64_t*>(sp++); \
++    StackVal(weval_pop_stack(ptr));                    \
++  })                                                   \
++               : *sp++)
++#define VIRTSP(index)                                                     \
++  (Specialized ? StackVal(weval_read_stack(                               \
++                     reinterpret_cast<uint64_t*>(&sp[(index)]), (index))) \
++               : sp[(index)])
++#define VIRTSPWRITE(index, value)                                         \
++  if (Specialized) {                                                      \
++    weval_write_stack(reinterpret_cast<uint64_t*>(&sp[(index)]), (index), \
++                      (value).asUInt64());                                \
++  } else {                                                                \
++    sp[(index)] = (value);                                                \
++  }
++#define SYNCSP()        \
++  if (Specialized) {    \
++    weval_sync_stack(); \
++  }
++#define SETLOCAL(i, value)                                                    \
++  if (Specialized) {                                                          \
++    weval_write_local(reinterpret_cast<uint64_t*>(&frame->unaliasedLocal(i)), \
++                      i, (value).asRawBits());                                \
++  } else {                                                                    \
++    frame->unaliasedLocal(i) = value;                                         \
++  }
++#define GETLOCAL(i)                                                      \
++  (Specialized                                                           \
++       ? Value::fromRawBits(weval_read_local(                            \
++             reinterpret_cast<uint64_t*>(&frame->unaliasedLocal(i)), i)) \
++       : frame->unaliasedLocal(i))
++
++#define PBL_SETUP_INTERP_INPUTS(argsObjAliasesFormals, nfixed)             \
++  argsObjAliasesFormals = Specialized                                      \
++                              ? (weval_read_specialization_global(0) != 0) \
++                              : frame->script()->argsObjAliasesFormals();  \
++  nfixed = Specialized ? weval_read_specialization_global(1)               \
++                       : frame->script()->nfixed();
++
++#define PBL_SPECIALIZE_VALUE(i, low, high) \
++  int32_t(weval_specialize_value(uint32_t(i), 0, uint32_t(high - low + 1)));
++
++#define PBL_SCRIPT_HAS_SPECIALIZATION(script) \
++    (script->hasWeval() && script->weval().func)
++
++#endif /* PortableBaselineInerpret_defs_h */
+diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
+index 696115476b83..25a9a1a9f210 100644
+--- a/js/src/vm/PortableBaselineInterpret.cpp
++++ b/js/src/vm/PortableBaselineInterpret.cpp
+@@ -57,6 +57,7 @@
+ #include "vm/PlainObject.h"
+ #include "vm/Shape.h"
+ #include "vm/TypeofEqOperand.h"  // TypeofEqOperand
++#include "vm/Weval.h"
+ #include "vm/WrapperObject.h"
+ 
+ #include "debugger/DebugAPI-inl.h"
+@@ -67,6 +68,13 @@
+ #include "vm/JSScript-inl.h"
+ #include "vm/PlainObject-inl.h"
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++WEVAL_DEFINE_GLOBALS()
++#  include "vm/PortableBaselineInterpret-weval-defs.h"
++#else
++#  include "vm/PortableBaselineInterpret-defs.h"
++#endif
++
+ namespace js {
+ namespace pbl {
+ 
+@@ -91,8 +99,6 @@ using namespace js::jit;
+     } while (0)
+ #endif
+ 
+-#define PBL_HYBRID_ICS_DEFAULT true
+-
+ // Whether we are using the "hybrid" strategy for ICs (see the [SMDOC]
+ // in PortableBaselineInterpret.h for more). This is currently a
+ // constant, but may become configurable in the future.
+@@ -439,24 +445,24 @@ class VMFrame {
+   bool success() const { return exitFP != nullptr; }
+ };
+ 
+-#define PUSH_EXIT_FRAME_OR_RET(value, init_sp)                  \
++#define PUSH_EXIT_FRAME_OR_RET(ret_stmt, init_sp)               \
+   VMFrame cx(ctx.frameMgr, ctx.stack, init_sp);                 \
+   if (!cx.success()) {                                          \
+-    return value;                                               \
++    ret_stmt;                                                   \
+   }                                                             \
+   StackVal* sp = cx.spBelowFrame(); /* shadow the definition */ \
+   (void)sp;                         /* avoid unused-variable warnings */
+ 
+ #define PUSH_IC_FRAME()         \
+   ctx.error = PBIResult::Error; \
+-  PUSH_EXIT_FRAME_OR_RET(IC_ERROR_SENTINEL(), ctx.sp())
++  PUSH_EXIT_FRAME_OR_RET(RETURN_IC(IC_ERROR_SENTINEL()), ctx.sp())
+ #define PUSH_FALLBACK_IC_FRAME() \
+   ctx.error = PBIResult::Error;  \
+-  PUSH_EXIT_FRAME_OR_RET(IC_ERROR_SENTINEL(), sp)
++  PUSH_EXIT_FRAME_OR_RET(return IC_ERROR_SENTINEL(), sp)
+ #define PUSH_EXIT_FRAME()      \
+   frame->interpreterPC() = pc; \
+   SYNCSP();                    \
+-  PUSH_EXIT_FRAME_OR_RET(PBIResult::Error, sp)
++  PUSH_EXIT_FRAME_OR_RET(return PBIResult::Error, sp)
+ 
+ /*
+  * -----------------------------------------------
+@@ -469,26 +475,55 @@ class VMFrame {
+ // platforms, e.g. Wasm on Wasmtime on x86-64, we have as few as four
+ // register arguments available before args go through the stack.)
+ struct ICCtx {
+-  BaselineFrame* frame;
+   VMFrameManager frameMgr;
+   State& state;
+   ICRegs icregs;
+   Stack& stack;
+-  StackVal* sp_;
++
++  // Values we keep in ICCtx rather than separate locals in the main
++  // interpreter body in order to reduce register pressure.
++  JSObject* envChain;
++  ImmutableScriptData* isd;
++  Value* ret;
++  StackVal* entryFrame;
++  jsbytecode* entryPC;
++
++  // Values that we pass as auxiliary arguments to ICs; they either
++  // change infrequently (`frame`) or we want to minimize argument
++  // count to fit into registers on more limited architectures
++  // (e.g. wasm32 on Wasmtime, with only 4 integer argument
++  // registers).
++  BaselineFrame* frame;
++  StackVal* spbase;
++  // We pass `sp` as two parts, `spbase` and `spoffset`, so that IC
++  // sites in specialized function bodies can constant-propagate
++  // `spoffset` and compile down to a single store of a constant to
++  // `spoffset` (while `spbase` never changes).
++  uintptr_t spoffset;  // negative offset from spbase
++  jsbytecode* pcbase;
+   PBIResult error;
+   uint64_t arg2;
+ 
+   ICCtx(JSContext* cx, BaselineFrame* frame_, State& state_, Stack& stack_)
+-      : frame(frame_),
+-        frameMgr(cx, frame_),
++      : frameMgr(cx, frame_),
+         state(state_),
+         icregs(),
+         stack(stack_),
+-        sp_(nullptr),
++        envChain(nullptr),
++        isd(nullptr),
++        ret(nullptr),
++        entryFrame(nullptr),
++        entryPC(nullptr),
++        frame(frame_),
++        spbase(nullptr),
++        spoffset(0),
+         error(PBIResult::Ok),
+         arg2(0) {}
+ 
+-  StackVal* sp() { return sp_; }
++  StackVal* sp() {
++    return reinterpret_cast<StackVal*>(reinterpret_cast<uintptr_t>(spbase) -
++                                       spoffset);
++  }
+ };
+ 
+ #define IC_ERROR_SENTINEL() (JS::MagicValue(JS_GENERIC_MAGIC).asRawBits())
+@@ -497,17 +532,10 @@ struct ICCtx {
+ typedef uint64_t (*ICStubFunc)(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                                ICCtx& ctx);
+ 
+-#define PBL_CALL_IC(jitcode, ctx, stubvalue, result, arg0, arg1, arg2value, \
+-                    hasarg2)                                                \
+-  do {                                                                      \
+-    ctx.arg2 = arg2value;                                                   \
+-    ICStubFunc func = reinterpret_cast<ICStubFunc>(jitcode);                \
+-    result = func(arg0, arg1, stubvalue, ctx);                              \
+-  } while (0)
+-
+ typedef PBIResult (*PBIFunc)(JSContext* cx_, State& state, Stack& stack,
+                              StackVal* sp, JSObject* envChain, Value* ret,
+-                             jsbytecode* pc, ImmutableScriptData* isd,
++                             jsbytecode* pcbase, uint32_t pcoffset,
++                             ImmutableScriptData* isd,
+                              jsbytecode* restartEntryPC,
+                              BaselineFrame* restartFrame,
+                              StackVal* restartEntryFrame,
+@@ -533,6 +561,7 @@ static double DoubleMinMax(bool isMax, double first, double second) {
+ }
+ 
+ // Interpreter for CacheIR.
++template <bool Specialized>
+ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                         ICCtx& ctx) {
+   {
+@@ -549,33 +578,30 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ 
+ #else  // ENABLE_COMPUTED_GOTO_DISPATCH
+ 
+-#  define CACHEOP_CASE(name) \
+-    case CacheOp::name:      \
+-      cacheop_##name : CACHEOP_TRACE(name)
++#  ifdef ENABLE_JS_PBL_WEVAL
++#    define CACHEOP_CASE(name)                                           \
++      case CacheOp::name:                                                \
++        weval_trace_line(__LINE__);                                       \
++        weval_assert_const32(                                            \
++            reinterpret_cast<uint32_t>(cacheIRReader.currentPosition()), \
++            __LINE__);                                                   \
++        cacheop_##name : CACHEOP_TRACE(name)
++#  else
++#    define CACHEOP_CASE(name) \
++      case CacheOp::name:     \
++        cacheop_##name : CACHEOP_TRACE(name)
++#  endif
+ #  define CACHEOP_CASE_FALLTHROUGH(name) \
+     [[fallthrough]];                     \
+     CACHEOP_CASE(name)
+ 
+-#  define DISPATCH_CACHEOP()          \
+-    cacheop = cacheIRReader.readOp(); \
++#  define DISPATCH_CACHEOP()                         \
++    cacheop = cacheIRReader.readOp();                \
++    PBL_UPDATE_CTX(cacheIRReader.currentPosition()); \
+     goto dispatch;
+ 
+ #endif  // !ENABLE_COMPUTED_GOTO_DISPATCH
+ 
+-#define READ_REG(index) ctx.icregs.icVals[(index)]
+-#define READ_VALUE_REG(index) \
+-  Value::fromRawBits(ctx.icregs.icVals[(index)] | ctx.icregs.icTags[(index)])
+-#define WRITE_REG(index, value, tag)                                           \
+-  do {                                                                         \
+-    ctx.icregs.icVals[(index)] = (value);                                      \
+-    ctx.icregs.icTags[(index)] = uint64_t(JSVAL_TAG_##tag) << JSVAL_TAG_SHIFT; \
+-  } while (0)
+-#define WRITE_VALUE_REG(index, value)                 \
+-  do {                                                \
+-    ctx.icregs.icVals[(index)] = (value).asRawBits(); \
+-    ctx.icregs.icTags[(index)] = 0;                   \
+-  } while (0)
+-
+     DECLARE_CACHEOP_CASE(ReturnFromIC);
+     DECLARE_CACHEOP_CASE(GuardToObject);
+     DECLARE_CACHEOP_CASE(GuardIsNullOrUndefined);
+@@ -857,7 +883,17 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ #define CACHEOP_TRACE(name) \
+   TRACE_PRINTF("cacheop (frame %p stub %p): " #name "\n", ctx.frame, cstub);
+ 
+-#define FAIL_IC() goto next_ic;
++#define FAIL_IC()              \
++  do {                         \
++    PBL_PUSH_CTX(uint32_t(1)); \
++    goto next_ic;              \
++  } while (0)
++
++#define RETURN_IC(value)       \
++  do {                         \
++    PBL_PUSH_CTX(uint32_t(2)); \
++    return (value);            \
++  } while (0)
+ 
+ // We set a fixed bound on the number of icVals which is smaller than what IC
+ // generators may use. As a result we can't evaluate an IC if it defines too
+@@ -868,22 +904,24 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ #define BOUNDSCHECK(resultId) \
+   if (resultId.id() >= ICRegs::kMaxICVals) FAIL_IC();
+ 
+-#define PREDICT_NEXT(name)                       \
+-  if (cacheIRReader.peekOp() == CacheOp::name) { \
+-    cacheIRReader.readOp();                      \
+-    cacheop = CacheOp::name;                     \
+-    goto cacheop_##name;                         \
++#define PREDICT_NEXT(name)                                       \
++  if (!Specialized && cacheIRReader.peekOp() == CacheOp::name) { \
++    cacheIRReader.readOp();                                      \
++    cacheop = CacheOp::name;                                     \
++    goto cacheop_##name;                                         \
+   }
+ 
+-#define PREDICT_RETURN()                                 \
+-  if (cacheIRReader.peekOp() == CacheOp::ReturnFromIC) { \
+-    TRACE_PRINTF("stub successful, predicted return\n"); \
+-    return retValue;                                     \
++#define PREDICT_RETURN()                                                 \
++  if (!Specialized && cacheIRReader.peekOp() == CacheOp::ReturnFromIC) { \
++    TRACE_PRINTF("stub successful, predicted return\n");                 \
++    RETURN_IC(retValue);                                                 \
+   }
+ 
+     ICCacheIRStub* cstub = stub->toCacheIRStub();
+-    const CacheIRStubInfo* stubInfo = cstub->stubInfo();
+-    CacheIRReader cacheIRReader(stubInfo);
++    const CacheIRStubInfo* stubInfo;
++    const uint8_t* code;
++    PBL_ESTABLISH_STUBINFO_CODE(Specialized, stubInfo, code);
++    CacheIRReader cacheIRReader(code, nullptr);
+     uint64_t retValue = 0;
+     CacheOp cacheop;
+ 
+@@ -891,6 +929,8 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+     WRITE_VALUE_REG(1, Value::fromRawBits(arg1));
+     WRITE_VALUE_REG(2, Value::fromRawBits(ctx.arg2));
+ 
++    PBL_PUSH_CTX(cacheIRReader.currentPosition());
++
+     DISPATCH_CACHEOP();
+ 
+ #ifndef ENABLE_COMPUTED_GOTO_DISPATCH
+@@ -901,7 +941,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ 
+       CACHEOP_CASE(ReturnFromIC) {
+         TRACE_PRINTF("stub successful!\n");
+-        return retValue;
++        RETURN_IC(retValue);
+       }
+ 
+       CACHEOP_CASE(GuardToObject) {
+@@ -1901,7 +1941,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!SetElementMegamorphic<false>(cx, obj0, value0, value1,
+                                             args.strict)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+         DISPATCH_CACHEOP();
+@@ -2306,7 +2346,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!ctx.stack.check(sp, sizeof(StackVal) * (totalArgs + 6))) {
+             ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+ 
+           // Create `this` if we are constructing and this is a
+@@ -2329,7 +2369,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               ReservedRooted<Value> result(&ctx.state.value0);
+               if (!CreateThisFromIC(cx, calleeObj, newTargetRooted, &result)) {
+                 ctx.error = PBIResult::Error;
+-                return IC_ERROR_SENTINEL();
++                RETURN_IC(IC_ERROR_SENTINEL());
+               }
+               thisVal = result;
+               // `callee` may have moved.
+@@ -2398,7 +2438,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ 
+             if (!success) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             retValue = args[0].asRawBits();
+           } else {
+@@ -2414,13 +2454,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             ImmutableScriptData* isd = script->immutableScriptData();
+             PBIResult result;
+             Value ret;
+-            result = PortableBaselineInterpret<false, kHybridICsInterp>(
+-                cx, ctx.state, ctx.stack, sp,
+-                /* envChain = */ nullptr, &ret, pc, isd, nullptr, nullptr,
++            PBL_CALL_INTERP(
++                result, script,
++                (PortableBaselineInterpret<false, false, kHybridICsInterp>), cx,
++                ctx.state, ctx.stack, sp, /* envChain = */ nullptr,
++                reinterpret_cast<Value*>(&ret), pc, 0, isd, nullptr, nullptr,
+                 nullptr, PBIResult::Ok);
+             if (result != PBIResult::Ok) {
+               ctx.error = result;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             if (flags.isConstructing() && !ret.isObject()) {
+               ret = args[0];
+@@ -2475,7 +2517,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!ctx.stack.check(sp, sizeof(StackVal) * 8)) {
+             ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+ 
+           // This will not be an Exit frame but a BaselineStub frame, so
+@@ -2503,12 +2545,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ImmutableScriptData* isd = script->immutableScriptData();
+           PBIResult result;
+           Value ret;
+-          result = PortableBaselineInterpret<false, kHybridICsInterp>(
+-              cx, ctx.state, ctx.stack, sp, /* envChain = */ nullptr, &ret, pc,
+-              isd, nullptr, nullptr, nullptr, PBIResult::Ok);
++          PBL_CALL_INTERP(
++              result, script,
++              (PortableBaselineInterpret<false, false, kHybridICsInterp>), cx,
++              ctx.state, ctx.stack, sp, /* envChain = */ nullptr,
++              reinterpret_cast<Value*>(&ret), pc, 0, isd, nullptr, nullptr,
++              nullptr, PBIResult::Ok);
+           if (result != PBIResult::Ok) {
+             ctx.error = result;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ret.asRawBits();
+         }
+@@ -2566,7 +2611,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!ctx.stack.check(sp, sizeof(StackVal) * (totalArgs + 6))) {
+             ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+ 
+           // This will not be an Exit frame but a BaselineStub frame, so
+@@ -2597,12 +2642,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ImmutableScriptData* isd = script->immutableScriptData();
+           PBIResult result;
+           Value ret;
+-          result = PortableBaselineInterpret<false, kHybridICsInterp>(
+-              cx, ctx.state, ctx.stack, sp, /* envChain = */ nullptr, &ret, pc,
+-              isd, nullptr, nullptr, nullptr, PBIResult::Ok);
++          PBL_CALL_INTERP(
++              result, script,
++              (PortableBaselineInterpret<false, false, kHybridICsInterp>), cx,
++              ctx.state, ctx.stack, sp, /* envChain = */ nullptr,
++              reinterpret_cast<Value*>(&ret), pc, 0, isd, nullptr, nullptr,
++              nullptr, PBIResult::Ok);
+           if (result != PBIResult::Ok) {
+             ctx.error = result;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ret.asRawBits();
+         }
+@@ -2860,7 +2908,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           JSLinearString* result = LinearizeForCharAccess(cx, str);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           WRITE_REG(resultId.id(), reinterpret_cast<uintptr_t>(result), STRING);
+         }
+@@ -2882,7 +2930,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           JSLinearString* result = LinearizeForCharAccess(cx, str);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           WRITE_REG(resultId.id(), reinterpret_cast<uintptr_t>(result), STRING);
+         }
+@@ -2927,7 +2975,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             result = StringFromCharCode(cx, c);
+             if (!result) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+           }
+           retValue = StringValue(result).asRawBits();
+@@ -3356,7 +3404,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             retValue = StringValue(result).asRawBits();
+           } else {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+         PREDICT_RETURN();
+@@ -3395,7 +3443,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                 }
+                 if (!StringsEqual<EqualityKind::Equal>(cx, lhs, rhs, &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Ne:
+@@ -3411,35 +3459,35 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                 if (!StringsEqual<EqualityKind::NotEqual>(cx, lhs, rhs,
+                                                           &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Lt:
+                 if (!StringsCompare<ComparisonKind::LessThan>(cx, lhs, rhs,
+                                                               &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Ge:
+                 if (!StringsCompare<ComparisonKind::GreaterThanOrEqual>(
+                         cx, lhs, rhs, &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Le:
+                 if (!StringsCompare<ComparisonKind::GreaterThanOrEqual>(
+                         cx, /* N.B. swapped order */ rhs, lhs, &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               case JSOp::Gt:
+                 if (!StringsCompare<ComparisonKind::LessThan>(
+                         cx, /* N.B. swapped order */ rhs, lhs, &result)) {
+                   ctx.error = PBIResult::Error;
+-                  return IC_ERROR_SENTINEL();
++                  RETURN_IC(IC_ERROR_SENTINEL());
+                 }
+                 break;
+               default:
+@@ -3955,7 +4003,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ReservedRooted<Value> result(&ctx.state.value0);
+           if (!NumberParseInt(cx, str0, radix, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = result.asRawBits();
+         }
+@@ -4168,7 +4216,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* iter = GetIterator(cx, rootedObj);
+           if (!iter) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*iter).asRawBits();
+         }
+@@ -4230,7 +4278,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+                                                         args.allocKind, site);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4255,7 +4303,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               NewArrayObjectBaselineFallback(cx, arrayLength, allocKind, site);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4279,7 +4327,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               ArrayConstructorOneArg(cx, templateObjectRooted, length, site);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4301,7 +4349,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               cx, templateObjectRooted, length);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4331,7 +4379,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               lengthRooted);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4354,7 +4402,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               cx, templateObjectRooted, arrayRooted);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4395,7 +4443,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!CallNativeGetter(cx, getterRooted, receiverRooted,
+                                 &resultRooted)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = resultRooted.asRawBits();
+         }
+@@ -4423,7 +4471,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ReservedRooted<Value> rhsRooted(&ctx.state.value1, rhs);
+           if (!CallNativeSetter(cx, setterRooted, receiverRooted, rhsRooted)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+         PREDICT_RETURN();
+@@ -4517,7 +4565,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result = false;
+           if (!StringIncludes(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -4538,7 +4586,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           int32_t result = 0;
+           if (!StringIndexOf(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = Int32Value(result).asRawBits();
+         }
+@@ -4559,7 +4607,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           int32_t result = 0;
+           if (!StringLastIndexOf(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = Int32Value(result).asRawBits();
+         }
+@@ -4580,7 +4628,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result = false;
+           if (!StringStartsWith(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -4601,7 +4649,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result = false;
+           if (!StringEndsWith(cx, str0, str1, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -4617,7 +4665,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringToLowerCase(cx, str);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4633,7 +4681,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringToUpperCase(cx, str);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4650,7 +4698,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringTrim(cx, str0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4667,7 +4715,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringTrimStart(cx, str0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4684,7 +4732,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringTrimEnd(cx, str0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4705,7 +4753,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = SubstringKernel(cx, str0, begin, length);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4730,7 +4778,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringReplace(cx, str0, str1, str2);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -4751,7 +4799,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = StringSplitString(cx, str0, str1, INT32_MAX);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4789,7 +4837,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             auto* result = Int32ToStringPure(cx, idInt);
+             if (!result) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             WRITE_VALUE_REG(resultId.id(), StringValue(result));
+           }
+@@ -4807,7 +4855,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = NewStringIterator(cx);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -4882,7 +4930,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result;
+           if (!IsPossiblyWrappedTypedArray(cx, obj, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         } else {
+@@ -4975,7 +5023,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!SetPropertyMegamorphic<false>(cx, objRooted, idRooted, valRooted,
+                                              strict)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+ 
+@@ -5019,7 +5067,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = ArrayJoin(cx, obj0, str0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -5039,7 +5087,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ReservedRooted<Value> value0(&ctx.state.value0, rhs);
+           if (!SetArrayLength(cx, obj0, value0, strict)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+         }
+         PREDICT_RETURN();
+@@ -5055,7 +5103,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = ObjectKeys(cx, obj0);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -5073,7 +5121,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = ObjectCreateWithTemplate(cx, templateRooted);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -5111,7 +5159,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = Int32ToStringWithBase<CanGC>(cx, input, base, true);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = StringValue(result).asRawBits();
+         }
+@@ -5146,7 +5194,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           PUSH_IC_FRAME();
+           if (!GetFirstDollarIndexRaw(cx, str, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = Int32Value(result).asRawBits();
+         }
+@@ -5210,7 +5258,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           }
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+ 
+           retValue = ObjectValue(*result).asRawBits();
+@@ -5241,7 +5289,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             if (!RegExpMatcherRaw(cx, regexpRooted, inputRooted, lastIndex,
+                                   nullptr, &result)) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             retValue = result.asRawBits();
+           } else {
+@@ -5249,7 +5297,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+             if (!RegExpSearcherRaw(cx, regexpRooted, inputRooted, lastIndex,
+                                    nullptr, &result)) {
+               ctx.error = PBIResult::Error;
+-              return IC_ERROR_SENTINEL();
++              RETURN_IC(IC_ERROR_SENTINEL());
+             }
+             retValue = Int32Value(result).asRawBits();
+           }
+@@ -5279,7 +5327,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           bool result = false;
+           if (!RegExpHasCaptureGroups(cx, regexpRooted, inputRooted, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -5305,7 +5353,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!RegExpBuiltinExecMatchFromJit(cx, regexpRooted, inputRooted,
+                                              nullptr, &output)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = output.asRawBits();
+         }
+@@ -5331,7 +5379,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!RegExpBuiltinExecTestFromJit(cx, regexpRooted, inputRooted,
+                                             &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = BooleanValue(result).asRawBits();
+         }
+@@ -5359,7 +5407,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           auto* result = NewRegExpStringIterator(cx);
+           if (!result) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = ObjectValue(*result).asRawBits();
+         }
+@@ -5379,7 +5427,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           ReservedRooted<Value> result(&ctx.state.value0, UndefinedValue());
+           if (!GetSparseElementHelper(cx, nobjRooted, index, &result)) {
+             ctx.error = PBIResult::Error;
+-            return IC_ERROR_SENTINEL();
++            RETURN_IC(IC_ERROR_SENTINEL());
+           }
+           retValue = result.asRawBits();
+         }
+@@ -5405,6 +5453,8 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ #undef CACHEOP_UNIMPL
+ 
+ next_ic:
++  PBL_POP_CTX();
++  PBL_POP_CTX();
+   TRACE_PRINTF("IC failed; next IC\n");
+   return CallNextIC(arg0, arg1, stub, ctx);
+ }
+@@ -5759,7 +5809,7 @@ uint8_t* GetPortableFallbackStub(BaselineICFallbackKind kind) {
+ }
+ 
+ uint8_t* GetICInterpreter() {
+-  return reinterpret_cast<uint8_t*>(&ICInterpretOps);
++  return reinterpret_cast<uint8_t*>(&ICInterpretOps<false>);
+ }
+ 
+ /*
+@@ -5768,34 +5818,34 @@ uint8_t* GetICInterpreter() {
+  * -----------------------------------------------
+  */
+ 
+-static EnvironmentObject& getEnvironmentFromCoordinate(
++template <bool Specialized>
++static MOZ_ALWAYS_INLINE EnvironmentObject& getEnvironmentFromCoordinate(
+     BaselineFrame* frame, EnvironmentCoordinate ec) {
+   JSObject* env = frame->environmentChain();
++  PBL_PUSH_CTX(0U);
+   for (unsigned i = ec.hops(); i; i--) {
+-    if (env->is<EnvironmentObject>()) {
++    if (Specialized || env->is<EnvironmentObject>()) {
+       env = &env->as<EnvironmentObject>().enclosingEnvironment();
+     } else {
+       MOZ_ASSERT(env->is<DebugEnvironmentProxy>());
+       env = &env->as<DebugEnvironmentProxy>().enclosingEnvironment();
+     }
++    PBL_UPDATE_CTX(i);
+   }
++  PBL_POP_CTX();
+   return env->is<EnvironmentObject>()
+              ? env->as<EnvironmentObject>()
+              : env->as<DebugEnvironmentProxy>().environment();
+ }
+ 
+-#ifndef __wasi__
+-#  define DEBUG_CHECK()                                                   \
+-    if (frame->isDebuggee()) {                                            \
+-      TRACE_PRINTF(                                                       \
+-          "Debug check: frame is debuggee, checking for debug script\n"); \
+-      if (frame->script()->hasDebugScript()) {                            \
+-        goto debug;                                                       \
+-      }                                                                   \
+-    }
+-#else
+-#  define DEBUG_CHECK()
+-#endif
++#define DEBUG_CHECK()                                                   \
++  if (!Specialized && frame->isDebuggee()) {                            \
++    TRACE_PRINTF(                                                       \
++        "Debug check: frame is debuggee, checking for debug script\n"); \
++    if (frame->script()->hasDebugScript()) {                            \
++      goto debug;                                                       \
++    }                                                                   \
++  }
+ 
+ #define LABEL(op) (&&label_##op)
+ #ifdef ENABLE_COMPUTED_GOTO_DISPATCH
+@@ -5805,29 +5855,24 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
+     goto* addresses[*pc]
+ #else
+ #  define CASE(op) label_##op : case JSOp::op:
+-#  define DISPATCH() \
+-    DEBUG_CHECK();   \
++#  define DISPATCH()    \
++    DEBUG_CHECK();      \
++    PBL_UPDATE_CTX(pc); \
+     goto dispatch
+ #endif
+ 
+-#define ADVANCE(delta) pc += (delta);
++#define ADVANCE(delta) \
++  pc += (delta);       \
++  PBL_UPDATE_CTX(pc);
+ #define ADVANCE_AND_DISPATCH(delta) \
+   ADVANCE(delta);                   \
+   DISPATCH();
+ 
+ #define END_OP(op) ADVANCE_AND_DISPATCH(JSOpLength_##op);
+ 
+-#define VIRTPUSH(value) PUSH(value)
+-#define VIRTPOP() POP()
+-#define VIRTSP(index) sp[(index)]
+-#define VIRTSPWRITE(index, value) sp[(index)] = (value)
+-#define SYNCSP()
+-#define SETLOCAL(i, value) frame->unaliasedLocal(i) = value
+-#define GETLOCAL(i) frame->unaliasedLocal(i)
+-
+ #define IC_SET_ARG_FROM_STACK(index, stack_index) \
+-  ic_arg##index = sp[(stack_index)].asUInt64();
+-#define IC_POP_ARG(index) ic_arg##index = (*sp++).asUInt64();
++  ic_arg##index = VIRTSP(stack_index).asUInt64();
++#define IC_POP_ARG(index) ic_arg##index = VIRTPOP().asUInt64();
+ #define IC_SET_VAL_ARG(index, expr) ic_arg##index = (expr).asRawBits();
+ #define IC_SET_OBJ_ARG(index, expr) \
+   ic_arg##index = reinterpret_cast<uint64_t>(expr);
+@@ -5835,10 +5880,10 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
+ #define IC_PUSH_RESULT() VIRTPUSH(StackVal(ic_ret));
+ 
+ #if !defined(TRACE_INTERP)
+-#  define PREDICT_NEXT(op)       \
+-    if (JSOp(*pc) == JSOp::op) { \
+-      DEBUG_CHECK();             \
+-      goto label_##op;           \
++#  define PREDICT_NEXT(op)                       \
++    if (!Specialized && JSOp(*pc) == JSOp::op) { \
++      DEBUG_CHECK();                             \
++      goto label_##op;                           \
+     }
+ #else
+ #  define PREDICT_NEXT(op)
+@@ -5863,14 +5908,19 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
+ 
+ #define NEXT_IC() icEntry++
+ 
++#define UPDATE_SPOFF() \
++  ctx.spoffset =       \
++      reinterpret_cast<uintptr_t>(spbase) - reinterpret_cast<uintptr_t>(sp);
++
+ #define INVOKE_IC(kind, hasarg2)                                             \
+-  ctx.sp_ = sp;                                                              \
+   frame->interpreterPC() = pc;                                               \
+-  frame->interpreterICEntry() = icEntry;                                     \
+   SYNCSP();                                                                  \
++  UPDATE_SPOFF();                                                            \
+   PBL_CALL_IC(icEntry->firstStub()->rawJitCode(), ctx, icEntry->firstStub(), \
+               ic_ret, ic_arg0, ic_arg1, ic_arg2, hasarg2);                   \
+   if (ic_ret == IC_ERROR_SENTINEL()) {                                       \
++    PBL_PUSH_CTX(uint32_t(1));                                               \
++    pcoffset = pc - pcbase;                                                  \
+     ic_result = ctx.error;                                                   \
+     goto ic_fail;                                                            \
+   }                                                                          \
+@@ -5895,12 +5945,15 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
+     Stack::handleMut(&sp[(index)]); \
+   })
+ 
+-template <bool IsRestart, bool HybridICs>
+-PBIResult PortableBaselineInterpret(
+-    JSContext* cx_, State& state, Stack& stack, StackVal* sp,
+-    JSObject* envChain, Value* ret, jsbytecode* pc, ImmutableScriptData* isd,
+-    jsbytecode* restartEntryPC, BaselineFrame* restartFrame,
+-    StackVal* restartEntryFrame, PBIResult restartCode) {
++template <bool Specialized, bool IsRestart, bool HybridICs>
++PBIResult PortableBaselineInterpret(JSContext* cx_, State& state, Stack& stack,
++                                    StackVal* sp, JSObject* envChain,
++                                    Value* ret, jsbytecode* pcbase,
++                                    uint32_t pcoffset, ImmutableScriptData* isd,
++                                    jsbytecode* restartEntryPC,
++                                    BaselineFrame* restartFrame,
++                                    StackVal* restartEntryFrame,
++                                    PBIResult restartCode) {
+ #define RESTART(code)                                                 \
+   if (!IsRestart) {                                                   \
+     TRACE_PRINTF("Restarting (code %d sp %p fp %p)\n", int(code), sp, \
+@@ -5913,14 +5966,26 @@ PBIResult PortableBaselineInterpret(
+ #define GOTO_ERROR()           \
+   do {                         \
+     SYNCSP();                  \
++    UPDATE_SPOFF();            \
++    pcoffset = pc - pcbase;    \
+     RESTART(PBIResult::Error); \
+     goto error;                \
+   } while (0)
+ 
++#define RESET_SP(new_sp) \
++  sp = new_sp;           \
++  spbase = sp;           \
++  ctx.spbase = spbase;   \
++  ctx.spoffset = 0;
++
+   // Update local state when we switch to a new script with a new PC.
+ #define RESET_PC(new_pc, new_script)                                \
+   pc = new_pc;                                                      \
++  pcbase = new_script->code();                                      \
++  ctx.pcbase = pcbase;                                              \
++  pcoffset = pc - pcbase;                                           \
+   entryPC = new_script->code();                                     \
++  ctx.entryPC = entryPC;                                            \
+   isd = new_script->immutableScriptData();                          \
+   icEntries = frame->icScript()->icEntries();                       \
+   icEntry = frame->interpreterICEntry();                            \
+@@ -5940,6 +6005,7 @@ PBIResult PortableBaselineInterpret(
+   BaselineFrame* frame = restartFrame;
+   StackVal* entryFrame = restartEntryFrame;
+   jsbytecode* entryPC = restartEntryPC;
++  jsbytecode* pc = pcbase + pcoffset;
+ 
+   if (!IsRestart) {
+     PUSHNATIVE(StackValNative(nullptr));  // Fake return address.
+@@ -5953,18 +6019,54 @@ PBIResult PortableBaselineInterpret(
+     entryPC = pc;
+   }
+ 
++  /*
++   * Local state: PC, IC entry pointer, stack pointer, frame pointer,
++   * and tracking of entry state when multiple frames are handled in
++   * this one interpreter call.
++   *
++   * Note that we store a lot of state in `ctx`; this is for
++   * register-pressure reasons. We do not want the restart tails to
++   * keep locals alive; rather we are fine with loads from memory on
++   * those cold paths.
++   *
++   * Despite that in-memory state, we *also* keep cached copies in
++   * locals of various state. This is so that partial-evaluation
++   * specialization and other compiler optimizations can see through
++   * this dataflow. We are careful to use the cached-in-local copies
++   * only in ways that can be elided after
++   * specialization/optimization, and to rely on the in-memory copies
++   * when dynamic copies will be loaded.
++   *
++   * Finally, we split PC and SP into "base" and "offset" portions
++   * carefully so that the "offsets" are fixed for a given program
++   * point in the bytecode. This allows specialization to
++   * constant-propagate the offsets rather than generate a chain of
++   * adds/subtracts from the dynamic base.
++   */
++
+   bool from_unwind = false;
+-  uint32_t nfixed = frame->script()->nfixed();
+-  bool argsObjAliasesFormals = frame->script()->argsObjAliasesFormals();
++  StackVal* spbase;
++  ICCtx ctx(cx_, frame, state, stack);
+ 
+-  PBIResult ic_result = PBIResult::Ok;
+-  uint64_t ic_arg0 = 0, ic_arg1 = 0, ic_arg2 = 0, ic_ret = 0;
++  RESET_SP(sp);
++  ctx.envChain = envChain;
++  ctx.isd = isd;
++  ctx.ret = ret;
++  ctx.entryFrame = entryFrame;
++  ctx.entryPC = entryPC;
++  ctx.pcbase = pcbase;
++
++  bool argsObjAliasesFormals;
++  uint32_t nfixed;
++  PBL_SETUP_INTERP_INPUTS(argsObjAliasesFormals, nfixed);
+ 
+-  ICCtx ctx(cx_, frame, state, stack);
+   auto* icEntries = frame->icScript()->icEntries();
+   auto* icEntry = icEntries;
+   const uint32_t* resumeOffsets = isd->resumeOffsets().data();
+ 
++  PBIResult ic_result = PBIResult::Ok;
++  uint64_t ic_arg0 = 0, ic_arg1 = 0, ic_arg2 = 0, ic_ret = 0;
++
+   if (IsRestart) {
+     ic_result = restartCode;
+     TRACE_PRINTF(
+@@ -5996,11 +6098,13 @@ PBIResult PortableBaselineInterpret(
+   }
+   ret->setUndefined();
+ 
+-  // Check if we are being debugged, and set a flag in the frame if so. This
+-  // flag must be set before calling InitFunctionEnvironmentObjects.
+-  if (frame->script()->isDebuggee()) {
+-    TRACE_PRINTF("Script is debuggee\n");
+-    frame->setIsDebuggee();
++  if (!Specialized) {
++    // Check if we are being debugged, and set a flag in the frame if so. This
++    // flag must be set before calling InitFunctionEnvironmentObjects.
++    if (frame->script()->isDebuggee()) {
++      TRACE_PRINTF("Script is debuggee\n");
++      frame->setIsDebuggee();
++    }
+   }
+ 
+   if (CalleeTokenIsFunction(frame->calleeToken())) {
+@@ -6017,37 +6121,43 @@ PBIResult PortableBaselineInterpret(
+   }
+ 
+   // The debug prologue can't run until the function environment is set up.
+-  if (frame->script()->isDebuggee()) {
+-    PUSH_EXIT_FRAME();
+-    if (!DebugPrologue(cx, frame)) {
+-      GOTO_ERROR();
+-    }
+-  }
+-
+-  if (!frame->script()->hasScriptCounts()) {
+-    if (ctx.frameMgr.cxForLocalUseOnly()->realm()->collectCoverageForDebug()) {
++  if (!Specialized) {
++    if (frame->script()->isDebuggee()) {
+       PUSH_EXIT_FRAME();
+-      if (!frame->script()->initScriptCounts(cx)) {
++      if (!DebugPrologue(cx, frame)) {
+         GOTO_ERROR();
+       }
+     }
+-  }
+-  COUNT_COVERAGE_MAIN();
++
++    if (!frame->script()->hasScriptCounts()) {
++      if (ctx.frameMgr.cxForLocalUseOnly()
++              ->realm()
++              ->collectCoverageForDebug()) {
++        PUSH_EXIT_FRAME();
++        if (!frame->script()->initScriptCounts(cx)) {
++          GOTO_ERROR();
++        }
++      }
++    }
++    COUNT_COVERAGE_MAIN();
+ 
+ #ifdef ENABLE_INTERRUPT_CHECKS
+-  if (ctx.frameMgr.cxForLocalUseOnly()->hasAnyPendingInterrupt()) {
+-    PUSH_EXIT_FRAME();
+-    if (!InterruptCheck(cx)) {
+-      GOTO_ERROR();
++    if (ctx.frameMgr.cxForLocalUseOnly()->hasAnyPendingInterrupt()) {
++      PUSH_EXIT_FRAME();
++      if (!InterruptCheck(cx)) {
++        GOTO_ERROR();
++      }
+     }
+-  }
+ #endif
++  }
+ 
+   TRACE_PRINTF("Entering: sp = %p fp = %p frame = %p, script = %p, pc = %p\n",
+                sp, ctx.stack.fp, frame, frame->script(), pc);
+   TRACE_PRINTF("nslots = %d nfixed = %d\n", int(frame->script()->nslots()),
+                int(frame->script()->nfixed()));
+ 
++  PBL_PUSH_CTX(pc);
++
+   while (true) {
+     DEBUG_CHECK();
+ 
+@@ -6322,7 +6432,8 @@ PBIResult PortableBaselineInterpret(
+           result = Value::fromRawBits(ic_ret).toBoolean();
+         }
+         int32_t jumpOffset = GET_JUMP_OFFSET(pc);
+-        if (!result) {
++        int choice = PBL_SPECIALIZE_VALUE(uint32_t(result), 0, 1);
++        if (!choice) {
+           ADVANCE(jumpOffset);
+           PREDICT_NEXT(JumpTarget);
+           PREDICT_NEXT(LoopHead);
+@@ -6348,7 +6459,8 @@ PBIResult PortableBaselineInterpret(
+           result = Value::fromRawBits(ic_ret).toBoolean();
+         }
+         int32_t jumpOffset = GET_JUMP_OFFSET(pc);
+-        if (result) {
++        int choice = PBL_SPECIALIZE_VALUE(uint32_t(result), 0, 1);
++        if (choice) {
+           ADVANCE(jumpOffset);
+           PREDICT_NEXT(JumpTarget);
+           PREDICT_NEXT(LoopHead);
+@@ -6376,7 +6488,8 @@ PBIResult PortableBaselineInterpret(
+           result = Value::fromRawBits(ic_ret).toBoolean();
+         }
+         int32_t jumpOffset = GET_JUMP_OFFSET(pc);
+-        if (result) {
++        int choice = PBL_SPECIALIZE_VALUE(uint32_t(result), 0, 1);
++        if (choice) {
+           ADVANCE(jumpOffset);
+           PREDICT_NEXT(JumpTarget);
+           PREDICT_NEXT(LoopHead);
+@@ -6404,7 +6517,8 @@ PBIResult PortableBaselineInterpret(
+           result = Value::fromRawBits(ic_ret).toBoolean();
+         }
+         int32_t jumpOffset = GET_JUMP_OFFSET(pc);
+-        if (!result) {
++        int choice = PBL_SPECIALIZE_VALUE(uint32_t(result), 0, 1);
++        if (!choice) {
+           ADVANCE(jumpOffset);
+           PREDICT_NEXT(JumpTarget);
+           PREDICT_NEXT(LoopHead);
+@@ -7737,6 +7851,10 @@ PBIResult PortableBaselineInterpret(
+         uint32_t argc = GET_ARGC(pc);
+         do {
+           {
++            if (Specialized) {
++              break;
++            }
++
+             // CallArgsFromSp would be called with
+             // - numValues = argc + 2 + constructing
+             // - stackSlots = argc + constructing
+@@ -7796,6 +7914,10 @@ PBIResult PortableBaselineInterpret(
+               TRACE_PRINTF("missed fastpath: not enough arguments\n");
+               break;
+             }
++            if (PBL_SCRIPT_HAS_SPECIALIZATION(calleeScript)) {
++              TRACE_PRINTF("missed fastpath: specialized function exists\n");
++              break;
++            }
+ 
+             // Fast-path: function, interpreted, has JitScript, same realm, no
+             // argument underflow.
+@@ -7873,10 +7995,11 @@ PBIResult PortableBaselineInterpret(
+             ctx.frameMgr.switchToFrame(frame);
+             ctx.frame = frame;
+             // 6. Set up PC and SP for callee.
+-            sp = reinterpret_cast<StackVal*>(frame);
++            RESET_SP(reinterpret_cast<StackVal*>(frame));
+             RESET_PC(calleeScript->code(), calleeScript);
+             // 7. Check callee stack space for max stack depth.
+-            if (!stack.check(sp, sizeof(StackVal) * calleeScript->nslots())) {
++            if (!ctx.stack.check(sp,
++                                 sizeof(StackVal) * calleeScript->nslots())) {
+               PUSH_EXIT_FRAME();
+               ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
+               GOTO_ERROR();
+@@ -7934,6 +8057,8 @@ PBIResult PortableBaselineInterpret(
+ 
+         // Slow path: use the IC!
+         ic_arg0 = argc;
++        IC_ZERO_ARG(1);
++        IC_ZERO_ARG(2);
+         ctx.icregs.extraArgs = 2 + constructing;
+         INVOKE_IC(Call, false);
+         VIRTPOPN(argc + 2 + constructing);
+@@ -7960,6 +8085,8 @@ PBIResult PortableBaselineInterpret(
+       CASE(SpreadNew) {
+         static_assert(JSOpLength_SpreadSuperCall == JSOpLength_SpreadNew);
+         ic_arg0 = 1;
++        IC_ZERO_ARG(1);
++        IC_ZERO_ARG(2);
+         ctx.icregs.extraArgs = 3;
+         INVOKE_IC(SpreadCall, false);
+         VIRTPOPN(4);
+@@ -8288,7 +8415,9 @@ PBIResult PortableBaselineInterpret(
+       }
+ 
+       CASE(Coalesce) {
+-        if (!VIRTSP(0).asValue().isNullOrUndefined()) {
++        bool cond = !VIRTSP(0).asValue().isNullOrUndefined();
++        int choice = PBL_SPECIALIZE_VALUE(int(cond), 0, 1);
++        if (choice) {
+           ADVANCE(GET_JUMP_OFFSET(pc));
+           DISPATCH();
+         } else {
+@@ -8298,7 +8427,8 @@ PBIResult PortableBaselineInterpret(
+ 
+       CASE(Case) {
+         bool cond = VIRTPOP().asValue().toBoolean();
+-        if (cond) {
++        int choice = PBL_SPECIALIZE_VALUE(int(cond), 0, 1);
++        if (choice) {
+           VIRTPOP();
+           ADVANCE(GET_JUMP_OFFSET(pc));
+           DISPATCH();
+@@ -8328,7 +8458,8 @@ PBIResult PortableBaselineInterpret(
+         }
+ 
+         if (i >= low && i <= high) {
+-          uint32_t idx = uint32_t(i) - uint32_t(low);
++          uint32_t idx = PBL_SPECIALIZE_VALUE(uint32_t(i) - uint32_t(low), 0,
++                                              uint32_t(high - low + 1));
+           uint32_t firstResumeIndex = GET_RESUMEINDEX(pc + 3 * JUMP_OFFSET_LEN);
+           pc = entryPC + resumeOffsets[firstResumeIndex + idx];
+           DISPATCH();
+@@ -8363,28 +8494,29 @@ PBIResult PortableBaselineInterpret(
+         }
+         from_unwind = false;
+ 
+-        uint32_t argc = frame->numActualArgs();
+-        sp = ctx.stack.popFrame();
++        RESET_SP(ctx.stack.popFrame());
+ 
+         // If FP is higher than the entry frame now, return; otherwise,
+         // do an inline state update.
+-        if (stack.fp > entryFrame) {
+-          *ret = frame->returnValue();
++        if (Specialized || stack.fp > entryFrame) {
++          *ctx.ret = frame->returnValue();
+           TRACE_PRINTF("ret = %" PRIx64 "\n", ret->asRawBits());
+           return ok ? PBIResult::Ok : PBIResult::Error;
+         } else {
+           TRACE_PRINTF("Return fastpath\n");
++          uint32_t argc = frame->numActualArgs();
+           Value ret = frame->returnValue();
+           TRACE_PRINTF("ret = %" PRIx64 "\n", ret.asRawBits());
+ 
+           // Pop exit frame as well.
+-          sp = ctx.stack.popFrame();
++          RESET_SP(ctx.stack.popFrame());
+           // Pop fake return address and descriptor.
+           POPNNATIVE(2);
+ 
+           // Set PC, frame, and current script.
+           frame = reinterpret_cast<BaselineFrame*>(
+-              reinterpret_cast<uintptr_t>(stack.fp) - BaselineFrame::Size());
++              reinterpret_cast<uintptr_t>(ctx.stack.fp) -
++              BaselineFrame::Size());
+           TRACE_PRINTF(" sp -> %p, fp -> %p, frame -> %p\n", sp, ctx.stack.fp,
+                        frame);
+           ctx.frameMgr.switchToFrame(frame);
+@@ -8539,13 +8671,14 @@ PBIResult PortableBaselineInterpret(
+       }
+       CASE(InitLexical) {
+         uint32_t i = GET_LOCALNO(pc);
+-        frame->unaliasedLocal(i) = VIRTSP(0).asValue();
++        SETLOCAL(i, VIRTSP(0).asValue());
+         END_OP(InitLexical);
+       }
+ 
+       CASE(InitAliasedLexical) {
+         EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
+-        EnvironmentObject& obj = getEnvironmentFromCoordinate(frame, ec);
++        EnvironmentObject& obj =
++            getEnvironmentFromCoordinate<Specialized>(frame, ec);
+         obj.setAliasedBinding(ec, VIRTSP(0).asValue());
+         END_OP(InitAliasedLexical);
+       }
+@@ -8650,7 +8783,8 @@ PBIResult PortableBaselineInterpret(
+         static_assert(JSOpLength_GetAliasedVar ==
+                       JSOpLength_GetAliasedDebugVar);
+         EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
+-        EnvironmentObject& obj = getEnvironmentFromCoordinate(frame, ec);
++        EnvironmentObject& obj =
++            getEnvironmentFromCoordinate<Specialized>(frame, ec);
+         VIRTPUSH(StackVal(obj.aliasedBinding(ec)));
+         END_OP(GetAliasedVar);
+       }
+@@ -8745,7 +8879,8 @@ PBIResult PortableBaselineInterpret(
+ 
+       CASE(SetAliasedVar) {
+         EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
+-        EnvironmentObject& obj = getEnvironmentFromCoordinate(frame, ec);
++        EnvironmentObject& obj =
++            getEnvironmentFromCoordinate<Specialized>(frame, ec);
+         MOZ_ASSERT(!IsUninitializedLexical(obj.aliasedBinding(ec)));
+         obj.setAliasedBinding(ec, VIRTSP(0).asValue());
+         END_OP(SetAliasedVar);
+@@ -9053,11 +9188,13 @@ PBIResult PortableBaselineInterpret(
+         END_OP(Unpick);
+       }
+       CASE(DebugCheckSelfHosted) {
+-        HandleValue val = SPHANDLE(0);
+-        {
+-          PUSH_EXIT_FRAME();
+-          if (!Debug_CheckSelfHosted(cx, val)) {
+-            GOTO_ERROR();
++        if (!Specialized) {
++          HandleValue val = SPHANDLE(0);
++          {
++            PUSH_EXIT_FRAME();
++            if (!Debug_CheckSelfHosted(cx, val)) {
++              GOTO_ERROR();
++            }
+           }
+         }
+         END_OP(DebugCheckSelfHosted);
+@@ -9086,9 +9223,15 @@ PBIResult PortableBaselineInterpret(
+ restart:
+   // This is a `goto` target so that we exit any on-stack exit frames
+   // before restarting, to match previous behavior.
+-  return PortableBaselineInterpret<true, HybridICs>(
+-      ctx.frameMgr.cxForLocalUseOnly(), ctx.state, ctx.stack, sp, envChain, ret,
+-      pc, isd, entryPC, frame, entryFrame, restartCode);
++  //
++  // Note carefully that every arg here is loaded from `ctx` except
++  // for `pcoffset`, which can be computed as a constant when this
++  // code is specialized. This is intentional: it reduces register
++  // pressure across the main function body.
++  return PortableBaselineInterpret<false, true, HybridICs>(
++      ctx.frameMgr.cxForLocalUseOnly(), ctx.state, ctx.stack, ctx.sp(),
++      ctx.envChain, ctx.ret, ctx.pcbase, pcoffset, ctx.isd, ctx.entryPC,
++      ctx.frame, ctx.entryFrame, restartCode);
+ 
+ error:
+   TRACE_PRINTF("HandleException: frame %p\n", frame);
+@@ -9117,7 +9260,7 @@ error:
+       case ExceptionResumeKind::Finally:
+         RESET_PC(frame->interpreterPC(), frame->script());
+         ctx.stack.fp = reinterpret_cast<StackVal*>(rfe.framePointer);
+-        sp = reinterpret_cast<StackVal*>(rfe.stackPointer);
++        RESET_SP(reinterpret_cast<StackVal*>(rfe.stackPointer));
+         TRACE_PRINTF(" -> finally to pc %p\n", pc);
+         VIRTPUSH(StackVal(rfe.exception));
+         VIRTPUSH(StackVal(rfe.exceptionStack));
+@@ -9153,6 +9296,8 @@ error:
+   DISPATCH();
+ 
+ ic_fail:
++  PBL_POP_CTX();  // inner "slow path" context
++  PBL_POP_CTX();  // PC context
+   RESTART(ic_result);
+   switch (ic_result) {
+     case PBIResult::Ok:
+@@ -9174,7 +9319,7 @@ unwind:
+     TRACE_PRINTF(" -> returning\n");
+     return PBIResult::Unwind;
+   }
+-  sp = ctx.stack.unwindingSP;
++  RESET_SP(ctx.stack.unwindingSP);
+   ctx.stack.fp = ctx.stack.unwindingFP;
+   frame = reinterpret_cast<BaselineFrame*>(
+       reinterpret_cast<uintptr_t>(ctx.stack.fp) - BaselineFrame::Size());
+@@ -9194,7 +9339,7 @@ unwind_error:
+       reinterpret_cast<uintptr_t>(entryFrame) + BaselineFrame::Size()) {
+     return PBIResult::Error;
+   }
+-  sp = ctx.stack.unwindingSP;
++  RESET_SP(ctx.stack.unwindingSP);
+   ctx.stack.fp = ctx.stack.unwindingFP;
+   frame = reinterpret_cast<BaselineFrame*>(
+       reinterpret_cast<uintptr_t>(ctx.stack.fp) - BaselineFrame::Size());
+@@ -9212,10 +9357,10 @@ unwind_ret:
+   }
+   if (reinterpret_cast<uintptr_t>(ctx.stack.unwindingFP) ==
+       reinterpret_cast<uintptr_t>(entryFrame) + BaselineFrame::Size()) {
+-    *ret = frame->returnValue();
++    *ctx.ret = frame->returnValue();
+     return PBIResult::Ok;
+   }
+-  sp = ctx.stack.unwindingSP;
++  RESET_SP(ctx.stack.unwindingSP);
+   ctx.stack.fp = ctx.stack.unwindingFP;
+   frame = reinterpret_cast<BaselineFrame*>(
+       reinterpret_cast<uintptr_t>(ctx.stack.fp) - BaselineFrame::Size());
+@@ -9226,7 +9371,6 @@ unwind_ret:
+   from_unwind = true;
+   goto do_return;
+ 
+-#ifndef __wasi__
+ debug:;
+   {
+     TRACE_PRINTF("hit debug point\n");
+@@ -9239,7 +9383,6 @@ debug:;
+     TRACE_PRINTF("HandleDebugTrap done\n");
+   }
+   goto dispatch;
+-#endif
+ }
+ 
+ /*
+@@ -9306,9 +9449,10 @@ bool PortableBaselineTrampoline(JSContext* cx, size_t argc, Value* argv,
+   jsbytecode* pc = script->code();
+   ImmutableScriptData* isd = script->immutableScriptData();
+   PBIResult ret;
+-  ret = PortableBaselineInterpret<false, kHybridICsInterp>(
+-      cx, state, stack, sp, envChain, result, pc, isd, nullptr, nullptr,
+-      nullptr, PBIResult::Ok);
++  PBL_CALL_INTERP(ret, script,
++                  (PortableBaselineInterpret<false, false, kHybridICsInterp>),
++                  cx, state, stack, sp, envChain, result, pc, 0, isd, nullptr,
++                  nullptr, nullptr, PBIResult::Ok);
+   switch (ret) {
+     case PBIResult::Ok:
+     case PBIResult::UnwindRet:
+@@ -9380,5 +9524,65 @@ bool PortablebaselineInterpreterStackCheck(JSContext* cx, RunState& state,
+   return (top - base) >= needed;
+ }
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++
++// IDs for interpreter bodies that we weval, so that we can stably
++// associate collected request bodies with interpreters even when
++// SpiderMonkey is relinked and actual function pointer values may
++// change.
++static const uint32_t WEVAL_JSOP_ID = 1;
++static const uint32_t WEVAL_IC_ID = 2;
++
++WEVAL_DEFINE_TARGET(1, (PortableBaselineInterpret<true, false, false>));
++WEVAL_DEFINE_TARGET(2, (ICInterpretOps<true>));
++
++void EnqueueScriptSpecialization(JSScript* script) {
++  Weval& weval = script->weval();
++  if (!weval.req) {
++    using weval::Runtime;
++    using weval::Specialize;
++    using weval::SpecializeMemory;
++
++    jsbytecode* pc = script->code();
++    uint32_t pc_len = script->length();
++    ImmutableScriptData* isd = script->immutableScriptData();
++    uint32_t isd_len = isd->immutableData().Length();
++
++    weval.req = weval::weval(
++        reinterpret_cast<PBIFunc*>(&weval.func),
++        &PortableBaselineInterpret<true, false, false>, WEVAL_JSOP_ID,
++        /* num_globals = */ 2,
++        Specialize<uint64_t>(script->argsObjAliasesFormals() ? 1 : 0),
++        Specialize<uint64_t>(script->nfixed()), Runtime<JSContext*>(),
++        Runtime<State&>(), Runtime<Stack&>(), Runtime<StackVal*>(),
++        Runtime<JSObject*>(), Runtime<Value*>(),
++        SpecializeMemory<jsbytecode*>(pc, pc_len), Specialize<uint32_t>(0),
++        SpecializeMemory<ImmutableScriptData*>(isd, isd_len),
++        Runtime<jsbytecode*>(), Runtime<BaselineFrame*>(), Runtime<StackVal*>(),
++        Runtime<PBIResult>());
++  }
++}
++
++void EnqueueICStubSpecialization(CacheIRStubInfo* stubInfo) {
++  Weval& weval = stubInfo->weval();
++  if (!weval.req) {
++    using weval::Runtime;
++    using weval::SpecializeMemory;
++
++    // StubInfo length: do not include the `Weval` object pointer, as
++    // it is nondeterministic.
++    uint32_t len = sizeof(CacheIRStubInfo) - sizeof(void*);
++
++    weval.req =
++        weval::weval(reinterpret_cast<ICStubFunc*>(&weval.func),
++                     &ICInterpretOps<true>, WEVAL_IC_ID, /* num_globals = */ 2,
++                     SpecializeMemory<CacheIRStubInfo*>(stubInfo, len),
++                     SpecializeMemory<const uint8_t*>(stubInfo->code(),
++                                                      stubInfo->codeLength()));
++  }
++}
++
++#endif  // ENABLE_JS_PBL_WEVAL
++
+ }  // namespace pbl
+ }  // namespace js
+diff --git a/js/src/vm/PortableBaselineInterpret.h b/js/src/vm/PortableBaselineInterpret.h
+index 7bc49e309e6e..46f80d1ae585 100644
+--- a/js/src/vm/PortableBaselineInterpret.h
++++ b/js/src/vm/PortableBaselineInterpret.h
+@@ -329,16 +329,26 @@ enum class PBIResult {
+   UnwindRet,
+ };
+ 
+-template <bool IsRestart, bool HybridICs>
++template <bool Specialized, bool IsRestart, bool HybridICs>
+ PBIResult PortableBaselineInterpret(
+     JSContext* cx_, State& state, Stack& stack, StackVal* sp,
+-    JSObject* envChain, Value* ret, jsbytecode* pc, ImmutableScriptData* isd,
+-    jsbytecode* restartEntryPC, jit::BaselineFrame* restartFrame,
+-    StackVal* restartEntryFrame, PBIResult restartCode);
++    JSObject* envChain, Value* ret, jsbytecode* pcbase, uint32_t pcoffset,
++    ImmutableScriptData* isd, jsbytecode* restartEntryPC,
++    jit::BaselineFrame* restartFrame, StackVal* restartEntryFrame,
++    PBIResult restartCode);
+ 
+ uint8_t* GetPortableFallbackStub(jit::BaselineICFallbackKind kind);
+ uint8_t* GetICInterpreter();
+ 
++#ifdef ENABLE_JS_PBL_WEVAL
++// Register the existence of a JSScript, in case PBL may have a way to
++// accelerate it (e.g., register a weval specialization request).
++void EnqueueScriptSpecialization(JSScript* script);
++// Register the existence of an ICScript, in case PBL may have a way
++// to accelerate it (e.g., register a weval specialization request).
++void EnqueueICStubSpecialization(jit::CacheIRStubInfo* stub);
++#endif
++
+ } /* namespace pbl */
+ } /* namespace js */
+ 
+diff --git a/js/src/vm/Weval.h b/js/src/vm/Weval.h
+new file mode 100644
+index 000000000000..fd805e3f943c
+--- /dev/null
++++ b/js/src/vm/Weval.h
+@@ -0,0 +1,35 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef vm_Weval_h
++#define vm_Weval_h
++
++#ifdef ENABLE_JS_PBL_WEVAL
++#  include <weval.h>
++#endif
++
++namespace js {
++
++#ifdef ENABLE_JS_PBL_WEVAL
++
++struct Weval {
++  weval_func_t func;
++  weval_req_t* req;
++
++ public:
++  Weval() : func(nullptr), req(nullptr) {}
++  ~Weval() {
++    if (req) {
++      weval_free(req);
++      req = nullptr;
++    }
++  }
++};
++
++#endif
++}  // namespace js
++
++#endif /* vm_Weval_h */

@@ -1,0 +1,27 @@
+yurt-firefox
+
+This repository carries a patch queue against Mozilla Firefox
+(https://github.com/mozilla-firefox/firefox) and the scripts that apply,
+verify, export and build it. Firefox and the files the patches change are
+licensed under the Mozilla Public License 2.0 (see LICENSE); patches that touch
+MPL files keep those files' licence headers.
+
+The queue also adds third-party files that are not under the MPL. Their
+licence texts are added by the same patch, next to the files:
+
+  third_party/weval   weval.h, the weval partial-evaluator interface
+                      (https://github.com/bytecodealliance/weval)
+                      Licence: Apache-2.0 WITH LLVM-exception
+                      Text: third_party/weval/LICENSE
+                      Added by: patches/0004-Vendor-the-weval-and-wizer-headers.patch
+
+  third_party/wizer   wizer.h, the Wizer pre-initialisation interface
+                      (https://github.com/bytecodealliance/wizer)
+                      Licence: Apache-2.0 WITH LLVM-exception
+                      Text: third_party/wizer/LICENSE
+                      Added by: patches/0004-Vendor-the-weval-and-wizer-headers.patch
+
+data/ics/ is the SpiderMonkey ahead-of-time IC corpus copied from
+YurtOS/firefox js/src/ics: generated CacheIR stub descriptions plus Firefox's
+two MPL-2.0 helper scripts (remove-duplicates.py,
+remove-platform-dependent-ics.py).
