@@ -349,7 +349,7 @@ guard_holds_under_caller_ifs() {
   basic_queue
   make_decoy "$T/decoy"
   before=$(repo_state "$T/decoy")
-  for ifs in $'\n\t' , ''; do
+  for ifs in $'\n\t' ',' ''; do
     n=$((n + 1))
     with_git_env "$T/decoy" "GIT_DIR GIT_WORK_TREE" with_ifs "$ifs" pq_fetch "$T/ifs$n"
     with_git_env "$T/decoy" "GIT_DIR GIT_WORK_TREE" with_ifs "$ifs" pq_apply "$T/ifs$n" "$T/patches" "$T/ics"

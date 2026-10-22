@@ -207,7 +207,7 @@ sourced_under_caller_ifs() {
   write_upstream "$(queue_tree)"
   make_decoy "$R.decoy"
   before=$(repo_state "$R.decoy")
-  for ifs in $'\n\t' , ''; do
+  for ifs in $'\n\t' ',' ''; do
     n=$((n + 1))
     RC=0
     OUT=$(with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE" \
