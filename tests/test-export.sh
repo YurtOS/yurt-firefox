@@ -380,6 +380,21 @@ export_ignores_user_config() {
   assert_eq "" "$failed" "settings that changed the export"
 }
 
+# Exported variables that change diff output do not change the export.
+export_ignores_user_env() {
+  local kv failed=
+  hostile_root
+  for kv in GIT_DIFF_OPTS=-u5; do
+    restore_clean
+    {
+      with_env "$kv" export_cmd "$S" >/dev/null </dev/null &&
+        with_env "$kv" export_cmd --write "$S" >/dev/null </dev/null &&
+        same_as_clean "$kv" >/dev/null
+    } || failed="$failed [$kv]"
+  done
+  assert_eq "" "$failed" "variables that changed the export"
+}
+
 # Settings in the scratch checkout's own config do not change the export either.
 export_ignores_scratch_config() {
   local kv failed=
@@ -455,6 +470,7 @@ run_test refuses_empty_commit_clearly refuses_empty_commit_clearly
 run_test refuses_replay_that_differs_from_head refuses_replay_that_differs_from_head
 run_test export_ignores_user_config export_ignores_user_config
 run_test export_ignores_scratch_config export_ignores_scratch_config
+run_test export_ignores_user_env export_ignores_user_env
 run_test export_ignores_repository_env export_ignores_repository_env
 run_test export_refuses_readonly_repository_env export_refuses_readonly_repository_env
 run_test scratch_builds_without_committer_env scratch_builds_without_committer_env

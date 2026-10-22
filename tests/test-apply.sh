@@ -429,6 +429,23 @@ tree_ignores_user_config() {
   done
 }
 
+# Exported variables that change how git reads attributes or creates repos do
+# not change the applied tree.
+tree_ignores_user_env() {
+  local kv clean n=0
+  new_case
+  basic_queue
+  printf 'crlf\r\n' >"$T/ics/crlf.txt"
+  apply_queue
+  clean=$(pq_tree "$W")
+  for kv in GIT_ATTR_SOURCE=refs/heads/no-such-ref GIT_DEFAULT_HASH=sha256; do
+    n=$((n + 1))
+    with_env "$kv" pq_fetch "$T/env$n"
+    with_env "$kv" pq_apply "$T/env$n" "$T/patches" "$T/ics"
+    assert_eq "$clean" "$(with_env "$kv" pq_tree "$T/env$n")" "$kv"
+  done
+}
+
 # apply.ignoreWhitespace must not let whitespace-drifted context apply, and
 # status.showUntrackedFiles=no must not hide an untracked file from the guard.
 strict_under_user_config() {
@@ -476,4 +493,5 @@ run_test refuses_readonly_global_config refuses_readonly_global_config
 run_test refuses_old_git refuses_old_git
 run_test tree_ignores_user_config tree_ignores_user_config
 run_test strict_under_user_config strict_under_user_config
+run_test tree_ignores_user_env tree_ignores_user_env
 finish

@@ -97,6 +97,16 @@ with_readonly_git_env() {
   GIT_DIR="$repo/.git" GIT_WORK_TREE="$repo" bash -c "readonly GIT_DIR GIT_WORK_TREE; $script" _ "$@"
 }
 
+# with_env <name=value> <command...>: run the command in a subshell with the
+# variable exported.
+with_env() {
+  (
+    export "$1"
+    shift
+    "$@"
+  )
+}
+
 # make_git_shim <dir> <version>: a `git` in <dir> that reports
 # "git version <version>" for --version and runs the real git otherwise.
 make_git_shim() {
