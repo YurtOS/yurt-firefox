@@ -51,7 +51,7 @@ assert m["tag"] == "V1"
 assert m["commit"] == sys.argv[2]
 assert m["mozconfig_sha256"] == sys.argv[3]
 assert m["toolchain_artifacts"] == []
-assert m["rust_version"] == "1.98.1"
+assert m["rust_version"] == ""
 for k in ("queue_sha256", "data_ics_sha256"):
     assert len(m[k]) == 64, k
 PY
@@ -75,6 +75,29 @@ hashes_track_inputs() {
   assert_eq 0 "$RC" "$OUT"
   b=$(grep data_ics_sha256 "$BASE/build-manifest.json")
   [ "$a" != "$b" ]
+}
+
+queue_hash_tracks_patch_set() {
+  new_root
+  run_build --dry-run --workdir "$BASE/wd6"
+  a=$(grep queue_sha256 "$BASE/build-manifest.json")
+  rm -rf "$BASE/wd6"
+  # A new patch changes the hash.
+  printf 'diff --git a/other/b.txt b/other/b.txt\n--- a/other/b.txt\n+++ b/other/b.txt\n@@ -1 +1 @@\n-b\n+c\n' >"$R/patches/0001-x.patch"
+  run_build --dry-run --workdir "$BASE/wd6"
+  assert_eq 0 "$RC" "$OUT"
+  b=$(grep queue_sha256 "$BASE/build-manifest.json")
+  [ "$a" != "$b" ]
+}
+
+drift_rejects_short_or_malformed_pin() {
+  new_nm
+  printf 'abc123\n' >"$R/NIGHTMONKEY_PIN"
+  run_drift
+  [ "$RC" -ne 0 ]
+  printf '%sZ\n' "$(git -C "$NM" rev-parse HEAD | cut -c1-39)" >"$R/NIGHTMONKEY_PIN"
+  run_drift
+  [ "$RC" -ne 0 ]
 }
 
 refuses_non_empty_workdir() {
@@ -145,10 +168,12 @@ drift_reads_the_pinned_sha_not_head() {
 run_test dry_run_creates_tree_and_manifest dry_run_creates_tree_and_manifest
 run_test dry_run_does_not_bootstrap dry_run_does_not_bootstrap
 run_test hashes_track_inputs hashes_track_inputs
+run_test queue_hash_tracks_patch_set queue_hash_tracks_patch_set
 run_test refuses_non_empty_workdir refuses_non_empty_workdir
 run_test defaults_workdir_to_workspace defaults_workdir_to_workspace
 run_test mozconfig_matches_pin_in_repo mozconfig_matches_pin_in_repo
 run_test drift_passes_when_equal drift_passes_when_equal
 run_test drift_fails_when_different drift_fails_when_different
 run_test drift_reads_the_pinned_sha_not_head drift_reads_the_pinned_sha_not_head
+run_test drift_rejects_short_or_malformed_pin drift_rejects_short_or_malformed_pin
 finish
