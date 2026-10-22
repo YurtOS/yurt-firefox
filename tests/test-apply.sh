@@ -358,6 +358,22 @@ refuses_readonly_repository_env() {
   [ ! -e "$T/ro" ]
 }
 
+# A readonly GIT_CONFIG_GLOBAL naming the user's config cannot be pointed at
+# /dev/null, so loading the library fails and pq_fetch refuses to run.
+refuses_readonly_global_config() {
+  local out rc script lib=$ROOT/scripts/lib/patch-queue.sh
+  new_case
+  printf '[core]\n\tautocrlf = input\n' >"$T/user.gitconfig"
+  for script in '. "$1"' '. "$1" 2>/dev/null; pq_read_pin "$2" && pq_fetch "$3"'; do
+    rc=0
+    out=$(GIT_CONFIG_GLOBAL=$T/user.gitconfig bash -c "readonly GIT_CONFIG_GLOBAL; $script" _ \
+      "$lib" "$T/UPSTREAM.tmp" "$T/ro" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "ran: $script: $out"; return 1; }
+    case $out in *"GIT_CONFIG_GLOBAL"*) ;; *) echo "no reason given ($script): $out"; return 1 ;; esac
+  done
+  [ ! -e "$T/ro" ]
+}
+
 # User config that would change the applied tree must not: the result equals
 # the clean-config run.
 tree_ignores_user_config() {
@@ -424,6 +440,7 @@ run_test forbidden_flags_absent forbidden_flags_absent
 run_test guard guard
 run_test ignores_repository_env ignores_repository_env
 run_test refuses_readonly_repository_env refuses_readonly_repository_env
+run_test refuses_readonly_global_config refuses_readonly_global_config
 run_test tree_ignores_user_config tree_ignores_user_config
 run_test strict_under_user_config strict_under_user_config
 finish
