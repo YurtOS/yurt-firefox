@@ -78,22 +78,26 @@ else
   # The artifact manifest records the URL and sha256 of what was fetched; the
   # clang is the one bootstrap already installed (same cached artifact).
   state=${MOZBUILD_STATE_PATH:-$HOME/.mozbuild}
-  step "artifact toolchain: linux64-clang $SYSROOT_ARTIFACT"
-  artifacts=$(mktemp)
-  trap 'rm -f "$artifacts"' EXIT
-  (cd "$state" && "$workdir/mach" --log-no-times artifact toolchain \
-    --from-build linux64-clang --from-build "$SYSROOT_ARTIFACT" --artifact-manifest "$artifacts")
+  # mach keeps only the last build's entry in --artifact-manifest, so fetch one
+  # at a time into separate manifests.
+  artifacts=$(mktemp -d)
+  trap 'rm -rf "$artifacts"' EXIT
+  for name in linux64-clang "$SYSROOT_ARTIFACT"; do
+    step "artifact toolchain: $name"
+    (cd "$state" && "$workdir/mach" --log-no-times artifact toolchain \
+      --from-build "$name" --artifact-manifest "$artifacts/$name.json")
+  done
   toolchain_json=$(python3 - "$artifacts" <<'PY'
-import json, sys
-m = json.load(open(sys.argv[1]))
-if not m:
-    sys.exit("build-engine: mach recorded no toolchain artifacts")
+import glob, json, sys
 out = []
-for url in sorted(m):
-    digest = m[url].get("sha256", "")
-    if len(digest) != 64:
-        sys.exit("build-engine: no sha256 for " + url)
-    out.append(json.dumps({"name": url.rsplit("/", 1)[1], "url": url, "sha256": digest}))
+for f in sorted(glob.glob(sys.argv[1] + "/*.json")):
+    for url, info in sorted(json.load(open(f)).items()):
+        digest = info.get("sha256", "")
+        if len(digest) != 64:
+            sys.exit("build-engine: no sha256 for " + url)
+        out.append(json.dumps({"name": url.rsplit("/", 1)[1], "url": url, "sha256": digest}))
+if len(out) != 2:
+    sys.exit("build-engine: expected 2 toolchain artifacts, mach recorded %d" % len(out))
 print(", ".join(out))
 PY
   ) || exit 1
