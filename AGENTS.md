@@ -22,3 +22,18 @@ verify, export and build it. It replaces the `YurtOS/firefox` fork. Only the
 - Never commit `js/src/ics` content to a patch; the corpus lives in `data/ics/`.
 - Firefox builds run on CI or on EC2 launched with
   `/Users/sunny/work/yurtos/bin/ec2slot`, never on the laptop.
+
+## The semantic gate and `NIGHTMONKEY_PIN`
+
+`.github/workflows/gate.yml` builds the queue engine, checks out NightMonkey at
+the SHA in `NIGHTMONKEY_PIN`, links the engine tree in as NightMonkey's
+`firefox/`, builds NightMonkey against it and runs the two jit-test lanes (aot,
+interpreter). It runs nightly, on manual dispatch, and on PRs labeled `gate`.
+The test-source tree is always the tree the queue builds, never the bare tag.
+
+- **Layout-change rule.** A queue patch that changes opcodes or layout fails
+  the pinned gate by design. Merge the NightMonkey change first, then open the
+  queue PR that bumps `NIGHTMONKEY_PIN` alongside the patch.
+- **Pin bump.** A PR that changes `NIGHTMONKEY_PIN` gets the `gate` label and
+  must show the gate green before merge. An engine change that should reach
+  NightMonkey is followed by a NightMonkey PR bumping its queue-commit pin.
