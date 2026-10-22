@@ -17,14 +17,29 @@
 # repository-selection environment, ignores user and system config, and sets the
 # keys that matter with -c, which also wins over a repository's own config.
 
+# Repository selection and config that git would otherwise take from the caller.
+PQ_GIT_UNSET="GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
+  GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_NO_REPLACE_OBJECTS
+  GIT_REPLACE_REF_BASE GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR
+  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT"
+
+# pq_git_env: make this shell's environment hermetic for git, or fail naming the
+# variable that could not be changed (a readonly variable survives `unset`, and
+# git would then act on the repository it names). Run it in a subshell.
+pq_git_env() {
+  local v
+  # shellcheck disable=SC2086
+  unset $PQ_GIT_UNSET 2>/dev/null
+  for v in $PQ_GIT_UNSET; do
+    [ -z "${!v+set}" ] || { echo "pq: $v is readonly and cannot be unset; refusing to run git" >&2; return 1; }
+  done
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
+}
+
 # pq_git <git args...>: git with no inherited repository selection or config.
 pq_git() (
-  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX \
-    GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_NO_REPLACE_OBJECTS \
-    GIT_REPLACE_REF_BASE GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR \
-    GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
-  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
+  pq_git_env || exit 1
   exec git -c core.autocrlf=false -c core.safecrlf=false -c core.quotePath=false \
     -c core.excludesFile=/dev/null -c core.attributesFile=/dev/null \
     -c apply.whitespace=nowarn -c apply.ignoreWhitespace=no \
@@ -92,6 +107,8 @@ pq_fetch() {
 # discard it (delete the clone) and must not retry on it.
 pq_apply() {
   local wt patches ics patch top mine status
+  # The probes below discard git's stderr; say first why git cannot run.
+  (pq_git_env) || return 1
   wt=$(cd "$1" 2>/dev/null && pwd -P) || { echo "pq: no such worktree: $1" >&2; return 1; }
   patches=$(cd "$2" 2>/dev/null && pwd -P) || { echo "pq: no such patches dir: $2" >&2; return 1; }
   ics=$(cd "$3" 2>/dev/null && pwd -P) || { echo "pq: no such corpus dir: $3" >&2; return 1; }
@@ -187,3 +204,6 @@ pq_leftover() {
   fi
   return $rc
 }
+
+# Refuse to load where pq_git cannot run hermetically.
+(pq_git_env) || return 1
