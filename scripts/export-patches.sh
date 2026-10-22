@@ -23,12 +23,18 @@ usage() {
   exit 2
 }
 
+# require_patches_dir: an empty queue is valid, a missing one is not.
+require_patches_dir() {
+  [ -d "$ROOT/patches" ] || { echo "export-patches: no patches directory: $ROOT/patches" >&2; return 1; }
+}
+
 create_scratch() {
   local scratch=$1 patch
   if [ -e "$scratch/.git" ]; then
     echo "export-patches: $scratch already exists; delete it to rebuild from the queue"
     return 0
   fi
+  require_patches_dir || return 1
   pq_read_pin "$ROOT/UPSTREAM" || return 1
   pq_fetch "$scratch" || return 1
   # Not --3way: a patch that does not apply cleanly is a broken queue. --keep-cr
@@ -46,7 +52,7 @@ create_scratch() {
 # Patch bytes must not depend on the user's or the system's git config
 # (subject prefix, context, diff algorithm, prefixes, sign-off ...).
 fp() {
-  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c format.signOff=false "$@"
 }
 
@@ -56,6 +62,7 @@ write_patches() {
   git -C "$scratch" rev-parse --git-dir >/dev/null 2>&1 ||
     { echo "export-patches: $scratch is not a git checkout" >&2; return 1; }
   pq_read_pin "$ROOT/UPSTREAM" || return 1
+  require_patches_dir || return 1
   git -C "$scratch" merge-base --is-ancestor "$PQ_COMMIT" HEAD ||
     { echo "export-patches: $scratch HEAD does not descend from pinned commit $PQ_COMMIT" >&2; return 1; }
 
@@ -77,7 +84,6 @@ write_patches() {
   pq_apply "$work/tree" "$work/patches" "$ROOT/data/ics" || return 1
   PQ_TREE_NEW=$(pq_tree "$work/tree") || return 1
 
-  mkdir -p "$ROOT/patches" || return 1
   find "$ROOT/patches" -maxdepth 1 -type f -name '*.patch' -exec rm -f {} + || return 1
   for f in "$work"/patches/*.patch; do
     [ -e "$f" ] || continue
