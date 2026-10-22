@@ -224,6 +224,8 @@ t_gate() {
   ! body "$f" | grep -q 'continue-on-error' || { echo "gate.yml uses continue-on-error" >&2; return 1; }
   no_or_on "$f" 'ci-suite.sh'
   no_or_on "$f" 'build-engine.sh'
+  has_line "$f" 'run: scripts/ci-suite.sh jit "$CI_LANE"' || { echo "the jit step is not exactly ci-suite.sh jit \"\$CI_LANE\"" >&2; return 1; }
+  has_line "$f" 'run: scripts/build-engine.sh' || { echo "the engine step is not exactly build-engine.sh" >&2; return 1; }
   # ~/.mozbuild is restore-only (engine.yml seeds it from main); rust-cache saves
   # only on main, so gated PRs do not fill the repository's cache quota
   ! body "$f" | grep -Eq 'actions/cache(/save)?@' || { echo "gate.yml saves ~/.mozbuild" >&2; return 1; }
