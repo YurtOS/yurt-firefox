@@ -204,6 +204,75 @@ no_commits_clears_stale_patches() {
   assert_eq "$(hand_tree "$S")" "$(pin_tree)"
 }
 
+# --- refused exports write nothing -----------------------------------------
+
+# queued_root: new_root with a one-patch queue exported from the scratch, and
+# that queue saved in $R.saved.
+queued_root() {
+  new_root
+  export_cmd "$S" >/dev/null
+  echo x >"$S/other/x.txt"
+  scratch_commit "add x"
+  export_cmd --write "$S" >/dev/null
+  mkdir "$R.saved"
+  cp -R "$R/patches" "$R/UPSTREAM" "$R.saved/"
+}
+
+# queue_unchanged: patches/ and UPSTREAM are still the saved queue.
+queue_unchanged() {
+  diff -r "$R.saved/patches" "$R/patches" || { echo "patches/ changed"; return 1; }
+  diff "$R.saved/UPSTREAM" "$R/UPSTREAM" || { echo "UPSTREAM changed"; return 1; }
+}
+
+refuses_merge_commit() {
+  local msg
+  queued_root
+  git -C "$S" checkout -q -b side
+  echo s >"$S/other/s.txt"
+  scratch_commit side
+  git -C "$S" checkout -q -
+  echo m >"$S/other/m.txt"
+  scratch_commit main
+  git -C "$S" merge -q --no-ff --no-commit side
+  # Content only the merge commit carries: format-patch would drop it.
+  echo evil >"$S/other/evil.txt"
+  scratch_commit merge
+  msg=$(export_cmd --write "$S" 2>&1) && { echo "merge exported: $msg"; return 1; }
+  case $msg in *"merge commit"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  queue_unchanged
+}
+
+refuses_empty_commit_clearly() {
+  local msg
+  queued_root
+  git -C "$S" commit -q --allow-empty -m empty
+  msg=$(export_cmd --write "$S" 2>&1) && { echo "empty commit exported: $msg"; return 1; }
+  case $msg in *"empty commit"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  queue_unchanged
+}
+
+# A commit message that contains a diff is applied by `git apply` along with the
+# commit's own diff, so the replayed queue is not the scratch HEAD.
+refuses_replay_that_differs_from_head() {
+  local msg
+  queued_root
+  echo y >"$S/other/y.txt"
+  git -C "$S" add -A
+  git -C "$S" commit -q -F - <<'EOF'
+add y
+
+diff --git a/other/fake.txt b/other/fake.txt
+new file mode 100644
+--- /dev/null
++++ b/other/fake.txt
+@@ -0,0 +1 @@
++fake
+EOF
+  msg=$(export_cmd --write "$S" 2>&1) && { echo "lossy replay exported: $msg"; return 1; }
+  case $msg in *"does not match"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  queue_unchanged
+}
+
 # --- hostile environment and config -----------------------------------------
 
 # hostile_root: new_root with a CRLF corpus file and an exported queue of two
@@ -319,6 +388,9 @@ run_test am_tree_equals_apply_tree am_tree_equals_apply_tree
 run_test binary_hunk_survives binary_hunk_survives
 run_test re_export_is_byte_identical re_export_is_byte_identical
 run_test no_commits_clears_stale_patches no_commits_clears_stale_patches
+run_test refuses_merge_commit refuses_merge_commit
+run_test refuses_empty_commit_clearly refuses_empty_commit_clearly
+run_test refuses_replay_that_differs_from_head refuses_replay_that_differs_from_head
 run_test export_ignores_user_config export_ignores_user_config
 run_test export_ignores_scratch_config export_ignores_scratch_config
 run_test export_ignores_repository_env export_ignores_repository_env
