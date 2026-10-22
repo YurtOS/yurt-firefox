@@ -11,6 +11,14 @@ build with the same totals as the baseline CI run.
 - Fork engine (A): `YurtOS/firefox@dff5cf5344484c56babebf9b2495c400c03e3538` (shallow fetch of that SHA, as engine.yml does).
 - Queue engine (B): this repository at `bcb94b8074374c2300846b7df4000a7b042945fe` (`feat/build-engine`), `scripts/build-engine.sh --workdir <fresh dir>`; manifest: tag `FIREFOX_147_0_4_RELEASE`, commit `310a0cc30b21`, queue sha256 `457bec9a...2ed49`, rustc 1.98.1 (48a229cea 2026-09-01).
 - Toolchains: engine.yml steps replicated: Rust 1.98.1 with `wasm32-wasip1` and `rust-src` (`RUSTUP_TOOLCHAIN=1.98.1`, since the fork checkout is not under NightMonkey's `rust-toolchain.toml`), `./mach --no-interactive bootstrap --application-choice=js`, then `mach artifact toolchain --from-build sysroot-wasm32-wasi` from `~/.mozbuild`. Extra packages: `cmake` 3.28.3, `ninja-build` (apt). sccache was not used (not in the mozconfig).
+- Wasm runner for every NightMonkey step below: NightMonkey's own
+  `wasm-jit-runner`, built by `cmake --build build` from the `ffb918ff3c26`
+  checkout (`build/bin/inproc-shell.sh` runs the guest under it). It links the
+  `wasmtime` crate 45.0.3, per that commit's `Cargo.lock`. The binary's sha256
+  was not recorded. No standalone `wasmtime` CLI was used here. The wasmtime
+  50.0.0 CLI (`wasmtime-v50.0.0-x86_64-linux.tar.xz`, sha256
+  `77c19ee0437991f9ac7837b9c269d9c7076744f85dad263fea5214cc2723c7ff`) belongs
+  to the Task 8 `dist/bin/js` smoke test, not to this qualification.
 - A was built with NightMonkey's own `scripts/build-spidermonkey.sh <checkout>` (mozconfig `spidermonkey/mozconfig`, which is identical to this repo's `mozconfig`); B with `build-engine.sh` (`MOZCONFIG=<repo>/mozconfig ./mach build`).
 
 ## dist comparison
@@ -50,7 +58,11 @@ minutes each with warm `~/.mozbuild`.)
 `cmake -S . -B build -DSPIDERMONKEY_DIST=$HOME/qual/ff/obj-nightmonkey-sm/dist`,
 `cmake --build build`, `build/bin/inproc-shell.sh` present. The queue tree
 (`~/qual/ff`, the `build-engine.sh` workdir) is `~/qual/nm/firefox` (symlink),
-the tree `ci-suite.sh` reads jit-tests from. Steps in engine.yml order, lane
+the tree `ci-suite.sh` reads jit-tests from. At that point `~/qual/ff` held B
+from the same-path pair (A had been built there first and moved aside), so the
+artifact under test is the same-path B whose digests are listed above. The
+different-path B (`~/qual/qfirefox`) was not tested against NightMonkey. Steps
+in engine.yml order, lane
 `both` (`CI_LANE=both`, `RUNNER_TEMP=~/qual/logs`):
 
 | Step | Result | Baseline run | Time |
@@ -58,8 +70,16 @@ the tree `ci-suite.sh` reads jit-tests from. Steps in engine.yml order, lane
 | `scripts/test-guest-tier-options.py build` | all 8 PASS (guest mir, guest baseline, invalid options, block census, direct eval, large function, accessor, onramp fixture) | all PASS | 5 s |
 | `scripts/ci-suite.sh local both` | aot: 131 passed, 0 failed; interpreter: 131 passed, 0 failed | 131/0, 131/0 | 82 s |
 | tier regressions (`--pipeline baseline --strict-coverage`; `--pipeline mir --mir-stress 3 --strict-coverage`) | 131 passed, 0 failed; 131 passed, 0 failed | 131/0, 131/0 | 90 s |
-| `scripts/ci-suite.sh jit both`, aot lane | PASSED ALL: 12906 passed, 0 failed (night: 12307 passing execution results verified) | 12906/0 (12307) | 270 s for both lanes |
-| `scripts/ci-suite.sh jit both`, interpreter lane | PASSED ALL: 13095 passed, 0 failed (night: 12494 passing execution results verified) | 13095/0 (12494) | |
+| `scripts/ci-suite.sh jit both`, aot lane | PASSED ALL: 12906 passed, 0 failed (night: 12307 passing execution results verified) | 12906/0 (12307) | 270 s (one run, both lanes) |
+| `scripts/ci-suite.sh jit both`, interpreter lane | PASSED ALL: 13095 passed, 0 failed (night: 12494 passing execution results verified) | 13095/0 (12494) | (same run as above) |
+
+"aot" here is NightMonkey's lane name. In that lane NightMonkey compiles the
+guest's JavaScript to Wasm (`--night-inprocess`). The interpreter lane runs the
+same binary without it. The name has nothing to do with SpiderMonkey's AOT IC
+corpus: the mozconfig does not pass `--enable-aot-ics`, so the corpus
+(`data/ics`, laid in as `js/src/ics`) is not read by this build (see
+PROVENANCE.md). The A/B byte-identity above, `data/ics` included, shows it did
+not change the output.
 
 Every total equals the baseline CI run. Full jstests are not part of the
 baseline and were not run. Logs on the box: `~/qual/logs/*.log` and
