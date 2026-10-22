@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Check out this repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Free disk space
         run: |
@@ -56,8 +58,10 @@ jobs:
       # cached: build-engine.sh always fetches into a fresh, empty workdir (the
       # objdir lives inside it, and a fresh checkout invalidates its
       # timestamps). Restore runs on every event; save runs only on main pushes
-      # or manual dispatch (main seeds the cache for PRs), and with always() so
-      # a failed build still keeps the expensive toolchain bootstrap.
+      # or manual dispatch (main seeds the cache for PRs), and also after a
+      # failed build so the expensive toolchain bootstrap is kept, but not after
+      # a cancellation or timeout, which can leave a partial ~/.mozbuild that the
+      # immutable key would then serve to every later run.
       - name: Restore ~/.mozbuild
         id: mozbuild
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -75,7 +79,7 @@ jobs:
 
       - name: Save ~/.mozbuild
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: always() && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main')
+        if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
         with:
           path: ~/.mozbuild
           key: mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-${{ hashFiles('mozconfig', 'scripts/build-engine.sh', 'scripts/lib/patch-queue.sh', 'patches/*.patch') }}
@@ -87,9 +91,11 @@ jobs:
           wasmtime --version
           out=$(wasmtime run --dir=. dist/bin/js -e 'print(6*7)')
           [ "$out" = 42 ] || { echo "smoke: expected 42, got '$out'" >&2; exit 1; }
+          echo "smoke ok: $out"
           printf 'function f(n) { return n * 7; }\nprint(f(6));\n' > smoke.js
           out=$(wasmtime run --dir=. dist/bin/js smoke.js)
           [ "$out" = 42 ] || { echo "smoke: script expected 42, got '$out'" >&2; exit 1; }
+          echo "smoke ok: $out"
 
       - name: Upload build manifest
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
