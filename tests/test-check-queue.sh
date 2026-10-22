@@ -67,6 +67,18 @@ refuses_placeholder_upstream() {
   assert_eq 2 "$RC"
 }
 
+# An example.invalid url marks the placeholder even when its commit and tree
+# would verify.
+refuses_example_url() {
+  new_root
+  URL="$R/example.invalid/up"
+  SHA=$(make_fixture_upstream "$URL")
+  write_upstream "$(queue_tree)"
+  run_check
+  assert_eq 2 "$RC" "$OUT"
+  case $OUT in *"UPSTREAM not initialised"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
+}
+
 passes_when_tree_matches() {
   new_root
   write_upstream "$(queue_tree)"
@@ -79,7 +91,7 @@ fails_on_tree_mismatch() {
   write_upstream "$(queue_tree)"
   echo changed >"$R/data/ics/one.txt"
   run_check
-  [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]
+  assert_eq 1 "$RC" "$OUT"
   case $OUT in *"tree mismatch"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
 }
 
@@ -91,7 +103,7 @@ fails_on_moved_tag() {
   git -C "$URL" commit -q -m moved
   git -C "$URL" tag -f V1 >/dev/null
   run_check
-  [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]
+  assert_eq 1 "$RC" "$OUT"
   case $OUT in *"pinned commit"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
 }
 
@@ -105,7 +117,7 @@ runs_census_when_configured() {
   git -C "$URL" commit -q -m extra
   export PQ_YURT_REPO=$URL PQ_YURT_REF=yurt PQ_DOM_COUNT=0
   run_check
-  [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]
+  assert_eq 1 "$RC" "$OUT"
   case $OUT in *new/thing.c*) ;; *) echo "leftover not reported: $OUT"; return 1 ;; esac
 }
 
@@ -155,6 +167,7 @@ passes_under_hostile_git() {
 
 run_test refuses_without_upstream refuses_without_upstream
 run_test refuses_placeholder_upstream refuses_placeholder_upstream
+run_test refuses_example_url refuses_example_url
 run_test passes_when_tree_matches passes_when_tree_matches
 run_test fails_on_tree_mismatch fails_on_tree_mismatch
 run_test fails_on_moved_tag fails_on_moved_tag
