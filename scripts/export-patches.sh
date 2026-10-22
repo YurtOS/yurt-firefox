@@ -23,12 +23,18 @@ usage() {
   exit 2
 }
 
+# require_patches_dir: an empty queue is valid, a missing one is not.
+require_patches_dir() {
+  [ -d "$ROOT/patches" ] || { echo "export-patches: no patches directory: $ROOT/patches" >&2; return 1; }
+}
+
 create_scratch() {
   local scratch=$1 made='' entries
   if [ -e "$scratch/.git" ]; then
     echo "export-patches: $scratch already exists; delete it to rebuild from the queue"
     return 0
   fi
+  require_patches_dir || return 1
   pq_read_pin "$ROOT/UPSTREAM" || return 1
   if [ -e "$scratch" ]; then
     [ -d "$scratch" ] || { echo "export-patches: $scratch is not a directory" >&2; return 1; }
@@ -83,6 +89,7 @@ write_patches() {
   pq_git -C "$scratch" rev-parse --git-dir >/dev/null 2>&1 ||
     { echo "export-patches: $scratch is not a git checkout" >&2; return 1; }
   pq_read_pin "$ROOT/UPSTREAM" || return 1
+  require_patches_dir || return 1
   pq_git -C "$scratch" merge-base --is-ancestor "$PQ_COMMIT" HEAD ||
     { echo "export-patches: $scratch HEAD does not descend from pinned commit $PQ_COMMIT" >&2; return 1; }
 
@@ -148,7 +155,6 @@ write_patches() {
 
   # Stage the new queue next to patches/ (same filesystem, so publishing is a
   # series of renames) and check it before anything published is touched.
-  mkdir -p "$ROOT/patches" || return 1
   stage=$(mktemp -d "$ROOT/.export-stage.XXXXXX") || return 1
   mkdir "$stage/new" || return 1
   while IFS= read -r f; do
