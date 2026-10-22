@@ -84,12 +84,16 @@ basic_queue() {
   EXPECTED=$(expected_tree)
 }
 
-# scan_forbidden <dir...>: succeed (printing hits) if a non-comment line uses a
-# forbidden apply flag.
+# scan_forbidden <root...>: print the non-comment lines under the roots that use
+# a forbidden apply flag. Exit 0 if there is one, 1 if there is none, and 2 if a
+# root cannot be scanned: a scan error is never "no match".
 scan_forbidden() {
-  grep -rnE -e '--(3way|reject|ignore-whitespace|ignore-space-change|unidiff-zero)' \
-    -e '(^|[[:space:]])-3([[:space:]]|$)' "$@" 2>/dev/null |
-    grep -Ev '^[^:]*:[0-9]+:[[:space:]]*#'
+  local hits rc=0
+  hits=$(grep -rnE -e '--(3way|reject|ignore-whitespace|ignore-space-change|unidiff-zero)' \
+    -e '(^|[[:space:]])-3([[:space:]]|$)' -- "$@") || rc=$?
+  case $rc in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+  hits=$(printf '%s\n' "$hits" | grep -Ev '^[^:]*:[0-9]+:[[:space:]]*#') || return 1
+  printf '%s\n' "$hits"
 }
 
 # --- cases --------------------------------------------------------------------
@@ -241,22 +245,32 @@ overlap_and_delete() {
 }
 
 forbidden_flags_absent() {
+  local roots=("$ROOT/scripts") d="$BASE/scan dir/scripts" rc flag
   # The scan must not be vacuous: the library has to exist and be scanned...
   [ -f "$ROOT/scripts/lib/patch-queue.sh" ]
-  local dirs="$ROOT/scripts"
-  [ -d "$ROOT/.github/workflows" ] && dirs="$dirs $ROOT/.github/workflows"
-  # shellcheck disable=SC2086
-  assert_fails scan_forbidden $dirs
-  # ...and able to see a violation, but not a comment mentioning one.
-  mkdir "$BASE/scan"
-  printf '# --3way is forbidden\n' >"$BASE/scan/comment.sh"
-  assert_fails scan_forbidden "$BASE/scan"
-  printf 'git apply --index --3way p\n' >"$BASE/scan/bad.sh"
-  scan_forbidden "$BASE/scan" >/dev/null
-  local flag
-  for flag in -3 --ignore-space-change; do
-    printf 'git apply --index %s p\n' "$flag" >"$BASE/scan/bad.sh"
-    scan_forbidden "$BASE/scan" >/dev/null
+  if [ -d "$ROOT/.github/workflows" ]; then roots+=("$ROOT/.github/workflows"); fi
+  rc=0
+  scan_forbidden "${roots[@]}" || rc=$?
+  assert_eq 1 "$rc" "repository scan (0: forbidden flag found, 2: scan error)"
+  # ...work under a path with spaces, tell a missing root from no match...
+  mkdir -p "$d"
+  cp -R "$ROOT/scripts/." "$d/"
+  rc=0
+  scan_forbidden "$d" || rc=$?
+  assert_eq 1 "$rc" "copy under a path with spaces"
+  rc=0
+  scan_forbidden "$d" "$BASE/no such root" 2>/dev/null || rc=$?
+  assert_eq 2 "$rc" "missing root"
+  # ...and see a violation, but not a comment mentioning one.
+  printf '# --3way is forbidden\n' >"$d/comment.sh"
+  rc=0
+  scan_forbidden "$d" || rc=$?
+  assert_eq 1 "$rc" "comment only"
+  for flag in --3way -3 --reject --ignore-whitespace --ignore-space-change --unidiff-zero; do
+    printf 'git apply --index %s p\n' "$flag" >"$d/bad.sh"
+    rc=0
+    scan_forbidden "$d" >/dev/null || rc=$?
+    assert_eq 0 "$rc" "planted $flag"
   done
 }
 
