@@ -16,6 +16,12 @@
 # apply, am, status, add and format-patch do. pq_git clears the
 # repository-selection environment, ignores user and system config, and sets the
 # keys that matter with -c, which also wins over a repository's own config.
+# It needs git 2.32 or later (GIT_CONFIG_GLOBAL), and the library refuses to load
+# when that or a clean environment cannot be had.
+#
+# Ignoring the user's global config also drops its safe.directory entries, so
+# git refuses a repository owned by another user ("dubious ownership"), as a CI
+# container checkout can be; the census over PQ_YURT_REPO then fails closed.
 
 # Repository selection, config, and the variables that change attributes, new
 # repositories or diff output, which git would otherwise take from the caller.
