@@ -272,6 +272,144 @@ t_gate_lanes() {
   rm -rf "$d"
 }
 
+# concurrency_value <file> <key>: the value of <key> in the top-level
+# `concurrency:` block.
+concurrency_value() {
+  body "$1" | awk -v k="$2" '/^concurrency:/{f=1; next} f && /^[^[:space:]]/{exit}
+    f { t=$0; sub(/^[[:space:]]+/, "", t); if (index(t, k ": ") == 1) { print substr(t, length(k) + 3); exit } }'
+}
+
+# gh_eval <template> <context-json>: evaluate a workflow value containing
+# ${{ }} expressions the way Actions does for the subset used here: github.*
+# property paths (missing -> null), string/number/boolean/null literals, ==, !=,
+# !, &&, || (returning an operand, not a boolean), parentheses; string == is
+# case-insensitive; null, false, 0 and '' are falsy; null interpolates as ''.
+gh_eval() {
+  python3 -I - "$1" "$2" <<'PY'
+import json, re, sys
+
+template, ctx = sys.argv[1], {"github": json.loads(sys.argv[2])}
+TOK = re.compile(r"\s*(?:(?P<s>'(?:[^']|'')*')|(?P<n>-?\d+(?:\.\d+)?)|(?P<op>==|!=|&&|\|\||!|\(|\))|(?P<id>[A-Za-z_][A-Za-z0-9_.-]*))")
+
+def tokens(src):
+    out, i = [], 0
+    while i < len(src):
+        if src[i:].strip() == "":
+            break
+        m = TOK.match(src, i)
+        if not m:
+            sys.exit("gh_eval: cannot parse at: " + src[i:])
+        i = m.end()
+        out.append((m.lastgroup, m.group(m.lastgroup)))
+    return out
+
+def truthy(v):
+    return v not in (None, False, 0, "") and v == v
+
+def eq(a, b):
+    if isinstance(a, str) and isinstance(b, str):
+        return a.lower() == b.lower()
+    return a == b
+
+class P:
+    def __init__(self, t):
+        self.t, self.i = t, 0
+    def peek(self):
+        return self.t[self.i] if self.i < len(self.t) else (None, None)
+    def take(self):
+        tok = self.peek()
+        self.i += 1
+        return tok
+    def expr(self):
+        v = self.and_()
+        while self.peek() == ("op", "||"):
+            self.take()
+            r = self.and_()
+            v = v if truthy(v) else r
+        return v
+    def and_(self):
+        v = self.cmp()
+        while self.peek() == ("op", "&&"):
+            self.take()
+            r = self.cmp()
+            v = r if truthy(v) else v
+        return v
+    def cmp(self):
+        v = self.unary()
+        while self.peek() in (("op", "=="), ("op", "!=")):
+            op = self.take()[1]
+            r = self.unary()
+            v = eq(v, r) if op == "==" else not eq(v, r)
+        return v
+    def unary(self):
+        if self.peek() == ("op", "!"):
+            self.take()
+            return not truthy(self.unary())
+        kind, val = self.take()
+        if kind == "op" and val == "(":
+            v = self.expr()
+            if self.take() != ("op", ")"):
+                sys.exit("gh_eval: missing )")
+            return v
+        if kind == "s":
+            return val[1:-1].replace("''", "'")
+        if kind == "n":
+            return float(val) if "." in val else int(val)
+        if kind == "id":
+            if val in ("true", "false"):
+                return val == "true"
+            if val == "null":
+                return None
+            cur = ctx
+            for part in val.split("."):
+                cur = cur.get(part) if isinstance(cur, dict) else None
+            return cur
+        sys.exit("gh_eval: unexpected token %r" % (val,))
+
+def ev(src):
+    p = P(tokens(src))
+    v = p.expr()
+    if p.peek() != (None, None):
+        sys.exit("gh_eval: trailing tokens in: " + src)
+    return v
+
+def show(v):
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+print(re.sub(r"\$\{\{(.*?)\}\}", lambda m: show(ev(m.group(1))), template))
+PY
+}
+
+# The gate's concurrency group: a push or a `gate` label on a PR replaces the
+# run in flight; adding any other label (whose run the job if: skips) must not
+# join that group, or it would cancel the gate. Nightly and dispatch runs on
+# main share one group and are never cancelled.
+t_gate_concurrency() {
+  local f="$WF/gate.yml" group cancel a b c c2 d e
+  group=$(concurrency_value "$f" group)
+  cancel=$(concurrency_value "$f" cancel-in-progress)
+  [ -n "$group" ] && [ -n "$cancel" ] || { echo "gate.yml lacks concurrency group / cancel-in-progress" >&2; return 1; }
+  a=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":101,"event":{"action":"synchronize"}}')
+  b=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":102,"event":{"action":"labeled","label":{"name":"gate"}}}')
+  c=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":103,"event":{"action":"labeled","label":{"name":"ready"}}}')
+  c2=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":104,"event":{"action":"labeled","label":{"name":"docs"}}}')
+  d=$(gh_eval "$group" '{"event_name":"schedule","ref":"refs/heads/main","run_id":105,"event":{}}')
+  e=$(gh_eval "$group" '{"event_name":"workflow_dispatch","ref":"refs/heads/main","run_id":106,"event":{}}')
+  [ -n "$a" ] && [ -n "$c" ] && [ -n "$d" ] || { echo "group did not evaluate" >&2; return 1; }
+  assert_eq "$a" "$b" "synchronize and a gate label share the PR's group"
+  [ "$c" != "$a" ] || { echo "an unrelated label joins the gate's group ($c) and would cancel it" >&2; return 1; }
+  [ "$c" != "$c2" ] || { echo "unrelated-label runs share a group ($c)" >&2; return 1; }
+  assert_eq "$d" "$e" "nightly and dispatch on main share a group"
+  [ "$d" != "$a" ] || { echo "main runs share the PR's group" >&2; return 1; }
+  assert_eq true "$(gh_eval "$cancel" '{"event_name":"pull_request"}')" "PR runs cancel in progress"
+  assert_eq false "$(gh_eval "$cancel" '{"event_name":"schedule"}')" "nightly runs are not cancelled"
+  assert_eq false "$(gh_eval "$cancel" '{"event_name":"workflow_dispatch"}')" "dispatch runs are not cancelled"
+}
+
 # The pin is validated where it is read: executed with good and bad pins.
 t_gate_pin() {
   check_pin_step "$WF/gate.yml" "Read the pins"
@@ -313,5 +451,6 @@ run_test "queue.yml: fixtures, real check, drift" t_queue
 run_test "gate.yml: triggers, label condition, linked test tree, caches" t_gate
 run_test "gate.yml: each lane reaches the harness and failures fail" t_gate_lanes
 run_test "gate.yml: the pin step rejects bad pins" t_gate_pin
+run_test "gate.yml: an unrelated label does not cancel the gate" t_gate_concurrency
 run_test "gate.yml: logs carry the pin and the build manifest" t_gate_provenance
 finish
