@@ -386,6 +386,38 @@ guard_holds_under_caller_ifs() {
   done
 }
 
+# PQ_GUARDED_EXTRA: names the guard clears beyond git's own list of
+# repository-local variables.
+PQ_GUARDED_EXTRA="GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR GIT_ATTR_SOURCE
+  GIT_DEFAULT_HASH GIT_DIFF_OPTS GIT_EXTERNAL_DIFF"
+
+# Every name in `git rev-parse --local-env-vars`, plus PQ_GUARDED_EXTRA, is
+# exported with a poison value before the library is sourced; a git shim on
+# PATH records the environment git is run with, which must hold none of them,
+# and must point the global and system config at /dev/null.
+guard_clears_every_name() {
+  local names name n=0 lib=$ROOT/scripts/lib/patch-queue.sh
+  new_case
+  names="$(git rev-parse --local-env-vars) $PQ_GUARDED_EXTRA"
+  for name in $names; do n=$((n + 1)); done
+  [ "$n" -ge 20 ] || { echo "only $n names: $names"; return 1; }
+  mkdir "$T/envshim"
+  printf '#!/bin/sh\nenv >"%s"\nexec "%s" "$@"\n' "$T/env.out" "$(command -v git)" >"$T/envshim/git"
+  chmod +x "$T/envshim/git"
+  (
+    for name in $names; do export "$name=$T/poison"; done
+    export GIT_CONFIG_GLOBAL="$T/poison" GIT_CONFIG_SYSTEM="$T/poison" GIT_CONFIG_NOSYSTEM= GIT_ATTR_NOSYSTEM=
+    PATH="$T/envshim:$PATH" bash -c '. "$1" && pq_git --version' _ "$lib" >/dev/null
+  )
+  grep -q '^PATH=' "$T/env.out"
+  for name in $names; do
+    if grep -q "^$name=" "$T/env.out"; then echo "$name reaches git: $(grep "^$name=" "$T/env.out")"; return 1; fi
+  done
+  for name in GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1; do
+    grep -qx "$name" "$T/env.out" || { echo "$name not set for git"; return 1; }
+  done
+}
+
 # A repository-selection variable that cannot be unset (readonly) makes loading
 # the library fail, and pq_git refuse to run even if the caller ignores that.
 refuses_readonly_repository_env() {
@@ -550,6 +582,7 @@ run_test apply_fails_when_patches_cannot_be_listed apply_fails_when_patches_cann
 run_test fetch_fails_when_dest_cannot_be_listed fetch_fails_when_dest_cannot_be_listed
 run_test ignores_repository_env ignores_repository_env
 run_test guard_holds_under_caller_ifs guard_holds_under_caller_ifs
+run_test guard_clears_every_name guard_clears_every_name
 run_test refuses_readonly_repository_env refuses_readonly_repository_env
 run_test refuses_readonly_after_load refuses_readonly_after_load
 run_test refuses_readonly_global_config refuses_readonly_global_config
