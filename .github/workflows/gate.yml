@@ -24,8 +24,12 @@ on:
 permissions:
   contents: read
 
+# A push or a `gate` label replaces the PR's run in flight. A run started by
+# any other label is skipped by the job `if:`, so it gets a group of its own
+# (its run id) instead of cancelling the gate. Nightly and dispatch runs on
+# main share one group and queue rather than cancel.
 concurrency:
-  group: gate-${{ github.ref }}
+  group: gate-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'gate' && github.run_id || 'run' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
