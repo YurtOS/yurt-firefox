@@ -182,6 +182,91 @@ hash_read_error_fails() {
   [ ! -e "$BASE/wd16/build-manifest.json" ]
 }
 
+# A missing mozconfig fails a dry run before any manifest is written; its hash is
+# never recorded as "".
+missing_mozconfig_fails() {
+  new_root
+  rm "$R/mozconfig"
+  run_build --dry-run --workdir "$BASE/wd17/firefox"
+  [ "$RC" -ne 0 ] || { echo "built without a mozconfig: $OUT"; return 1; }
+  [ ! -e "$BASE/wd17/build-manifest.json" ]
+}
+
+# real_root: new_root whose queue adds an executable `mach` that records its
+# calls, fails if any repository-selection variable reaches it, and writes an
+# artifact manifest for `artifact toolchain`; plus shims for uname (Linux),
+# rustup and rustc (the pinned version), so the non-dry path runs offline.
+real_root() {
+  local t want
+  new_root
+  t=$(mktemp -d "$BASE/mach.XXXXXX")
+  git clone -q "$URL" "$t/w" 2>/dev/null
+  git -C "$t/w" checkout -q V1 2>/dev/null
+  cat >"$t/w/mach" <<'MACH'
+#!/bin/sh
+echo "mach $*" >>"$MACH_LOG"
+for v in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR; do
+  if eval "[ -n \"\${$v+set}\" ]"; then echo "mach: $v is set" >&2; exit 1; fi
+done
+case " $* " in *" artifact "*)
+  while [ $# -gt 0 ]; do
+    case $1 in --from-build) n=$2 ;; --artifact-manifest) m=$2 ;; esac
+    shift
+  done
+  printf '{"https://h.test/%s.tar.zst": {"sha256": "%s"}}\n' "$n" \
+    0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef >"$m" ;;
+esac
+MACH
+  chmod +x "$t/w/mach"
+  git -C "$t/w" add mach
+  git -C "$t/w" diff --cached >"$R/patches/0001-mach.patch"
+  repin
+  want=$(sed -n 's/^RUST_VERSION=//p' "$BUILD")
+  mkdir -p "$R.bin" "$R.state"
+  printf '#!/bin/sh\necho Linux\n' >"$R.bin/uname"
+  printf '#!/bin/sh\nexit 0\n' >"$R.bin/rustup"
+  printf '#!/bin/sh\necho "rustc %s (0000000 2026-01-01)"\n' "$want" >"$R.bin/rustc"
+  chmod +x "$R.bin/uname" "$R.bin/rustup" "$R.bin/rustc"
+}
+
+# run_real <workdir> [command prefix...]: the non-dry path with the shims.
+run_real() {
+  local wd=$1
+  shift
+  RC=0
+  OUT=$("$@" env PATH="$R.bin:$PATH" MACH_LOG="$R.log" MOZBUILD_STATE_PATH="$R.state" \
+    PQ_ROOT="$R" "$BUILD" --workdir "$wd" 2>&1) || RC=$?
+}
+
+# The non-dry path runs bootstrap, both toolchain fetches and the build, and
+# records the toolchain digests.
+real_path_runs_mach() {
+  real_root
+  run_real "$BASE/wd18/firefox"
+  assert_eq 0 "$RC" "$OUT"
+  assert_eq 4 "$(wc -l <"$R.log" | tr -d ' ')" "mach calls: $(cat "$R.log")"
+  python3 - "$BASE/wd18/build-manifest.json" <<'PY2'
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert [a["name"] for a in m["toolchain_artifacts"]] == ["linux64-clang.tar.zst", "sysroot-wasm32-wasi.tar.zst"], m
+assert m["rust_version"].startswith("rustc "), m
+PY2
+}
+
+# A caller's exported GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE never reach mach:
+# neither pointing at a decoy repository nor at a directory that does not exist.
+real_path_cleans_git_env_for_mach() {
+  local before
+  real_root
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  run_real "$BASE/wd19/firefox" with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE"
+  assert_eq 0 "$RC" "decoy env: $OUT"
+  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
+  run_real "$BASE/wd20/firefox" env GIT_DIR="$R.missing/.git"
+  assert_eq 0 "$RC" "missing GIT_DIR: $OUT"
+}
+
 refuses_non_empty_workdir() {
   new_root
   mkdir -p "$BASE/wd4/firefox"
@@ -341,6 +426,9 @@ run_test hashes_track_inputs hashes_track_inputs
 run_test queue_hash_tracks_patch_set queue_hash_tracks_patch_set
 run_test hashes_track_content_edits hashes_track_content_edits
 run_test hash_read_error_fails hash_read_error_fails
+run_test missing_mozconfig_fails missing_mozconfig_fails
+run_test real_path_runs_mach real_path_runs_mach
+run_test real_path_cleans_git_env_for_mach real_path_cleans_git_env_for_mach
 run_test refuses_non_empty_workdir refuses_non_empty_workdir
 run_test defaults_workdir_to_workspace defaults_workdir_to_workspace
 run_test mozconfig_matches_pin_in_repo mozconfig_matches_pin_in_repo
