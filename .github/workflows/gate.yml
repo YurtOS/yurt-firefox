@@ -54,6 +54,8 @@ jobs:
     steps:
       - name: Check out this repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Free disk space
         run: |
@@ -78,7 +80,10 @@ jobs:
         id: pin
         run: |
           echo "commit=$(sed -n 's/^commit=//p' UPSTREAM)" >> "$GITHUB_OUTPUT"
-          echo "sha=$(tr -d '[:space:]' < NIGHTMONKEY_PIN)" >> "$GITHUB_OUTPUT"
+          pin=$(tr -d '[:space:]' < NIGHTMONKEY_PIN)
+          printf '%s\n' "$pin" | grep -Eq '^[0-9a-f]{40}$' ||
+            { echo "NIGHTMONKEY_PIN must hold one full 40-hex SHA, got '$pin'" >&2; exit 1; }
+          echo "sha=$pin" >> "$GITHUB_OUTPUT"
 
       # Restore only: engine.yml seeds this cache from main.
       - name: Restore ~/.mozbuild
