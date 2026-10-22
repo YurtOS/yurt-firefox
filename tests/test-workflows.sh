@@ -59,7 +59,7 @@ t_pinned() {
 
 t_credentials() {
   local f n p
-  for f in queue.yml engine.yml; do
+  for f in queue.yml engine.yml gate.yml; do
     n=$(body "$WF/$f" | grep -cE 'uses: actions/checkout@')
     p=$(body "$WF/$f" | grep -cE '^[[:space:]]+persist-credentials: false$')
     [ "$n" -gt 0 ] && [ "$n" = "$p" ] ||
@@ -170,6 +170,15 @@ t_gate() {
   ! body "$f" | grep -Eiq 'YurtOS/firefox|mozilla-firefox|FIREFOX_RELEASE|git (clone|fetch).*(firefox|--branch)' ||
     { echo "gate.yml references the fork or a bare tag as the test tree" >&2; return 1; }
   [ "$(body "$f" | grep -c 'repository:')" = 1 ] || { echo "gate.yml checks out more than NightMonkey" >&2; return 1; }
+  # wasmtime is verified against the pinned digest by a check that cannot be
+  # swallowed, and NIGHTMONKEY_PIN is validated where it is read
+  has_line "$f" "WASMTIME_SHA256: $WASMTIME_SHA" || { echo "gate.yml WASMTIME_SHA256 is not the pinned digest" >&2; return 1; }
+  has_line "$f" 'echo "${WASMTIME_SHA256}  $RUNNER_TEMP/wasmtime.tar.xz" | sha256sum -c -' ||
+    { echo "gate.yml does not verify wasmtime against WASMTIME_SHA256" >&2; return 1; }
+  no_or_on "$f" 'sha256sum'
+  step "$f" "Read the pins" | grep -q 'id: pin' || { echo "no 'Read the pins' step with id pin" >&2; return 1; }
+  step "$f" "Read the pins" | grep -qF "grep -Eq '^[0-9a-f]{40}\$'" ||
+    { echo "gate.yml does not validate NIGHTMONKEY_PIN where it is read" >&2; return 1; }
 }
 
 run_test "workflows exist" t_exist
