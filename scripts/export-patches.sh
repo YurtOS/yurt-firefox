@@ -24,12 +24,29 @@ usage() {
 }
 
 create_scratch() {
-  local scratch=$1 patch
+  local scratch=$1 made= entries
   if [ -e "$scratch/.git" ]; then
     echo "export-patches: $scratch already exists; delete it to rebuild from the queue"
     return 0
   fi
   pq_read_pin "$ROOT/UPSTREAM" || return 1
+  if [ -e "$scratch" ]; then
+    [ -d "$scratch" ] || { echo "export-patches: $scratch is not a directory" >&2; return 1; }
+    entries=$(ls -A "$scratch") || { echo "export-patches: cannot list $scratch" >&2; return 1; }
+    [ -z "$entries" ] || { echo "export-patches: $scratch is not empty" >&2; return 1; }
+  else
+    made=1
+  fi
+  # From here on a failure would leave a scratch with part of the queue, which
+  # --write would export as the whole queue, so it is discarded.
+  build_scratch "$scratch" || { discard_scratch "$scratch" "$made"; return 1; }
+  echo "export-patches: scratch checkout ready at $scratch"
+}
+
+# build_scratch <scratch>: fetch the pin into the empty <scratch>, apply the
+# queue with git am and copy the corpus in, untracked.
+build_scratch() {
+  local scratch=$1 list patch
   pq_fetch "$scratch" || return 1
   # pq_git ignores the user's config, so name the committer of the am commits;
   # format-patch does not export it.
@@ -38,14 +55,26 @@ create_scratch() {
   # Not --3way: a patch that does not apply cleanly is a broken queue. --keep-cr
   # keeps CRLF files intact in the mailbox round trip, and --whitespace=nowarn
   # applies lines as they are, like pq_apply.
+  list=$(pq_list_patches "$ROOT/patches") || return 1
   while IFS= read -r patch; do
+    [ -n "$patch" ] || continue
     pq_git -C "$scratch" am -q --no-3way --whitespace=nowarn --keep-cr "$patch" ||
       { echo "export-patches: failed to apply $patch" >&2; return 1; }
-  done < <(find "$ROOT/patches" -maxdepth 1 -type f -name '*.patch' | LC_ALL=C sort)
+  done <<<"$list"
   mkdir -p "$scratch/.git/info" "$scratch/$ICS_PATH" || return 1
-  printf '/%s/\n' "$ICS_PATH" >>"$scratch/.git/info/exclude"
+  printf '/%s/\n' "$ICS_PATH" >>"$scratch/.git/info/exclude" || return 1
   cp -R "$ROOT/data/ics/." "$scratch/$ICS_PATH/" || return 1
-  echo "export-patches: scratch checkout ready at $scratch"
+}
+
+# discard_scratch <scratch> <made>: remove a failed scratch build: the directory
+# if this run made it, else only what was put in it (it was empty).
+discard_scratch() {
+  if [ -n "$2" ]; then
+    rm -rf "$1"
+  else
+    find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  fi || { echo "export-patches: cannot remove the failed scratch build at $1; delete it before using it" >&2; return 1; }
+  echo "export-patches: removed the failed scratch build at $1" >&2
 }
 
 write_patches() {

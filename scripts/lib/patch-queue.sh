@@ -116,10 +116,11 @@ PQ_LIB_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 # pq_fetch <dest>: shallow-fetch PQ_TAG into a new repo at <dest>; fail if it
 # is not PQ_COMMIT. <dest> must not exist or must be an empty directory.
 pq_fetch() {
-  local dest=$1 head
-  if [ -e "$dest" ] && { [ ! -d "$dest" ] || [ -n "$(ls -A "$dest")" ]; }; then
-    echo "pq: destination is not empty: $dest" >&2
-    return 1
+  local dest=$1 head entries=
+  if [ -e "$dest" ]; then
+    [ -d "$dest" ] || { echo "pq: destination is not a directory: $dest" >&2; return 1; }
+    entries=$(ls -A "$dest") || { echo "pq: cannot list destination: $dest" >&2; return 1; }
+    [ -z "$entries" ] || { echo "pq: destination is not empty: $dest" >&2; return 1; }
   fi
   pq_git init -q "$dest" || return 1
   pq_git -C "$dest" fetch -q --depth 1 "$PQ_URL" tag "$PQ_TAG" || return 1
@@ -143,7 +144,7 @@ pq_list_patches() {
 # pq_apply can leave <worktree> partially patched and dirty; the caller must
 # discard it (delete the clone) and must not retry on it.
 pq_apply() {
-  local wt patches ics patch top mine status
+  local wt patches ics patch top mine status list
   # The probes below discard git's stderr; say first why git cannot run.
   pq_git_ready || return 1
   wt=$(cd "$1" 2>/dev/null && pwd -P) || { echo "pq: no such worktree: $1" >&2; return 1; }
@@ -163,10 +164,12 @@ pq_apply() {
     { echo "pq: cannot read the status of $wt" >&2; return 1; }
   [ -z "$status" ] || { echo "pq: $wt is not clean" >&2; return 1; }
 
+  list=$(pq_list_patches "$patches") || return 1
   while IFS= read -r patch; do
+    [ -n "$patch" ] || continue
     pq_git -C "$wt" apply --index --whitespace=nowarn "$patch" ||
       { echo "pq: failed to apply $patch" >&2; return 1; }
-  done < <(find "$patches" -maxdepth 1 -type f -name '*.patch' | LC_ALL=C sort)
+  done <<<"$list"
 
   pq_add_corpus "$wt" "$ics"
 }
