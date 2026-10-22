@@ -97,6 +97,16 @@ with_readonly_git_env() {
   GIT_DIR="$repo/.git" GIT_WORK_TREE="$repo" bash -c "readonly GIT_DIR GIT_WORK_TREE; $script" _ "$@"
 }
 
+# with_ifs <ifs> <command...>: run the command in a subshell with IFS set, as a
+# caller in "strict mode" (IFS=$'\n\t') would.
+with_ifs() {
+  (
+    IFS=$1
+    shift
+    "$@"
+  )
+}
+
 # with_env <name=value> <command...>: run the command in a subshell with the
 # variable exported.
 with_env() {

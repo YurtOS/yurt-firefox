@@ -196,6 +196,24 @@ scripts_refuse_old_git() {
   [ ! -e "$R/scratch" ]
 }
 
+# Sourced into a shell with a strict-mode IFS, a comma or an empty IFS,
+# check-queue still ignores an exported GIT_DIR and passes.
+sourced_under_caller_ifs() {
+  local ifs before n=0
+  new_root
+  write_upstream "$(queue_tree)"
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  for ifs in $'\n\t' , ''; do
+    n=$((n + 1))
+    RC=0
+    OUT=$(with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE" \
+      bash -c 'IFS=$1; PQ_ROOT=$2; export PQ_ROOT; s=$3; set --; . "$s"' _ "$ifs" "$R" "$CHECK" 2>&1) || RC=$?
+    assert_eq 0 "$RC" "IFS case $n: $OUT"
+    assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched (IFS case $n)"
+  done
+}
+
 run_test refuses_without_upstream refuses_without_upstream
 run_test refuses_placeholder_upstream refuses_placeholder_upstream
 run_test refuses_example_url refuses_example_url
@@ -208,4 +226,5 @@ run_test passes_census_when_clean passes_census_when_clean
 run_test passes_under_hostile_git passes_under_hostile_git
 run_test refuses_readonly_repository_env refuses_readonly_repository_env
 run_test scripts_refuse_old_git scripts_refuse_old_git
+run_test sourced_under_caller_ifs sourced_under_caller_ifs
 finish

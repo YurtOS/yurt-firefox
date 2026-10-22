@@ -341,6 +341,23 @@ ignores_repository_env() {
   done
 }
 
+# The caller's IFS (strict-mode $'\n\t', a comma, empty) does not defeat the
+# environment guard: pq_fetch and pq_apply still ignore an exported GIT_DIR.
+guard_holds_under_caller_ifs() {
+  local ifs before n=0
+  new_case
+  basic_queue
+  make_decoy "$T/decoy"
+  before=$(repo_state "$T/decoy")
+  for ifs in $'\n\t' , ''; do
+    n=$((n + 1))
+    with_git_env "$T/decoy" "GIT_DIR GIT_WORK_TREE" with_ifs "$ifs" pq_fetch "$T/ifs$n"
+    with_git_env "$T/decoy" "GIT_DIR GIT_WORK_TREE" with_ifs "$ifs" pq_apply "$T/ifs$n" "$T/patches" "$T/ics"
+    assert_eq "$before" "$(repo_state "$T/decoy")" "decoy untouched (IFS case $n)"
+    assert_eq "$EXPECTED" "$(pq_tree "$T/ifs$n")" "queue applied (IFS case $n)"
+  done
+}
+
 # A repository-selection variable that cannot be unset (readonly) makes loading
 # the library fail, and pq_git refuse to run even if the caller ignores that.
 refuses_readonly_repository_env() {
@@ -488,6 +505,7 @@ run_test overlap_and_delete overlap_and_delete
 run_test forbidden_flags_absent forbidden_flags_absent
 run_test guard guard
 run_test ignores_repository_env ignores_repository_env
+run_test guard_holds_under_caller_ifs guard_holds_under_caller_ifs
 run_test refuses_readonly_repository_env refuses_readonly_repository_env
 run_test refuses_readonly_global_config refuses_readonly_global_config
 run_test refuses_old_git refuses_old_git

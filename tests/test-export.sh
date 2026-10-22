@@ -430,6 +430,28 @@ export_ignores_repository_env() {
   same_as_clean env
 }
 
+# Sourced into a shell with a non-default IFS and globbing off (set -f),
+# export-patches builds the scratch and writes the same queue as a plain run,
+# and ignores an exported GIT_DIR.
+export_sourced_under_caller_ifs_and_noglob() {
+  local before src='IFS=$1; set -f; PQ_ROOT=$2; export PQ_ROOT; s=$3; shift 3; . "$s"'
+  queued_root
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  rm -rf "$S"
+  with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE" bash -c "$src" _ $'\n\t' "$R" "$EXPORT" "$S" >/dev/null
+  echo y >"$S/other/y.txt"
+  scratch_commit "add y"
+  with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE" bash -c "$src" _ , "$R" "$EXPORT" --write "$S" >/dev/null
+  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
+  assert_eq 2 "$(find "$R/patches" -name '*.patch' | wc -l | tr -d ' ')" "both patches written"
+  cp -R "$R/patches" "$R.sourced"
+  cp "$R/UPSTREAM" "$R.sourced/UPSTREAM"
+  export_cmd --write "$S" >/dev/null
+  diff -r "$R.sourced" "$R/patches" -x UPSTREAM
+  diff "$R.sourced/UPSTREAM" "$R/UPSTREAM"
+}
+
 # With a readonly GIT_DIR/GIT_WORK_TREE in the calling shell, export-patches
 # stops before running git, so the repository they name is not touched.
 export_refuses_readonly_repository_env() {
@@ -485,6 +507,7 @@ run_test export_ignores_scratch_config export_ignores_scratch_config
 run_test export_ignores_user_env export_ignores_user_env
 run_test export_ignores_repository_env export_ignores_repository_env
 run_test export_refuses_readonly_repository_env export_refuses_readonly_repository_env
+run_test export_sourced_under_caller_ifs_and_noglob export_sourced_under_caller_ifs_and_noglob
 run_test scratch_builds_without_committer_env scratch_builds_without_committer_env
 run_test fixtures_run_the_export_suite fixtures_run_the_export_suite
 finish
