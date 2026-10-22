@@ -33,7 +33,7 @@ new_root() {
   SHA=$(make_fixture_upstream "$URL")
   mkdir -p "$R/patches" "$R/data/ics"
   cp -R "$URL/js/ics/." "$R/data/ics/"
-  printf 'url=%s\ntag=V1\ncommit=%s\ntree=unset\n' "$URL" "$SHA" >"$R/UPSTREAM"
+  printf 'url=%s\ntag=V1\ncommit=%s\ntree=0000000000000000000000000000000000000000\n' "$URL" "$SHA" >"$R/UPSTREAM"
   git -C "$URL" checkout -q -b yurt
   sed 's/^line5$/line5 yurt/' "$URL/js/a.txt" >"$URL/js/a.tmp"
   mv "$URL/js/a.tmp" "$URL/js/a.txt"
