@@ -130,6 +130,29 @@ passes_census_when_clean() {
   case $OUT in *"census ok"*) ;; *) echo "no census ok: $OUT"; return 1 ;; esac
 }
 
+# The verdict does not depend on the caller's git config or exported
+# repository-selection variables, and the repository they name is not touched.
+passes_under_hostile_git() {
+  local how kv before
+  new_root
+  printf 'crlf\r\n' >"$R/data/ics/crlf.txt"
+  printf '*.txt\n' >"$R.ignore"
+  write_upstream "$(queue_tree)"
+  for how in count home; do
+    for kv in core.autocrlf=input "core.excludesFile=$R.ignore"; do
+      RC=0
+      OUT=$(with_git_config "$how" "${kv%%=*}" "${kv#*=}" env PQ_ROOT="$R" "$CHECK" 2>&1) || RC=$?
+      assert_eq 0 "$RC" "$how $kv: $OUT"
+    done
+  done
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  RC=0
+  OUT=$(with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE" env PQ_ROOT="$R" "$CHECK" 2>&1) || RC=$?
+  assert_eq 0 "$RC" "env: $OUT"
+  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
+}
+
 run_test refuses_without_upstream refuses_without_upstream
 run_test refuses_placeholder_upstream refuses_placeholder_upstream
 run_test passes_when_tree_matches passes_when_tree_matches
@@ -138,4 +161,5 @@ run_test fails_on_moved_tag fails_on_moved_tag
 run_test runs_census_when_configured runs_census_when_configured
 run_test census_skipped_is_announced census_skipped_is_announced
 run_test passes_census_when_clean passes_census_when_clean
+run_test passes_under_hostile_git passes_under_hostile_git
 finish

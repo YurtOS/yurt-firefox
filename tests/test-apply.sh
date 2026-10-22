@@ -273,6 +273,77 @@ guard() {
   assert_eq "$EXPECTED" "$(pq_tree "$T/good")"
 }
 
+# --- hostile environment and config -----------------------------------------
+
+# Exported GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE must not redirect the library to
+# the repository they name, and the clone must still get the queue.
+ignores_repository_env() {
+  local vars before n=0
+  new_case
+  basic_queue
+  make_decoy "$T/decoy"
+  before=$(repo_state "$T/decoy")
+  for vars in "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE" GIT_INDEX_FILE; do
+    n=$((n + 1))
+    with_git_env "$T/decoy" "$vars" pq_fetch "$T/env$n"
+    with_git_env "$T/decoy" "$vars" pq_apply "$T/env$n" "$T/patches" "$T/ics"
+    assert_eq "$before" "$(repo_state "$T/decoy")" "decoy untouched ($vars)"
+    assert_eq "$EXPECTED" "$(with_git_env "$T/decoy" "$vars" pq_tree "$T/env$n")" "queue applied ($vars)"
+  done
+}
+
+# User config that would change the applied tree must not: the result equals
+# the clean-config run.
+tree_ignores_user_config() {
+  local how kv key value clean n=0
+  new_case
+  replace_line "$S/js/a.txt" line5 "line5 patched"
+  printf 'ws \n' >>"$S/js/a.txt"
+  step 0001-edit-a
+  add_corpus
+  printf 'crlf\r\n' >"$T/ics/crlf.txt"
+  printf '*.txt\n' >"$T/ignore-txt"
+  apply_queue
+  clean=$(pq_tree "$W")
+  for how in count home; do
+    for kv in core.autocrlf=input apply.whitespace=fix "core.excludesFile=$T/ignore-txt"; do
+      key=${kv%%=*} value=${kv#*=} n=$((n + 1))
+      with_git_config "$how" "$key" "$value" pq_fetch "$T/cfg$n"
+      with_git_config "$how" "$key" "$value" pq_apply "$T/cfg$n" "$T/patches" "$T/ics"
+      assert_eq "$clean" "$(with_git_config "$how" "$key" "$value" pq_tree "$T/cfg$n")" "$how $kv"
+    done
+  done
+}
+
+# apply.ignoreWhitespace must not let whitespace-drifted context apply, and
+# status.showUntrackedFiles=no must not hide an untracked file from the guard.
+strict_under_user_config() {
+  local how msg
+  new_case
+  replace_line "$S/js/a.txt" line4 "line four"
+  step 0001-word
+  replace_line "$S/js/a.txt" line5 "line5 patched"
+  step 0002-edit-a
+  add_corpus
+  # The drifted queue differs only in the amount of whitespace in a context line.
+  mkdir "$T/drift"
+  cp "$T/patches/0001-word.patch" "$T/drift/"
+  sed 's/^ line four$/ line    four/' "$T/patches/0002-edit-a.patch" >"$T/drift/0002-edit-a.patch"
+  if cmp -s "$T/patches/0002-edit-a.patch" "$T/drift/0002-edit-a.patch"; then echo "context not drifted"; return 1; fi
+  for how in count home; do
+    with_git_config "$how" apply.ignoreWhitespace change pq_fetch "$T/ws.$how"
+    msg=$(with_git_config "$how" apply.ignoreWhitespace change pq_apply "$T/ws.$how" "$T/drift" "$T/ics" 2>&1) &&
+      { echo "whitespace-drifted context applied ($how)"; return 1; }
+    case $msg in *"failed to apply"*) ;; *) echo "wrong reason ($how): $msg"; return 1 ;; esac
+
+    with_git_config "$how" status.showUntrackedFiles no pq_fetch "$T/dirty.$how"
+    echo local >"$T/dirty.$how/untracked.txt"
+    msg=$(with_git_config "$how" status.showUntrackedFiles no pq_apply "$T/dirty.$how" "$T/patches" "$T/ics" 2>&1) &&
+      { echo "untracked file not seen ($how)"; return 1; }
+    case $msg in *"not clean"*) ;; *) echo "wrong reason ($how): $msg"; return 1 ;; esac
+  done
+}
+
 run_test applies_clean_queue_and_tree_matches_pin applies_clean_queue_and_tree_matches_pin
 run_test rejects_moved_tag rejects_moved_tag
 run_test fetch_accepts_annotated_tag fetch_accepts_annotated_tag
@@ -284,4 +355,7 @@ run_test corpus_in_hash corpus_in_hash
 run_test overlap_and_delete overlap_and_delete
 run_test forbidden_flags_absent forbidden_flags_absent
 run_test guard guard
+run_test ignores_repository_env ignores_repository_env
+run_test tree_ignores_user_config tree_ignores_user_config
+run_test strict_under_user_config strict_under_user_config
 finish

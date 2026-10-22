@@ -204,6 +204,110 @@ no_commits_clears_stale_patches() {
   assert_eq "$(hand_tree "$S")" "$(pin_tree)"
 }
 
+# --- hostile environment and config -----------------------------------------
+
+# hostile_root: new_root with a CRLF corpus file and an exported queue of two
+# commits (one with trailing whitespace and two files); keeps that clean export
+# in $R.clean.
+hostile_root() {
+  new_root
+  printf 'crlf\r\n' >"$R/data/ics/crlf.txt"
+  printf 'other/*\n*\n' >"$R.order"
+  printf '*.txt\n' >"$R.ignore"
+  export_cmd "$S" >/dev/null
+  sed -i.bak 's/^line5$/line5 patched /' "$S/js/a.txt" && rm "$S/js/a.txt.bak"
+  echo c >"$S/other/c.txt"
+  scratch_commit "two files, trailing whitespace"
+  echo d >"$S/other/d.txt"
+  scratch_commit "add d"
+  export_cmd --write "$S" >/dev/null
+  mkdir "$R.clean"
+  cp -R "$R/patches" "$R/UPSTREAM" "$R.clean/"
+}
+
+# restore_clean: put the clean export back and drop the scratch checkout.
+restore_clean() {
+  rm -rf "$S" "$R/patches"
+  cp -R "$R.clean/patches" "$R/patches"
+  cp "$R.clean/UPSTREAM" "$R/UPSTREAM"
+}
+
+# same_as_clean <case>: patches/ and UPSTREAM equal the clean export.
+same_as_clean() {
+  diff -r "$R.clean/patches" "$R/patches" || { echo "patches differ: $1"; return 1; }
+  diff "$R.clean/UPSTREAM" "$R/UPSTREAM" || { echo "UPSTREAM differs: $1"; return 1; }
+}
+
+# hostile_settings: key=value lines that change trees or patch bytes when git
+# honours them. Needs hostile_root.
+hostile_settings() {
+  printf '%s\n' format.suffix=.txt apply.whitespace=fix format.thread=true \
+    "diff.orderFile=$R.order" "format.headers=X-Hostile: 1" core.autocrlf=input \
+    "core.excludesFile=$R.ignore" format.coverLetter=true format.signOff=true \
+    diff.noprefix=true format.to=x@example.invalid
+}
+
+# Rebuilding the scratch and exporting under each user setting gives the clean
+# export, byte for byte.
+export_ignores_user_config() {
+  local how kv failed=
+  hostile_root
+  for how in count home; do
+    while IFS= read -r kv; do
+      restore_clean
+      {
+        with_git_config "$how" "${kv%%=*}" "${kv#*=}" export_cmd "$S" >/dev/null </dev/null &&
+          with_git_config "$how" "${kv%%=*}" "${kv#*=}" export_cmd --write "$S" >/dev/null </dev/null &&
+          same_as_clean "$how $kv" >/dev/null
+      } || failed="$failed [$how $kv]"
+    done < <(hostile_settings)
+  done
+  assert_eq "" "$failed" "settings that changed the export"
+}
+
+# Settings in the scratch checkout's own config do not change the export either.
+export_ignores_scratch_config() {
+  local kv failed=
+  hostile_root
+  restore_clean
+  export_cmd "$S" >/dev/null
+  while IFS= read -r kv; do
+    git -C "$S" config "${kv%%=*}" "${kv#*=}"
+    { export_cmd --write "$S" >/dev/null </dev/null && same_as_clean "scratch $kv" >/dev/null; } ||
+      failed="$failed [$kv]"
+    git -C "$S" config --unset "${kv%%=*}"
+  done < <(hostile_settings)
+  assert_eq "" "$failed" "scratch settings that changed the export"
+}
+
+# Exported GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE do not redirect the dev loop.
+export_ignores_repository_env() {
+  local before
+  hostile_root
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  restore_clean
+  with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE" export_cmd "$S" >/dev/null
+  with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE" export_cmd --write "$S" >/dev/null
+  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
+  same_as_clean env
+}
+
+# The scratch builds when the committer identity is only in the user's config.
+scratch_builds_without_committer_env() {
+  hostile_root
+  restore_clean
+  (
+    unset GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_CONFIG_GLOBAL XDG_CONFIG_HOME EMAIL
+    HOME=$(mktemp -d "$BASE/home.XXXXXX")
+    export HOME
+    git config --global user.name Dev
+    git config --global user.email dev@example.invalid
+    export_cmd "$S" >/dev/null
+  )
+  assert_eq 2 "$(git -C "$S" rev-list --count V1..HEAD)" "queue applied"
+}
+
 fixtures_run_the_export_suite() {
   grep -q 'test-export\.sh' "$ROOT/scripts/check-queue.sh"
 }
@@ -215,5 +319,9 @@ run_test am_tree_equals_apply_tree am_tree_equals_apply_tree
 run_test binary_hunk_survives binary_hunk_survives
 run_test re_export_is_byte_identical re_export_is_byte_identical
 run_test no_commits_clears_stale_patches no_commits_clears_stale_patches
+run_test export_ignores_user_config export_ignores_user_config
+run_test export_ignores_scratch_config export_ignores_scratch_config
+run_test export_ignores_repository_env export_ignores_repository_env
+run_test scratch_builds_without_committer_env scratch_builds_without_committer_env
 run_test fixtures_run_the_export_suite fixtures_run_the_export_suite
 finish
