@@ -1,0 +1,87 @@
+name: engine
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  WASMTIME_VERSION: v50.0.0
+  WASMTIME_SHA256: 77c19ee0437991f9ac7837b9c269d9c7076744f85dad263fea5214cc2723c7ff
+
+jobs:
+  engine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip python3-venv build-essential
+
+      - name: Read the pinned tag commit
+        id: pin
+        run: |
+          commit=$(sed -n 's/^commit=//p' UPSTREAM)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      # ~/.mozbuild (toolchains, sysroot) is the cache that pays off. The shallow
+      # clone and the objdir are not cached: build-engine.sh always fetches into
+      # a fresh, empty workdir (the objdir lives inside it, and a fresh checkout
+      # invalidates its timestamps). main populates this cache so PRs can read it.
+      - name: Cache ~/.mozbuild
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.mozbuild
+          key: mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-${{ hashFiles('mozconfig', 'scripts/build-engine.sh', 'patches/*.patch') }}
+          restore-keys: |
+            mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-
+
+      - name: Build the engine
+        run: |
+          start=$(date +%s)
+          scripts/build-engine.sh
+          echo "engine build took $(( ($(date +%s) - start) / 60 )) minutes" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install pinned wasmtime
+        run: |
+          url="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+          curl -fsSL -o "$RUNNER_TEMP/wasmtime.tar.xz" "$url"
+          echo "${WASMTIME_SHA256}  $RUNNER_TEMP/wasmtime.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/wasmtime"
+          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP/wasmtime" --strip-components=1
+          echo "$RUNNER_TEMP/wasmtime" >> "$GITHUB_PATH"
+
+      - name: Smoke
+        working-directory: firefox/obj-nightmonkey-sm
+        run: |
+          set -euo pipefail
+          wasmtime --version
+          out=$(wasmtime run --dir=. dist/bin/js -e 'print(6*7)')
+          [ "$out" = 42 ] || { echo "smoke: expected 42, got '$out'" >&2; exit 1; }
+          printf 'function f(n) { return n * 7; }\nprint(f(6));\n' > smoke.js
+          out=$(wasmtime run --dir=. dist/bin/js smoke.js)
+          [ "$out" = 42 ] || { echo "smoke: script expected 42, got '$out'" >&2; exit 1; }
+
+      - name: Upload build manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-manifest
+          path: build-manifest.json
+          if-no-files-found: error
