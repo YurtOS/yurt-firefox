@@ -34,6 +34,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# pq_git cleans the git environment only for its own calls; mach (bootstrap reads
+# the tree's commit time with git) and everything else run here inherit ours, so
+# clean it for the whole script. A readonly GIT_DIR stops the build here.
+pq_git_env || exit 1
+
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
 
 # dir_hash <dir> <find-args...>: sha256 over the sorted "<sha256>  <relpath>"
