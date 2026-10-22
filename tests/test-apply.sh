@@ -407,7 +407,7 @@ guard_clears_every_name() {
   chmod +x "$T/envshim/git"
   (
     for name in $names; do export "$name=$T/poison"; done
-    export GIT_CONFIG_GLOBAL="$T/poison" GIT_CONFIG_SYSTEM="$T/poison" GIT_CONFIG_NOSYSTEM= GIT_ATTR_NOSYSTEM=
+    export GIT_CONFIG_GLOBAL="$T/poison" GIT_CONFIG_SYSTEM="$T/poison" GIT_CONFIG_NOSYSTEM='' GIT_ATTR_NOSYSTEM=''
     PATH="$T/envshim:$PATH" bash -c '. "$1" && pq_git --version' _ "$lib" >/dev/null
   )
   grep -q '^PATH=' "$T/env.out"

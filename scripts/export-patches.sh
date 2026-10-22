@@ -24,7 +24,7 @@ usage() {
 }
 
 create_scratch() {
-  local scratch=$1 made= entries
+  local scratch=$1 made='' entries
   if [ -e "$scratch/.git" ]; then
     echo "export-patches: $scratch already exists; delete it to rebuild from the queue"
     return 0
@@ -78,7 +78,7 @@ discard_scratch() {
 }
 
 write_patches() {
-  local scratch work touched commits c n rc written want stage= keep= list f
+  local scratch work touched commits c n rc written want stage='' keep='' list f
   scratch=$(cd "$1" 2>/dev/null && pwd -P) || { echo "export-patches: no such scratch: $1" >&2; return 1; }
   pq_git -C "$scratch" rev-parse --git-dir >/dev/null 2>&1 ||
     { echo "export-patches: $scratch is not a git checkout" >&2; return 1; }
