@@ -97,6 +97,15 @@ with_readonly_git_env() {
   GIT_DIR="$repo/.git" GIT_WORK_TREE="$repo" bash -c "readonly GIT_DIR GIT_WORK_TREE; $script" _ "$@"
 }
 
+# make_git_shim <dir> <version>: a `git` in <dir> that reports
+# "git version <version>" for --version and runs the real git otherwise.
+make_git_shim() {
+  mkdir -p "$1" || return 1
+  printf '#!/bin/sh\ncase " $* " in *" --version "*) echo "git version %s"; exit 0 ;; esac\nexec "%s" "$@"\n' \
+    "$2" "$(command -v git)" >"$1/git" || return 1
+  chmod +x "$1/git"
+}
+
 # make_decoy <dir>: a repository that code under test must never touch.
 make_decoy() {
   mkdir -p "$1" || return 1

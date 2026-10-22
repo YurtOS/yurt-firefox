@@ -179,6 +179,23 @@ refuses_readonly_repository_env() {
   assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
 }
 
+# With git older than 2.32 on PATH, check-queue (both modes) and export-patches
+# stop with a clear message.
+scripts_refuse_old_git() {
+  local args rc
+  new_root
+  write_upstream "$(queue_tree)"
+  make_git_shim "$R.old" 2.31.9
+  for args in "$CHECK" "$CHECK --fixtures" "$ROOT/scripts/export-patches.sh $R/scratch"; do
+    rc=0
+    # shellcheck disable=SC2086
+    OUT=$(PATH="$R.old:$PATH" PQ_ROOT=$R bash $args 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "ran: $args: $OUT"; return 1; }
+    case $OUT in *"2.31.9"*"2.32"*) ;; *) echo "no reason given ($args): $OUT"; return 1 ;; esac
+  done
+  [ ! -e "$R/scratch" ]
+}
+
 run_test refuses_without_upstream refuses_without_upstream
 run_test refuses_placeholder_upstream refuses_placeholder_upstream
 run_test refuses_example_url refuses_example_url
@@ -190,4 +207,5 @@ run_test census_skipped_is_announced census_skipped_is_announced
 run_test passes_census_when_clean passes_census_when_clean
 run_test passes_under_hostile_git passes_under_hostile_git
 run_test refuses_readonly_repository_env refuses_readonly_repository_env
+run_test scripts_refuse_old_git scripts_refuse_old_git
 finish

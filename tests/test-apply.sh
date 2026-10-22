@@ -374,6 +374,31 @@ refuses_readonly_global_config() {
   [ ! -e "$T/ro" ]
 }
 
+# git older than 2.32 ignores GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM, so the
+# library refuses to load with it, and pq_fetch and pq_apply refuse to run.
+refuses_old_git() {
+  local out rc script lib=$ROOT/scripts/lib/patch-queue.sh
+  new_case
+  basic_queue
+  pq_fetch "$T/clean"
+  make_git_shim "$T/old" 2.31.9
+  assert_eq "git version 2.31.9" "$(PATH="$T/old:$PATH" git --version)" "shim in effect"
+  for script in '. "$1"' \
+    '. "$1" 2>/dev/null; pq_read_pin "$2" && pq_fetch "$3"' \
+    '. "$1" 2>/dev/null; pq_read_pin "$2" && pq_apply "$4" "$5" "$6"'; do
+    rc=0
+    out=$(PATH="$T/old:$PATH" bash -c "$script" _ "$lib" "$T/UPSTREAM.tmp" "$T/old-fetch" \
+      "$T/clean" "$T/patches" "$T/ics" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "ran: $script: $out"; return 1; }
+    case $out in *"2.31.9"*"2.32"*) ;; *) echo "no reason given ($script): $out"; return 1 ;; esac
+  done
+  [ ! -e "$T/old-fetch" ]
+  assert_eq "" "$(git -C "$T/clean" status --porcelain)" "clean clone untouched"
+  # 2.32 itself is accepted.
+  make_git_shim "$T/new" 2.32.0
+  PATH="$T/new:$PATH" bash -c '. "$1"' _ "$lib"
+}
+
 # User config that would change the applied tree must not: the result equals
 # the clean-config run.
 tree_ignores_user_config() {
@@ -441,6 +466,7 @@ run_test guard guard
 run_test ignores_repository_env ignores_repository_env
 run_test refuses_readonly_repository_env refuses_readonly_repository_env
 run_test refuses_readonly_global_config refuses_readonly_global_config
+run_test refuses_old_git refuses_old_git
 run_test tree_ignores_user_config tree_ignores_user_config
 run_test strict_under_user_config strict_under_user_config
 finish
