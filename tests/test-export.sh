@@ -204,6 +204,52 @@ no_commits_clears_stale_patches() {
   assert_eq "$(hand_tree "$S")" "$(pin_tree)"
 }
 
+# Patch bytes do not depend on the scratch commit ids, the git version or the
+# repository size: zero commit in the From line, no signature, 12-digit ids.
+patch_format_is_pinned() {
+  local p
+  new_root
+  export_cmd "$S" >/dev/null
+  echo x >"$S/other/x.txt"
+  scratch_commit "add x"
+  sed -i.bak 's/^line5$/line5 patched/' "$S/js/a.txt" && rm "$S/js/a.txt.bak"
+  scratch_commit "patch a"
+  export_cmd --write "$S" >/dev/null
+  for p in "$R"/patches/*.patch; do
+    assert_eq "From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001" "$(head -n 1 "$p")" "$p"
+    if grep -q '^-- $' "$p"; then echo "signature in $p"; return 1; fi
+    grep -q '^index ' "$p"
+    if grep '^index ' "$p" | grep -Ev '^index [0-9a-f]{12}\.\.[0-9a-f]{12}( [0-7]{6})?$'; then
+      echo "index line without 12-digit ids in $p"
+      return 1
+    fi
+  done
+}
+
+# Every git command the dev loop runs, logged by a PATH shim: am runs with
+# --no-3way and nothing runs with a fuzzy apply flag.
+dev_loop_git_flags() {
+  local log=$BASE/git.log
+  queued_root
+  mkdir "$BASE/shim"
+  printf '#!/bin/sh\nprintf "%%s\\n" " $* " >>"%s"\nexec "%s" "$@"\n' "$log" "$(command -v git)" >"$BASE/shim/git"
+  chmod +x "$BASE/shim/git"
+  rm -rf "$S"
+  (
+    PATH="$BASE/shim:$PATH"
+    export_cmd "$S" >/dev/null
+    echo y >"$S/other/y.txt"
+    scratch_commit "add y"
+    export_cmd --write "$S" >/dev/null
+  )
+  grep -q ' am ' "$log"
+  if grep ' am ' "$log" | grep -v -- ' --no-3way '; then echo "am without --no-3way"; return 1; fi
+  if grep -E -- ' (--3way|-3|--reject|--ignore-whitespace|--ignore-space-change|--unidiff-zero) ' "$log"; then
+    echo "fuzzy apply flag"
+    return 1
+  fi
+}
+
 # --- refused exports write nothing -----------------------------------------
 
 # queued_root: new_root with a one-patch queue exported from the scratch, and
@@ -388,6 +434,8 @@ run_test am_tree_equals_apply_tree am_tree_equals_apply_tree
 run_test binary_hunk_survives binary_hunk_survives
 run_test re_export_is_byte_identical re_export_is_byte_identical
 run_test no_commits_clears_stale_patches no_commits_clears_stale_patches
+run_test patch_format_is_pinned patch_format_is_pinned
+run_test dev_loop_git_flags dev_loop_git_flags
 run_test refuses_merge_commit refuses_merge_commit
 run_test refuses_empty_commit_clearly refuses_empty_commit_clearly
 run_test refuses_replay_that_differs_from_head refuses_replay_that_differs_from_head
