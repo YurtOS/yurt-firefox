@@ -76,7 +76,7 @@ pq_fetch() {
 # pq_apply can leave <worktree> partially patched and dirty; the caller must
 # discard it (delete the clone) and must not retry on it.
 pq_apply() {
-  local wt patches ics ics_path patch top mine
+  local wt patches ics ics_path patch top mine status
   wt=$(cd "$1" 2>/dev/null && pwd -P) || { echo "pq: no such worktree: $1" >&2; return 1; }
   patches=$(cd "$2" 2>/dev/null && pwd -P) || { echo "pq: no such patches dir: $2" >&2; return 1; }
   ics=$(cd "$3" 2>/dev/null && pwd -P) || { echo "pq: no such corpus dir: $3" >&2; return 1; }
@@ -91,8 +91,9 @@ pq_apply() {
   fi
   [ "$(pq_git -C "$wt" rev-parse HEAD)" = "$PQ_COMMIT" ] ||
     { echo "pq: $wt is not at pinned commit $PQ_COMMIT" >&2; return 1; }
-  [ -z "$(pq_git -C "$wt" status --porcelain --untracked-files=all)" ] ||
-    { echo "pq: $wt is not clean" >&2; return 1; }
+  status=$(pq_git -C "$wt" status --porcelain --untracked-files=all) ||
+    { echo "pq: cannot read the status of $wt" >&2; return 1; }
+  [ -z "$status" ] || { echo "pq: $wt is not clean" >&2; return 1; }
 
   while IFS= read -r patch; do
     pq_git -C "$wt" apply --index --whitespace=nowarn "$patch" ||
