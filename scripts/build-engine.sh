@@ -42,8 +42,11 @@ dir_hash() {
   local dir=$1
   shift
   [ -d "$dir" ] || { echo "build-engine: no such directory: $dir" >&2; return 1; }
+  local d
+  # A digest that cannot be computed fails the hash (pipefail), never hashes as ''.
   (cd "$dir" && find . "$@" -type f | LC_ALL=C sort | while IFS= read -r f; do
-    printf '%s  %s\n' "$(sha256 <"$f" | cut -d' ' -f1)" "${f#./}"
+    d=$(sha256 <"$f") || exit 1
+    printf '%s  %s\n' "${d%% *}" "${f#./}"
   done) | sha256 | cut -d' ' -f1
 }
 

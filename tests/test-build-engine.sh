@@ -172,6 +172,7 @@ hash_read_error_fails() {
   repin
   if real=$(command -v sha256sum); then :; else real="$(command -v shasum) -a 256"; fi
   mkdir -p "$R.shim"
+  # shellcheck disable=SC2016 # expanded by the shim, not here
   printf '#!/bin/sh\nt=$(mktemp) || exit 1\ncat >"$t"\nif grep -q FAILME "$t"; then rm -f "$t"; echo "shim: sha256sum fails" >&2; exit 1; fi\n%s <"$t"; rc=$?; rm -f "$t"; exit $rc\n' \
     "$real" >"$R.shim/sha256sum"
   chmod +x "$R.shim/sha256sum"
