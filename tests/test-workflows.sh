@@ -15,6 +15,17 @@ WASMTIME_SHA=77c19ee0437991f9ac7837b9c269d9c7076744f85dad263fea5214cc2723c7ff
 # line cannot satisfy an assertion.
 body() { grep -Ev '^[[:space:]]*#' "$1"; }
 
+# has_line <file> <text>: some body line, leading blanks stripped, is exactly <text>.
+has_line() { body "$1" | sed 's/^[[:space:]]*//' | grep -qxF -- "$2"; }
+
+# no_or_on <file> <pattern>: no body line matching <pattern> carries `||`, so a
+# failing check cannot be swallowed.
+no_or_on() {
+  local bad
+  bad=$(body "$1" | grep -F -- "$2" | grep -F '||' || true)
+  [ -z "$bad" ] || { printf '%s: failure swallowed:\n%s\n' "${1##*/}" "$bad" >&2; return 1; }
+}
+
 t_exist() {
   [ -f "$WF/queue.yml" ] || { echo "missing queue.yml" >&2; return 1; }
   [ -f "$WF/engine.yml" ] || { echo "missing engine.yml" >&2; return 1; }
@@ -43,11 +54,17 @@ t_pinned() {
 }
 
 t_permissions() {
-  local f
+  local f top block
   for f in queue.yml engine.yml; do
-    { body "$WF/$f" | grep -Eq '^permissions:' && body "$WF/$f" | grep -Eq '^  contents: read$'; } ||
-      { echo "$f lacks top-level permissions: contents: read" >&2; return 1; }
+    # The top-level block is exactly `permissions:` + `contents: read`, and no job
+    # or step widens it with its own permissions.
+    top=$(body "$WF/$f" | grep -E '^permissions:' || true)
+    assert_eq "permissions:" "$top" "$f top-level permissions line"
+    block=$(body "$WF/$f" | awk '/^permissions:/{f=1; next} f && /^[^[:space:]]/{exit} f && NF{print}')
+    assert_eq "  contents: read" "$block" "$f top-level permissions block"
+    ! body "$WF/$f" | grep -Eq '^[[:space:]]+permissions:' || { echo "$f has job-level permissions" >&2; return 1; }
     ! body "$WF/$f" | grep -q 'secrets\.' || { echo "$f uses secrets" >&2; return 1; }
+    ! body "$WF/$f" | grep -Eq 'pull_request_target|workflow_run' || { echo "$f runs on pull_request_target or workflow_run" >&2; return 1; }
   done
 }
 
@@ -56,6 +73,13 @@ t_engine() {
   [ -f "$f" ] || { echo "missing engine.yml" >&2; return 1; }
   body "$f" | grep -qF -- "$SMOKE" || { echo "engine.yml lacks the smoke command" >&2; return 1; }
   body "$f" | grep -qF "$WASMTIME_SHA" || { echo "engine.yml lacks the wasmtime sha256" >&2; return 1; }
+  # The smoke compares both outputs with 42, and the download is checked against
+  # the pinned digest by a verify that cannot be swallowed.
+  assert_eq 2 "$(body "$f" | grep -cF '[ "$out" = 42 ]')" "smoke comparisons with 42"
+  has_line "$f" "WASMTIME_SHA256: $WASMTIME_SHA" || { echo "engine.yml WASMTIME_SHA256 is not the pinned digest" >&2; return 1; }
+  has_line "$f" 'echo "${WASMTIME_SHA256}  $RUNNER_TEMP/wasmtime.tar.xz" | sha256sum -c -' ||
+    { echo "engine.yml does not verify wasmtime against WASMTIME_SHA256" >&2; return 1; }
+  no_or_on "$f" 'sha256sum'
   body "$f" | grep -q 'scripts/build-engine.sh' || { echo "engine.yml does not run build-engine.sh" >&2; return 1; }
   body "$f" | grep -q 'build-manifest.json' || { echo "engine.yml does not upload build-manifest.json" >&2; return 1; }
   body "$f" | grep -Eq '^  pull_request:' || { echo "engine.yml lacks pull_request" >&2; return 1; }
@@ -89,6 +113,10 @@ t_queue() {
   body "$f" | grep -q 'steps.pin.outputs.sha' || { echo "drift checkout does not use the pin" >&2; return 1; }
   body "$f" | grep -q 'rhysd/actionlint/releases/download' || { echo "queue.yml does not install actionlint" >&2; return 1; }
   body "$f" | grep -q 'sha256sum -c' || { echo "queue.yml does not verify actionlint" >&2; return 1; }
+  has_line "$f" 'echo "${ACTIONLINT_SHA256}  $tgz" | sha256sum -c -' ||
+    { echo "queue.yml does not verify actionlint against ACTIONLINT_SHA256" >&2; return 1; }
+  body "$f" | grep -Eq '^ +ACTIONLINT_SHA256: [0-9a-f]{64}$' || { echo "queue.yml lacks a full actionlint digest" >&2; return 1; }
+  no_or_on "$f" 'sha256sum'
 }
 
 run_test "workflows exist" t_exist
