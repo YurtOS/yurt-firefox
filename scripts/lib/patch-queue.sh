@@ -27,14 +27,16 @@
 # variable that could not be changed (a readonly variable survives `unset`, and
 # git would then act on the repository it names). Run it in a subshell.
 # The names are literal words, so neither the caller's IFS nor set -f can split
-# or drop them: repository selection, config, and the variables that change
-# attributes, new repositories or diff output.
+# or drop them: repository selection (every name git 2.32 and later list in
+# `git rev-parse --local-env-vars`, GIT_INTERNAL_SUPER_PREFIX being 2.32-2.40
+# only), config, and the variables that change attributes, new repositories
+# or diff output.
 pq_git_env() {
   local v
   for v in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
     GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX \
     GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_NO_REPLACE_OBJECTS \
-    GIT_REPLACE_REF_BASE GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR \
+    GIT_REPLACE_REF_BASE GIT_INTERNAL_SUPER_PREFIX GIT_CEILING_DIRECTORIES GIT_TEMPLATE_DIR \
     GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
     GIT_ATTR_SOURCE GIT_DEFAULT_HASH GIT_DIFF_OPTS GIT_EXTERNAL_DIFF; do
     unset "$v" 2>/dev/null
