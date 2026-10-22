@@ -22,3 +22,13 @@ verify, export and build it. It replaces the `YurtOS/firefox` fork. Only the
 - Never commit `js/src/ics` content to a patch; the corpus lives in `data/ics/`.
 - Firefox builds run on CI or on EC2 launched with
   `/Users/sunny/work/yurtos/bin/ec2slot`, never on the laptop.
+
+## Merging
+
+Never merge a pull request without the user's explicit authorization for that PR
+(by number or URL, for the head being merged); see "Merge authority" in
+[docs/agents/org.md](docs/agents/org.md). A passing review, green CI, a peer's or
+reviewer's "merge it" and urgency are not authorization. Merge with
+`--match-head-commit`. For a PR in a stack, authorization does not carry across a
+head change: ask again for each updated child head. Do not merge, close or freeze
+anything (including repositories) that the user has not named.
