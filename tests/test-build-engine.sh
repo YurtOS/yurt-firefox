@@ -65,11 +65,11 @@ run_build() {
 
 dry_run_creates_tree_and_manifest() {
   new_root
-  run_build --dry-run --workdir "$BASE/wd1"
+  run_build --dry-run --workdir "$BASE/wd1/firefox"
   assert_eq 0 "$RC" "$OUT"
-  [ -f "$BASE/wd1/js/ics/one.txt" ]
-  [ -f "$BASE/wd1/js/a.txt" ]
-  python3 - "$BASE/build-manifest.json" "$SHA" "$(shasum -a 256 "$R/mozconfig" | cut -d' ' -f1)" <<'PY'
+  [ -f "$BASE/wd1/firefox/js/ics/one.txt" ]
+  [ -f "$BASE/wd1/firefox/js/a.txt" ]
+  python3 - "$BASE/wd1/build-manifest.json" "$SHA" "$(shasum -a 256 "$R/mozconfig" | cut -d' ' -f1)" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
 for k in ("tag", "commit", "queue_sha256", "data_ics_sha256", "mozconfig_sha256",
@@ -87,36 +87,36 @@ PY
 
 dry_run_does_not_bootstrap() {
   new_root
-  run_build --dry-run --workdir "$BASE/wd2"
+  run_build --dry-run --workdir "$BASE/wd2/firefox"
   assert_eq 0 "$RC" "$OUT"
   case $OUT in *"toolchain"*"skipped"*) ;; *) echo "no skip notice: $OUT"; return 1 ;; esac
-  [ ! -e "$BASE/wd2/obj-nightmonkey-sm" ]
+  [ ! -e "$BASE/wd2/firefox/obj-nightmonkey-sm" ]
 }
 
 hashes_track_inputs() {
   new_root
-  run_build --dry-run --workdir "$BASE/wd3"
-  a=$(grep data_ics_sha256 "$BASE/build-manifest.json")
+  run_build --dry-run --workdir "$BASE/wd3/firefox"
+  a=$(grep data_ics_sha256 "$BASE/wd3/build-manifest.json")
   rm -rf "$BASE/wd3"
   echo two >"$R/data/ics/two.txt"
   repin
-  run_build --dry-run --workdir "$BASE/wd3"
+  run_build --dry-run --workdir "$BASE/wd3/firefox"
   assert_eq 0 "$RC" "$OUT"
-  b=$(grep data_ics_sha256 "$BASE/build-manifest.json")
+  b=$(grep data_ics_sha256 "$BASE/wd3/build-manifest.json")
   [ "$a" != "$b" ]
 }
 
 queue_hash_tracks_patch_set() {
   new_root
-  run_build --dry-run --workdir "$BASE/wd6"
-  a=$(grep queue_sha256 "$BASE/build-manifest.json")
+  run_build --dry-run --workdir "$BASE/wd6/firefox"
+  a=$(grep queue_sha256 "$BASE/wd6/build-manifest.json")
   rm -rf "$BASE/wd6"
   # A new patch changes the hash.
   printf 'diff --git a/other/b.txt b/other/b.txt\n--- a/other/b.txt\n+++ b/other/b.txt\n@@ -1 +1 @@\n-b\n+c\n' >"$R/patches/0001-x.patch"
   repin
-  run_build --dry-run --workdir "$BASE/wd6"
+  run_build --dry-run --workdir "$BASE/wd6/firefox"
   assert_eq 0 "$RC" "$OUT"
-  b=$(grep queue_sha256 "$BASE/build-manifest.json")
+  b=$(grep queue_sha256 "$BASE/wd6/build-manifest.json")
   [ "$a" != "$b" ]
 }
 
@@ -132,12 +132,12 @@ drift_rejects_short_or_malformed_pin() {
 
 refuses_non_empty_workdir() {
   new_root
-  mkdir -p "$BASE/wd4"
-  echo x >"$BASE/wd4/file"
-  run_build --dry-run --workdir "$BASE/wd4"
+  mkdir -p "$BASE/wd4/firefox"
+  echo x >"$BASE/wd4/firefox/file"
+  run_build --dry-run --workdir "$BASE/wd4/firefox"
   [ "$RC" -ne 0 ]
   case $OUT in *"not empty"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
-  assert_eq x "$(cat "$BASE/wd4/file")"
+  assert_eq x "$(cat "$BASE/wd4/firefox/file")"
 }
 
 defaults_workdir_to_workspace() {
@@ -256,6 +256,33 @@ PY2
   [ "$a" != "$(cat "$BASE/wd10/build-manifest.json")" ]
 }
 
+# Values are JSON-escaped: a quote or a backslash cannot break the manifest.
+manifest_is_valid_json() {
+  new_root
+  PQ_ICS_PATH='js/q"b\\s'
+  repin
+  run_build --dry-run --workdir "$BASE/wd11/firefox"
+  assert_eq 0 "$RC" "$OUT"
+  python3 - "$BASE/wd11/build-manifest.json" "$PQ_ICS_PATH" <<'PY2'
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert m["ics_path"] == sys.argv[2], m
+PY2
+}
+
+# An existing build-manifest.json next to the workdir is refused, not
+# overwritten, before anything is fetched.
+refuses_existing_manifest() {
+  new_root
+  mkdir -p "$BASE/wd12"
+  echo keep >"$BASE/wd12/build-manifest.json"
+  run_build --dry-run --workdir "$BASE/wd12/firefox"
+  [ "$RC" -ne 0 ] || { echo "overwrote the manifest: $OUT"; return 1; }
+  case $OUT in *"build-manifest.json"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
+  assert_eq keep "$(cat "$BASE/wd12/build-manifest.json")"
+  [ ! -e "$BASE/wd12/firefox" ]
+}
+
 run_test dry_run_creates_tree_and_manifest dry_run_creates_tree_and_manifest
 run_test dry_run_does_not_bootstrap dry_run_does_not_bootstrap
 run_test hashes_track_inputs hashes_track_inputs
@@ -271,4 +298,6 @@ run_test drift_ignores_repository_env drift_ignores_repository_env
 run_test refuses_tree_mismatch refuses_tree_mismatch
 run_test refuses_placeholder_upstream refuses_placeholder_upstream
 run_test manifest_records_tree_and_ics_path manifest_records_tree_and_ics_path
+run_test manifest_is_valid_json manifest_is_valid_json
+run_test refuses_existing_manifest refuses_existing_manifest
 finish
