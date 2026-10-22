@@ -129,6 +129,15 @@ pq_fetch() {
     { echo "pq: tag $PQ_TAG is $head, pinned commit is $PQ_COMMIT" >&2; return 1; }
 }
 
+# pq_list_patches <dir>: print the *.patch files directly in <dir>, one per line,
+# in the order they apply. Fails if <dir> cannot be listed, since a partial list
+# would drop patches without a word.
+pq_list_patches() {
+  local list
+  list=$(find "$1" -maxdepth 1 -type f -name '*.patch') || { echo "pq: cannot list $1" >&2; return 1; }
+  [ -z "$list" ] || printf '%s\n' "$list" | LC_ALL=C sort
+}
+
 # pq_apply <worktree> <patches-dir> <data-ics-dir>: apply the queue, then lay
 # the corpus over $PQ_ICS_PATH (default js/src/ics) and stage it. A failed
 # pq_apply can leave <worktree> partially patched and dirty; the caller must

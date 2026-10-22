@@ -49,7 +49,7 @@ create_scratch() {
 }
 
 write_patches() {
-  local scratch work touched commits c n rc written want
+  local scratch work touched commits c n rc written want stage= keep= list f
   scratch=$(cd "$1" 2>/dev/null && pwd -P) || { echo "export-patches: no such scratch: $1" >&2; return 1; }
   pq_git -C "$scratch" rev-parse --git-dir >/dev/null 2>&1 ||
     { echo "export-patches: $scratch is not a git checkout" >&2; return 1; }
@@ -85,7 +85,8 @@ write_patches() {
   done <<<"$commits"
 
   work=$(mktemp -d) || return 1
-  trap 'rm -rf "$work"; trap - RETURN' RETURN
+  # $stage is kept when a failed publish could not restore the old patches.
+  trap 'rm -rf "$work"; [ -z "$stage" ] || [ -n "$keep" ] || rm -rf "$stage"; trap - RETURN' RETURN
   mkdir "$work/patches" || return 1
   # One .patch file per commit, nothing in it but the commit: no cover letter,
   # extra headers, threading, diffstat or signature, and the default context,
@@ -94,7 +95,9 @@ write_patches() {
     --abbrev=12 --no-stat --no-thread --suffix=.patch --no-cover-letter --no-add-header \
     --no-to --no-cc --no-attach -U3 -M --src-prefix=a/ --dst-prefix=b/ --subject-prefix=PATCH \
     --encoding=UTF-8 -o "$work/patches" "$PQ_COMMIT..HEAD" || return 1
-  written=$(find "$work/patches" -maxdepth 1 -type f -name '*.patch' | wc -l | tr -d ' ')
+  list=$(pq_list_patches "$work/patches") || return 1
+  written=0
+  while IFS= read -r f; do [ -z "$f" ] || written=$((written + 1)); done <<<"$list"
   [ "$written" -eq "$n" ] ||
     { echo "export-patches: format-patch wrote $written .patch files for $n commits" >&2; return 1; }
 
@@ -114,13 +117,73 @@ write_patches() {
     return 1
   }
 
+  # Stage the new queue next to patches/ (same filesystem, so publishing is a
+  # series of renames) and check it before anything published is touched.
   mkdir -p "$ROOT/patches" || return 1
-  find "$ROOT/patches" -maxdepth 1 -type f -name '*.patch' -exec rm -f {} + || return 1
-  # find, not a glob: a caller that sources this script may have set -f.
-  find "$work/patches" -maxdepth 1 -type f -name '*.patch' -exec cp {} "$ROOT/patches/" \; || return 1
-  awk -v t="$PQ_TREE_NEW" '/^tree=/ { print "tree=" t; next } { print }' "$ROOT/UPSTREAM" >"$work/UPSTREAM" &&
-    cp "$work/UPSTREAM" "$ROOT/UPSTREAM" || return 1
-  echo "export-patches: wrote $(find "$ROOT/patches" -maxdepth 1 -name '*.patch' | wc -l | tr -d ' ') patches; tree=$PQ_TREE_NEW"
+  stage=$(mktemp -d "$ROOT/.export-stage.XXXXXX") || return 1
+  mkdir "$stage/new" || return 1
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    cp "$f" "$stage/new/" || { echo "export-patches: cannot stage $f; nothing written" >&2; return 1; }
+  done <<<"$list"
+  list=$(pq_list_patches "$stage/new") || return 1
+  written=0
+  while IFS= read -r f; do [ -z "$f" ] || written=$((written + 1)); done <<<"$list"
+  [ "$written" -eq "$n" ] ||
+    { echo "export-patches: staged $written patches for $n commits; nothing written" >&2; return 1; }
+  awk -v t="$PQ_TREE_NEW" '/^tree=/ { print "tree=" t; next } { print }' "$ROOT/UPSTREAM" >"$stage/UPSTREAM" ||
+    { echo "export-patches: cannot stage UPSTREAM; nothing written" >&2; return 1; }
+
+  publish "$stage" || return 1
+  echo "export-patches: wrote $n patches; tree=$PQ_TREE_NEW"
+}
+
+# publish <stage>: replace patches/*.patch with <stage>/new/*.patch and UPSTREAM
+# with <stage>/UPSTREAM, by renames. If a step fails, put the old files back.
+publish() {
+  local stage=$1 list f
+  mkdir "$stage/old" || return 1
+  list=$(pq_list_patches "$ROOT/patches") || return 1
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    mv "$f" "$stage/old/" || { unpublish "$stage" old; return 1; }
+  done <<<"$list"
+  list=$(pq_list_patches "$stage/new") || { unpublish "$stage" old; return 1; }
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    mv "$f" "$ROOT/patches/" || { unpublish "$stage" new; return 1; }
+  done <<<"$list"
+  mv "$stage/UPSTREAM" "$ROOT/UPSTREAM" || { unpublish "$stage" new; return 1; }
+}
+
+# unpublish <stage> <old|new>: undo a failed publish. "new" means new patches may
+# already be in patches/ (the old ones are then all in <stage>/old). UPSTREAM is
+# only ever replaced by the last, atomic rename, so it is still the old one. If
+# the old patches cannot be put back, keep <stage> and say where they are.
+unpublish() {
+  local stage=$1 placed=$2 list f ok=1
+  if [ "$placed" = new ]; then
+    if list=$(pq_list_patches "$ROOT/patches"); then
+      while IFS= read -r f; do
+        [ -z "$f" ] || rm -f "$f" || ok=
+      done <<<"$list"
+    else
+      ok=
+    fi
+  fi
+  if list=$(pq_list_patches "$stage/old"); then
+    while IFS= read -r f; do
+      [ -z "$f" ] || mv "$f" "$ROOT/patches/" || ok=
+    done <<<"$list"
+  else
+    ok=
+  fi
+  if [ -n "$ok" ]; then
+    echo "export-patches: could not publish the new queue; patches/ and UPSTREAM are unchanged" >&2
+  else
+    keep=1
+    echo "export-patches: could not publish the new queue or restore the old one; the old patches are in $stage/old and UPSTREAM is unchanged" >&2
+  fi
 }
 
 case ${1:-} in
