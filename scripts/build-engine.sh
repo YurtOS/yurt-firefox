@@ -6,7 +6,11 @@
 # ci-suite.sh runs jit-tests/jstests from (never the bare tag). build-manifest.json
 # is written next to DIR. --dry-run does fetch + apply + manifest only: no
 # toolchain bootstrap, no mach.
-# PQ_ROOT overrides the repository root (tests use it).
+# The applied tree must equal UPSTREAM's tree=, as check-queue requires; the
+# manifest records it and the corpus path. Exit codes: 0 ok, 1 failed, 2 UPSTREAM
+# not initialised or bad usage.
+# PQ_ROOT overrides the repository root and PQ_ICS_PATH the corpus path (tests
+# use them).
 set -euo pipefail
 
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -44,12 +48,24 @@ dir_hash() {
 
 step() { echo "build-engine: $*"; }
 
+ZERO=0000000000000000000000000000000000000000
+ICS_PATH=${PQ_ICS_PATH:-js/src/ics}
+
 pq_read_pin "$ROOT/UPSTREAM"
+case $PQ_URL in *example.invalid*) PQ_COMMIT=$ZERO ;; esac
+if [ "$PQ_COMMIT" = "$ZERO" ] || [ "$PQ_TREE" = "$ZERO" ]; then
+  echo "build-engine: UPSTREAM not initialised (placeholder values)" >&2
+  exit 2
+fi
 
 step "fetch $PQ_TAG ($PQ_COMMIT) into $workdir"
 pq_fetch "$workdir"
 step "apply patches/ and data/ics"
-pq_apply "$workdir" "$ROOT/patches" "$ROOT/data/ics"
+PQ_ICS_PATH=$ICS_PATH pq_apply "$workdir" "$ROOT/patches" "$ROOT/data/ics"
+tree=$(pq_tree "$workdir")
+[ "$tree" = "$PQ_TREE" ] ||
+  { echo "build-engine: tree mismatch: UPSTREAM says $PQ_TREE, applied queue is $tree" >&2; exit 1; }
+step "tree ok ($tree)"
 workdir=$(cd "$workdir" && pwd -P)
 
 toolchain_json=
@@ -108,8 +124,8 @@ fi
 queue_hash=$(dir_hash "$ROOT/patches" -maxdepth 1 -name '*.patch')
 ics_hash=$(dir_hash "$ROOT/data/ics")
 manifest=$(dirname "$workdir")/build-manifest.json
-printf '{\n  "tag": "%s",\n  "commit": "%s",\n  "queue_sha256": "%s",\n  "data_ics_sha256": "%s",\n  "mozconfig_sha256": "%s",\n  "toolchain_artifacts": [%s],\n  "rust_version": "%s"\n}\n' \
-  "$PQ_TAG" "$PQ_COMMIT" \
+printf '{\n  "tag": "%s",\n  "commit": "%s",\n  "tree": "%s",\n  "ics_path": "%s",\n  "queue_sha256": "%s",\n  "data_ics_sha256": "%s",\n  "mozconfig_sha256": "%s",\n  "toolchain_artifacts": [%s],\n  "rust_version": "%s"\n}\n' \
+  "$PQ_TAG" "$PQ_COMMIT" "$tree" "$ICS_PATH" \
   "$queue_hash" "$ics_hash" \
   "$(sha256 <"$ROOT/mozconfig" | cut -d' ' -f1)" \
   "$toolchain_json" "$rust_version" >"$manifest"
