@@ -165,6 +165,20 @@ drift_reads_the_pinned_sha_not_head() {
   assert_eq 0 "$RC" "$OUT"
 }
 
+# Exported GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE (hooks and dotfile setups export
+# them) neither change the verdict nor touch the repository they name: the pinned
+# mozconfig is read from NM_REPO.
+drift_ignores_repository_env() {
+  local before
+  new_nm
+  make_decoy "$R.decoy"
+  before=$(repo_state "$R.decoy")
+  RC=0
+  OUT=$(with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE" env PQ_ROOT="$R" NM_REPO="$NM" "$DRIFT" 2>&1) || RC=$?
+  assert_eq 0 "$RC" "$OUT"
+  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
+}
+
 run_test dry_run_creates_tree_and_manifest dry_run_creates_tree_and_manifest
 run_test dry_run_does_not_bootstrap dry_run_does_not_bootstrap
 run_test hashes_track_inputs hashes_track_inputs
@@ -176,4 +190,5 @@ run_test drift_passes_when_equal drift_passes_when_equal
 run_test drift_fails_when_different drift_fails_when_different
 run_test drift_reads_the_pinned_sha_not_head drift_reads_the_pinned_sha_not_head
 run_test drift_rejects_short_or_malformed_pin drift_rejects_short_or_malformed_pin
+run_test drift_ignores_repository_env drift_ignores_repository_env
 finish
