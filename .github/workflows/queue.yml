@@ -1,0 +1,72 @@
+name: queue
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: queue-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  queue:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Shellcheck
+        # Warnings and errors only. The existing library has known SC1007 and
+        # SC1091 findings, and tests/test-check-queue.sh has an SC2120 warning
+        # (run_check is written to take optional arguments that no caller
+        # passes); those are excluded here rather than fixed.
+        run: shellcheck -S warning -e SC1007,SC1091,SC2120 scripts/*.sh scripts/lib/*.sh tests/*.sh
+
+      - name: Install actionlint
+        # Pinned and checksum-verified: tests/test-workflows.sh fails, rather
+        # than skips, when CI=true and actionlint is missing.
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          tgz="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --retry 3 -fsSL -o "$tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          tar -xzf "$tgz" -C "$RUNNER_TEMP/actionlint" actionlint
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+
+      - name: Fixture suites
+        run: scripts/check-queue.sh --fixtures
+
+      - name: Fresh fetch, apply the queue, compare the tree hash
+        run: scripts/check-queue.sh
+
+      - name: Read NIGHTMONKEY_PIN
+        id: pin
+        run: |
+          pin=$(tr -d '[:space:]' < NIGHTMONKEY_PIN)
+          printf '%s\n' "$pin" | grep -Eq '^[0-9a-f]{40}$' ||
+            { echo "NIGHTMONKEY_PIN must hold one full 40-hex SHA, got '$pin'" >&2; exit 1; }
+          echo "sha=$pin" >> "$GITHUB_OUTPUT"
+
+      - name: Check out NightMonkey
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: YurtOS/nightmonkey
+          ref: ${{ steps.pin.outputs.sha }}
+          path: nightmonkey
+          persist-credentials: false
+
+      - name: mozconfig drift against NightMonkey
+        env:
+          NM_REPO: ${{ github.workspace }}/nightmonkey
+        run: scripts/check-mozconfig-drift.sh
