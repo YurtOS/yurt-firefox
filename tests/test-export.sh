@@ -204,6 +204,44 @@ no_commits_clears_stale_patches() {
   assert_eq "$(hand_tree "$S")" "$(pin_tree)"
 }
 
+# User and system git config must not change the exported patch bytes.
+patch_bytes_ignore_user_and_system_config() {
+  new_root
+  export_cmd "$S"
+  sed -i.bak 's/^line5$/line5 patched/' "$S/js/a.txt" && rm "$S/js/a.txt.bak"
+  scratch_commit "patch a"
+  export_cmd --write "$S"
+  cp -R "$R/patches" "$BASE/hermetic"
+  printf '[format]\n\tsubjectPrefix = LEAK\n[diff]\n\tcontext = 1\n' >"$BASE/global.config"
+  printf '[diff]\n\tcontext = 0\n\tsrcPrefix = s/\n' >"$BASE/system.config"
+  (
+    unset GIT_CONFIG_NOSYSTEM
+    export GIT_CONFIG_GLOBAL="$BASE/global.config" GIT_CONFIG_SYSTEM="$BASE/system.config"
+    export_cmd --write "$S"
+  )
+  diff -r "$BASE/hermetic" "$R/patches"
+}
+
+# A missing patches/ directory is an error in both modes (an empty one is a
+# valid empty queue).
+missing_patches_dir_is_an_error() {
+  local msg
+  new_root
+  rmdir "$R/patches"
+  msg=$(export_cmd "$S" 2>&1) && { echo "create succeeded: $msg"; return 1; }
+  case $msg in *"no patches directory"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  [ ! -e "$S/.git" ] || { echo "scratch built without a queue"; return 1; }
+  mkdir "$R/patches"
+  export_cmd "$S"
+  echo x >"$S/other/x.txt"
+  scratch_commit "add x"
+  rmdir "$R/patches"
+  msg=$(export_cmd --write "$S" 2>&1) && { echo "write succeeded: $msg"; return 1; }
+  case $msg in *"no patches directory"*) ;; *) echo "wrong reason: $msg"; return 1 ;; esac
+  [ ! -e "$R/patches" ] || { echo "patches directory recreated"; return 1; }
+  grep -q '^tree=0000000000000000000000000000000000000000$' "$R/UPSTREAM"
+}
+
 # Patch bytes do not depend on the scratch commit ids, the git version or the
 # repository size: zero commit in the From line, no signature, 12-digit ids.
 patch_format_is_pinned() {
@@ -595,6 +633,8 @@ run_test am_tree_equals_apply_tree am_tree_equals_apply_tree
 run_test binary_hunk_survives binary_hunk_survives
 run_test re_export_is_byte_identical re_export_is_byte_identical
 run_test no_commits_clears_stale_patches no_commits_clears_stale_patches
+run_test patch_bytes_ignore_user_and_system_config patch_bytes_ignore_user_and_system_config
+run_test missing_patches_dir_is_an_error missing_patches_dir_is_an_error
 run_test patch_format_is_pinned patch_format_is_pinned
 run_test dev_loop_git_flags dev_loop_git_flags
 run_test refuses_merge_commit refuses_merge_commit

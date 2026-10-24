@@ -1,0 +1,163 @@
+name: gate
+
+# The semantic gate: does the patched engine still run NightMonkey's jit-tests?
+#
+# The test-source tree is the engine tree this workflow builds from the queue
+# (tag + patches + data/ics, via scripts/build-engine.sh). It is linked in as
+# NightMonkey's firefox/ path; the bare tag and the old fork are never used.
+#
+# The gate runs ONLY the two jit-test lanes. That is intentionally narrower
+# than the slice A qualification, which also ran the local regressions, the
+# guest-option checks and the baseline/MIR-stress tier regressions once.
+#
+# NightMonkey is built and driven as-is at the SHA in NIGHTMONKEY_PIN. A queue
+# patch that changes opcodes or layout fails this gate by design: the
+# NightMonkey change merges first, then a queue PR bumps NIGHTMONKEY_PIN.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: read
+
+# A push or a `gate` label replaces the PR's run in flight. A run started by
+# any other label is skipped by the job `if:`, so it gets a group of its own
+# (its run id) instead of cancelling the gate. Nightly and dispatch runs on
+# main share one group and queue rather than cancel.
+concurrency:
+  group: gate-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'gate' && github.run_id || 'run' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  jit-test:
+    # Pull requests run the gate only when labeled `gate`. Adding some other
+    # label to a gated PR does not start a run (which, by cancel-in-progress,
+    # would cancel the one in flight).
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'gate') && (github.event.action != 'labeled' || github.event.label.name == 'gate'))
+    runs-on: ubuntu-24.04
+    # Engine build (~8 min) + NightMonkey build (~9 min) + one jit-test lane.
+    # ci-suite.sh caps a lane at 60 min (timeout 3600s); the step's 125 min is
+    # a backstop. One job per lane keeps each runner's disk and time budget
+    # independent.
+    timeout-minutes: 200
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [aot, interpreter]
+    env:
+      CI_LANE: ${{ matrix.lane }}
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The logs dir is the uploaded artifact. Create it, with the pin, before
+      # anything can fail, so an early failure is not masked by "no files found".
+      - name: Prepare logs
+        run: |
+          mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
+          cp NIGHTMONKEY_PIN "$RUNNER_TEMP/nightmonkey-logs/NIGHTMONKEY_PIN"
+          echo "NightMonkey pin: $(tr -d '[:space:]' < NIGHTMONKEY_PIN)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip python3-venv build-essential cmake
+
+      - name: Read the pins
+        id: pin
+        run: |
+          echo "commit=$(sed -n 's/^commit=//p' UPSTREAM)" >> "$GITHUB_OUTPUT"
+          pin=$(tr -d '[:space:]' < NIGHTMONKEY_PIN)
+          printf '%s\n' "$pin" | grep -Eq '^[0-9a-f]{40}$' ||
+            { echo "NIGHTMONKEY_PIN must hold one full 40-hex SHA, got '$pin'" >&2; exit 1; }
+          echo "sha=$pin" >> "$GITHUB_OUTPUT"
+
+      # Restore only: engine.yml seeds this cache from main.
+      - name: Restore ~/.mozbuild
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.mozbuild
+          key: mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-${{ hashFiles('mozconfig', 'scripts/build-engine.sh', 'scripts/lib/patch-queue.sh', 'patches/*.patch') }}
+          restore-keys: |
+            mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-
+
+      - name: Build the engine from the queue
+        run: scripts/build-engine.sh
+
+      # Tie the logs to what was tested: the engine's manifest (tag, commit,
+      # queue tree, input and toolchain digests) next to the pin.
+      - name: Record provenance
+        run: |
+          cp "$GITHUB_WORKSPACE/build-manifest.json" "$RUNNER_TEMP/nightmonkey-logs/build-manifest.json"
+          {
+            echo '```json'
+            cat "$GITHUB_WORKSPACE/build-manifest.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out NightMonkey at NIGHTMONKEY_PIN
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: YurtOS/nightmonkey
+          ref: ${{ steps.pin.outputs.sha }}
+          path: nightmonkey
+          persist-credentials: false
+
+      # NightMonkey's scripts/ci-suite.sh runs jit_test.py from $here/firefox.
+      - name: Use the queue-built tree as NightMonkey's firefox/
+        run: |
+          test ! -e nightmonkey/firefox
+          ln -s "$GITHUB_WORKSPACE/firefox" nightmonkey/firefox
+          test -f nightmonkey/firefox/js/src/jit-test/jit_test.py
+
+      - name: Install Rust from rust-toolchain.toml
+        working-directory: nightmonkey
+        run: |
+          rustup show
+          rustup target add wasm32-wasip1
+          rustup component add rust-src
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: nightmonkey -> build/cargo
+          key: gate-ubuntu-24.04
+          # Nightly and dispatch runs on main seed it; gated PRs only read it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build NightMonkey
+        working-directory: nightmonkey
+        run: |
+          cmake -S . -B build -DSPIDERMONKEY_DIST="$GITHUB_WORKSPACE/firefox/obj-nightmonkey-sm/dist"
+          cmake --build build
+          test -x build/bin/inproc-shell.sh
+
+      # ci-suite.sh pipes each lane through scripts/run-jit-tests.sh, which
+      # applies scripts/check-test-log.py: a nonempty, passing run is required.
+      - name: jit-tests (${{ matrix.lane }})
+        working-directory: nightmonkey
+        timeout-minutes: 125
+        run: scripts/ci-suite.sh jit "$CI_LANE"
+
+      - name: Upload execution logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-jit-${{ matrix.lane }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightmonkey-logs
+          if-no-files-found: error
+          retention-days: 7

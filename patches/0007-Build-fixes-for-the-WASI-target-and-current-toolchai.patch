@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Fallin <chris@cfallin.org>
+Date: Fri, 4 Sep 2026 16:33:36 -0700
+Subject: [PATCH] Build fixes for the WASI target and current toolchains
+
+Strip -pthread for the wasi target; pass --target=<cpu>-wasip1 to clang 22
+and later for WASI; prefer the generic "unknown" vendor when rustc offers
+several matching targets.
+
+Source commits in YurtOS/firefox (yurt dff5cf534448):
+  f7d679b00ba0 Strip `-pthread` for wasi target
+    (all included paths)
+  164f660a3602 Add hooks to allow for an external compiler.
+    (only build/moz.configure)
+
+Co-authored-by: Tomasz Andrzejak <andreiltd@gmail.com>
+---
+ build/moz.configure/init.configure      |  6 ++++++
+ build/moz.configure/libraries.configure |  2 +-
+ build/moz.configure/rust.configure      |  7 +++++++
+ build/moz.configure/toolchain.configure | 18 +++++++++++++-----
+ 4 files changed, 27 insertions(+), 6 deletions(-)
+
+diff --git a/build/moz.configure/init.configure b/build/moz.configure/init.configure
+index 892faaf1a194..44cd66375d19 100644
+--- a/build/moz.configure/init.configure
++++ b/build/moz.configure/init.configure
+@@ -911,6 +911,12 @@ def target_is_linux_or_wasi(target):
+         return True
+ 
+ 
++@depends(target)
++def target_is_wasi(target):
++    if target.kernel == "WASI":
++        return True
++
++
+ @depends(target)
+ def target_is_android(target):
+     if target.os == "Android":
+diff --git a/build/moz.configure/libraries.configure b/build/moz.configure/libraries.configure
+index 26ca886f60fb..335e241af28e 100644
+--- a/build/moz.configure/libraries.configure
++++ b/build/moz.configure/libraries.configure
+@@ -93,7 +93,7 @@ moz_use_pthreads = (
+     | check_symbol_in_libs(
+         [None, "pthread"],
+         symbol="pthread_create",
+-        when=building_with_gnu_compatible_cc & ~target_is_darwin,
++        when=building_with_gnu_compatible_cc & ~target_is_darwin & ~target_is_wasi,
+     ).found
+ )
+ 
+diff --git a/build/moz.configure/rust.configure b/build/moz.configure/rust.configure
+index 6c1c89181713..3e9552819828 100644
+--- a/build/moz.configure/rust.configure
++++ b/build/moz.configure/rust.configure
+@@ -417,6 +417,13 @@ def detect_rustc_target(
+         if len(narrowed) == 1:
+             return narrowed[0].rust_target
+ 
++        # Failing that, prefer the generic "unknown" vendor over a
++        # vendor-specific target (rustc 1.98 added x86_64-oe-linux-gnu beside
++        # x86_64-unknown-linux-gnu, and the host vendor is "pc").
++        narrowed = [c for c in candidates if c.target.vendor == "unknown"]
++        if len(narrowed) == 1:
++            return narrowed[0].rust_target
++
+         return None
+ 
+     rustc_target = find_candidate(candidates)
+diff --git a/build/moz.configure/toolchain.configure b/build/moz.configure/toolchain.configure
+index 0fb4faa59807..27a69e67ab09 100644
+--- a/build/moz.configure/toolchain.configure
++++ b/build/moz.configure/toolchain.configure
+@@ -677,6 +677,14 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+     else:
+         toolchain = target.toolchain
+ 
++    # clang 22 deprecates the bare wasm32-wasi target name, and the warning
++    # makes every flag probe fail; older clangs ship a sysroot and compiler-rt
++    # laid out under the plain name only. Only the --target flag changes; the
++    # sysroot keeps the plain name.
++    target_triple = toolchain
++    if target.os == "WASI" and info.type == "clang" and info.version >= "22.0":
++        target_triple = "%s-wasip1" % target.cpu
++
+     if info.type == "clang":
+         # Add the target explicitly when the target is aarch64 macosx, because
+         # the Xcode clang target is named differently, and we need to work around
+@@ -689,7 +697,7 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+                 flags.append("--target=arm64-apple-darwin")
+             has_target = True
+         elif target.os == "iOS":
+-            target_flag = "--target=%s" % toolchain
++            target_flag = "--target=%s" % target_triple
+             if target_flag not in compiler:
+                 flags.append(target_flag)
+             has_target = True
+@@ -699,7 +707,7 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+             or not info.endianness
+             or info.endianness != target.endianness
+         ):
+-            flags.append("--target=%s" % toolchain)
++            flags.append("--target=%s" % target_triple)
+             has_target = True
+ 
+         # Add target flag when there is an OS mismatch (e.g. building for Android on
+@@ -708,7 +716,7 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+         elif target.os in OS_preprocessor_checks and (
+             not info.os or info.os != target.os
+         ):
+-            flags.append("--target=%s" % toolchain)
++            flags.append("--target=%s" % target_triple)
+             has_target = True
+ 
+     if not has_target and (not info.cpu or info.cpu != target.cpu):
+@@ -718,9 +726,9 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+         elif (info.cpu, target.cpu) in same_arch:
+             flags.append("-m64")
+         elif info.type == "clang-cl" and target.cpu == "aarch64":
+-            flags.append("--target=%s" % toolchain)
++            flags.append("--target=%s" % target_triple)
+         elif info.type == "clang":
+-            flags.append("--target=%s" % toolchain)
++            flags.append("--target=%s" % target_triple)
+ 
+     return namespace(
+         type=info.type,

@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sunnymar <sunny@h2pro.co>
+Date: Mon, 5 Oct 2026 11:48:21 +0300
+Subject: [PATCH] Build fixes for wasm32-yurt-linux-musl (Yurt)
+
+JSONPrinter and RandomNum hunks for the Yurt musl target; GRND_NONBLOCK
+comes from musl's <sys/random.h>.
+
+Source commits in YurtOS/firefox (yurt dff5cf534448):
+  08e2eae2c260 Build fixes for wasm32-yurt-linux-musl (Yurt)
+    (all included paths)
+  c0fb41d8ebcd RandomNum: take GRND_NONBLOCK from musl's <sys/random.h> on Yurt
+    (all included paths)
+---
+ js/src/vm/JSONPrinter.cpp |  2 +-
+ js/src/vm/JSONPrinter.h   |  5 +++--
+ mfbt/RandomNum.cpp        | 12 ++++++++++--
+ 3 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/js/src/vm/JSONPrinter.cpp b/js/src/vm/JSONPrinter.cpp
+index 035024a210e1..d90930a2e6cd 100644
+--- a/js/src/vm/JSONPrinter.cpp
++++ b/js/src/vm/JSONPrinter.cpp
+@@ -199,7 +199,7 @@ void JSONPrinter::property(const char* name, uint64_t value) {
+   out_.printf("%" PRIu64, value);
+ }
+ 
+-#if defined(XP_DARWIN) || defined(__OpenBSD__) || defined(__wasi__)
++#if defined(XP_DARWIN) || defined(__OpenBSD__) || (defined(__wasi__) && !defined(__linux__))
+ void JSONPrinter::property(const char* name, size_t value) {
+   propertyName(name);
+   out_.printf("%zu", value);
+diff --git a/js/src/vm/JSONPrinter.h b/js/src/vm/JSONPrinter.h
+index 511f2a48332e..82f5cb2be9ab 100644
+--- a/js/src/vm/JSONPrinter.h
++++ b/js/src/vm/JSONPrinter.h
+@@ -53,10 +53,11 @@ class JSONPrinter {
+   void property(const char* name, uint32_t value);
+   void property(const char* name, int64_t value);
+   void property(const char* name, uint64_t value);
+-#if defined(XP_DARWIN) || defined(__OpenBSD__) || defined(__wasi__)
++#if defined(XP_DARWIN) || defined(__OpenBSD__) || (defined(__wasi__) && !defined(__linux__))
+   // On OSX and OpenBSD, size_t is long unsigned, uint32_t is unsigned, and
+   // uint64_t is long long unsigned. Everywhere else, size_t matches either
+-  // uint32_t or uint64_t.
++  // uint32_t or uint64_t. (wasi-libc's size_t is long unsigned; Yurt's musl,
++  // which defines __linux__ alongside __wasi__, uses unsigned int.)
+   void property(const char* name, size_t value);
+ #endif
+ 
+diff --git a/mfbt/RandomNum.cpp b/mfbt/RandomNum.cpp
+index 46b61394a023..614d24a4080e 100644
+--- a/mfbt/RandomNum.cpp
++++ b/mfbt/RandomNum.cpp
+@@ -29,13 +29,21 @@ extern "C" BOOLEAN NTAPI RtlGenRandom(PVOID RandomBuffer,
+ 
+ #if defined(ANDROID) || defined(XP_DARWIN) || defined(__DragonFly__) ||    \
+     defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
+-    defined(__wasi__)
++    (defined(__wasi__) && !defined(__linux__))
++// Yurt (wasm32-yurt-linux-musl) builds as WASI but defines __linux__ too: its
++// musl has no arc4random, so it takes the getrandom path below.
+ #  include <stdlib.h>
+ #  define USE_ARC4RANDOM
+ #endif
+ 
+ #if defined(__linux__)
+-#  include <linux/random.h>  // For GRND_NONBLOCK.
++#  if defined(__wasi__)
++// Yurt: musl's <sys/random.h> declares getrandom and GRND_NONBLOCK, with no
++// dependency on the kernel UAPI headers.
++#    include <sys/random.h>  // For GRND_NONBLOCK.
++#  else
++#    include <linux/random.h>  // For GRND_NONBLOCK.
++#  endif
+ #  include <sys/syscall.h>   // For SYS_getrandom.
+ 
+ // Older glibc versions don't define SYS_getrandom, so we define it here if

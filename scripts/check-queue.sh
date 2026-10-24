@@ -4,8 +4,8 @@
 #   check-queue.sh             fresh fetch of the pinned tag, apply the queue and
 #                              data/ics, compare the tree hash with UPSTREAM; if
 #                              PQ_YURT_REPO is set, also run the include/exclude
-#                              census there (PQ_YURT_REF default "yurt",
-#                              PQ_DOM_COUNT default 19)
+#                              census there against PQ_YURT_REF (required then;
+#                              a yurt commit SHA), PQ_DOM_COUNT default 19
 # PQ_ROOT overrides the repository root (tests use it).
 # Exit codes: 0 ok, 1 failed, 2 UPSTREAM not initialised or bad usage.
 set -euo pipefail
@@ -19,7 +19,8 @@ ZERO=0000000000000000000000000000000000000000
 
 run_fixtures() {
   local t failed=0
-  for t in test-fixture.sh test-apply.sh test-export.sh test-classify.sh test-check-queue.sh; do
+  for t in test-fixture.sh test-apply.sh test-export.sh test-classify.sh test-check-queue.sh \
+    test-verify-migration.sh test-build-engine.sh test-workflows.sh; do
     echo "== $t"
     if [ "$t" = test-check-queue.sh ]; then
       bash "$SELF/tests/$t" --fixtures || failed=1
@@ -32,6 +33,10 @@ run_fixtures() {
 
 run_queue() {
   local work tree
+  if [ -n "${PQ_YURT_REPO:-}" ] && [ -z "${PQ_YURT_REF:-}" ]; then
+    echo "check-queue: PQ_YURT_REF is required with PQ_YURT_REPO (the yurt commit to census)" >&2
+    return 2
+  fi
   if [ ! -f "$ROOT/UPSTREAM" ]; then
     echo "check-queue: UPSTREAM not initialised (no $ROOT/UPSTREAM)" >&2
     return 2
@@ -55,7 +60,7 @@ run_queue() {
   echo "check-queue: tree ok ($tree)"
 
   if [ -n "${PQ_YURT_REPO:-}" ]; then
-    PQ_DIFF_REPO=$PQ_YURT_REPO pq_leftover "$PQ_TAG" "${PQ_YURT_REF:-yurt}" "${PQ_DOM_COUNT:-19}" ||
+    PQ_DIFF_REPO=$PQ_YURT_REPO pq_leftover "$PQ_TAG" "$PQ_YURT_REF" "${PQ_DOM_COUNT:-19}" ||
       { echo "check-queue: census failed" >&2; return 1; }
     echo "check-queue: census ok"
   else
