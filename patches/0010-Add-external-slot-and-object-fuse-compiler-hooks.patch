@@ -1,0 +1,1391 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sunnymar <sunnym@gmail.com>
+Date: Sat, 17 Oct 2026 20:15:31 +0300
+Subject: [PATCH] Add external slot and object fuse compiler hooks
+
+Permuted property slots and object fuse notifications for the external
+tier, the shell testing functions that observe them, and their
+jit-tests.
+
+Source commits in YurtOS/firefox (yurt dff5cf534448):
+  95b9f31de072 test: cover external compiler permuted property slots
+    (all included paths except js/src/tests/lib)
+  a1d957648b20 test: require external tier object fuse notifications
+    (all included paths except js/src/tests/lib)
+  a2e0c4dc9fd0 feat: import external slot and object fuse compiler hooks
+    (all included paths except js/src/tests/lib)
+  ff2bc3770cef test: observe invalidation of a consumed prototype chain
+    (all included paths except js/src/tests/lib)
+  ec6c586a7e18 test: expose bounded external fuse observer in the shell
+    (all included paths except js/src/tests/lib)
+  1df0e02d6c95 test: reproduce lost permuted slots in compatible-object copying
+    (all included paths except js/src/tests/lib)
+  65e96085dce8 test: reproduce Object.assign bypass of external slot hooks
+    (all included paths except js/src/tests/lib)
+  2b415d0e5bc5 test: preserve enumerable flags in ordinary compatible copies
+    (all included paths except js/src/tests/lib)
+  a92a5b2dc24c fix: preserve permuted and enumerable flags when reusing property maps
+    (all included paths except js/src/tests/lib)
+  e57dacabd598 fix: honor external tier hooks during bulk property assignment
+    (all included paths except js/src/tests/lib)
+  f850071eda00 style: format external compiler testing fixtures
+    (all included paths except js/src/tests/lib)
+---
+ js/public/ExternalCompilerHooks.h             |  45 ++++
+ js/src/builtin/Object.cpp                     |  14 +-
+ js/src/builtin/TestingFunctions.cpp           | 238 ++++++++++++++++++
+ .../external-compiler/assign-slot-policy.js   |  20 ++
+ .../object-fuse-notifications.js              |  32 +++
+ .../tests/external-compiler/permuted-slots.js | 205 +++++++++++++++
+ js/src/jit/CacheIR.cpp                        |   5 +
+ js/src/jit/VMFunctions.cpp                    |   3 +
+ js/src/vm/ExternalCompilerHooks.cpp           |  36 +++
+ js/src/vm/JSContext.h                         |   5 +
+ js/src/vm/NativeObject.h                      |   9 +
+ js/src/vm/ObjectFlags-inl.h                   |   6 +
+ js/src/vm/ObjectFlags.h                       |  10 +
+ js/src/vm/ObjectFuse.cpp                      |  13 +
+ js/src/vm/ObjectFuse.h                        |   4 +
+ js/src/vm/PlainObject.cpp                     |   4 +-
+ js/src/vm/PropMap.cpp                         |  93 ++++++-
+ js/src/vm/PropMap.h                           |  30 ++-
+ js/src/vm/Shape.cpp                           | 125 ++++++++-
+ js/src/vm/Shape.h                             |  39 +++
+ 20 files changed, 924 insertions(+), 12 deletions(-)
+ create mode 100644 js/src/jit-test/tests/external-compiler/assign-slot-policy.js
+ create mode 100644 js/src/jit-test/tests/external-compiler/object-fuse-notifications.js
+ create mode 100644 js/src/jit-test/tests/external-compiler/permuted-slots.js
+
+diff --git a/js/public/ExternalCompilerHooks.h b/js/public/ExternalCompilerHooks.h
+index 741ff49a52f1..c349ab8ad5ed 100644
+--- a/js/public/ExternalCompilerHooks.h
++++ b/js/public/ExternalCompilerHooks.h
+@@ -37,6 +37,8 @@
+ namespace js {
+ class AbstractGeneratorObject;
+ class NativeObject;
++class ObjectFuse;
++class SharedShape;
+ class RegExpShared;
+ class RunState;
+ class VectorMatchPairs;
+@@ -87,6 +89,19 @@ struct ExternalCompilerHooks {
+   void (*propertyAdded)(JSContext* cx, js::NativeObject* obj,
+                         JS::PropertyKey id, uint32_t slot,
+                         uint32_t numFixedSlots);
++  // Slot placement. Before the engine adds a property to a shared-shape
++  // object whose word is nonzero, it asks here where to put it: set *result
++  // to a shape from js::ExternalShapeWithPropertyAtSlot, made from the
++  // object's current shape with this key and flags (the raw PropertyFlags
++  // byte), to place the property in that shape's slot, or leave it null to
++  // let the engine append the property at the slot span. Return false only
++  // with an exception pending. Engine-side caches keyed by (shape, key) are
++  // not filled with such shapes; the tier memoizes its own.
++  // Cached append stubs may instead report the actual slot via propertyAdded;
++  // the tier must drop a layout assumption incompatible with that slot.
++  bool (*shapeForAdd)(JSContext* cx, JS::Handle<js::NativeObject*> obj,
++                      JS::HandleId id, uint8_t flags,
++                      js::SharedShape** result);
+ 
+   // Global object. A property was defined or deleted on a global, a data
+   // property of a global was written, or a global lexical binding now
+@@ -96,6 +111,16 @@ struct ExternalCompilerHooks {
+                            uint64_t valueBits);
+   void (*globalLexicalShadowAdded)(JSContext* cx, uint64_t idBits);
+ 
++  // Object fuses (vm/ObjectFuse.h). Wherever the engine invalidates the Ion
++  // code depending on a constant property of an object fuse's object, it
++  // reports the fuse and the property's slot here, or UINT32_MAX for every
++  // property (a proto mutation or swap). A tier that marks properties
++  // constant (ObjectFuse::tryOptimizeConstantProperty) and relies on them
++  // drops what it assumed. Must not GC.
++  // The fuse is owned by its object; do not retain it beyond that lifetime.
++  void (*objectFuseInvalidated)(JSContext* cx, js::ObjectFuse* fuse,
++                                uint32_t propSlot);
++
+   // Script entry. Every script carries a pointer-sized external word, zero
+   // at birth; the engine consults these only for scripts whose word is
+   // nonzero.
+@@ -153,6 +178,26 @@ extern JS_PUBLIC_API void ExternalPropertyAdded(JSContext* cx,
+                                                 NativeObject* obj,
+                                                 JS::PropertyKey id,
+                                                 uint32_t slot);
++extern JS_PUBLIC_API bool ExternalShapeForAdd(JSContext* cx,
++                                              JS::Handle<NativeObject*> obj,
++                                              JS::HandleId id, uint8_t flags,
++                                              SharedShape** result);
++
++// Custom slot placement (SharedShape::getShapeWithPropertyAtSlot): the shape
++// that adds `id` with raw PropertyFlags `flags` to `shape` in slot `slot`, or
++// null in *result (no exception) if that placement is not possible. A slot
++// other than the span gives the shape ObjectFlag::PermutedSlots, which turns
++// off the engine's fast paths that assume slot order is insertion order.
++extern JS_PUBLIC_API bool ExternalShapeWithPropertyAtSlot(
++    JSContext* cx, JS::Handle<SharedShape*> shape, JS::HandleId id,
++    uint8_t flags, uint32_t slot, SharedShape** result);
++
++// Add the property `newShape` adds to `obj`, whose shape it was made from
++// (see NativeObject::addPropertyWithShape). The slot, holding undefined, is
++// returned in *slot for the caller to initialize.
++extern JS_PUBLIC_API bool ExternalAddPropertyWithShape(
++    JSContext* cx, JS::Handle<NativeObject*> obj, SharedShape* newShape,
++    uint32_t* slot);
+ 
+ }  // namespace js
+ 
+diff --git a/js/src/builtin/Object.cpp b/js/src/builtin/Object.cpp
+index d845de248ae8..cb025f56fb95 100644
+--- a/js/src/builtin/Object.cpp
++++ b/js/src/builtin/Object.cpp
+@@ -878,6 +878,12 @@ void PlainObjectAssignCache::assertValid() const {
+   if (fromPlain->getDenseInitializedLength() > 0 || fromPlain->isIndexed()) {
+     return true;
+   }
++
++  // The fast path copies slot i to slot i and assumes property i is in slot
++  // i, which permuted slots do not.
++  if (fromPlain->shape()->hasPermutedSlots()) {
++    return true;
++  }
+   MOZ_ASSERT(!fromPlain->getClass()->getNewEnumerate());
+   MOZ_ASSERT(!fromPlain->getClass()->getEnumerate());
+ 
+@@ -888,6 +894,12 @@ void PlainObjectAssignCache::assertValid() const {
+   }
+ 
+   Handle<PlainObject*> toPlain = to.as<PlainObject>();
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // Bulk shape reuse bypasses the tier's placement and addition callbacks.
++  if (toPlain->externalWord()) {
++    return true;
++  }
++#endif
+   if (!CanAddNewPropertyExcludingProtoFast(toPlain)) {
+     return true;
+   }
+@@ -1030,7 +1042,7 @@ void PlainObjectAssignCache::assertValid() const {
+   // more complicated slot layout (the slot numbers may not match the property
+   // definition order and the slots may contain holes).
+   if (toWasEmpty && hasOnlyEnumerableProps && !fromPlain->inDictionaryMode() &&
+-      !toPlain->inDictionaryMode()) {
++      !toPlain->inDictionaryMode() && !toPlain->shape()->hasPermutedSlots()) {
+     PlainObjectAssignCache& cache = cx->realm()->plainObjectAssignCache;
+     cache.fill(&origToShape->asShared(), fromPlain->sharedShape(),
+                toPlain->sharedShape());
+diff --git a/js/src/builtin/TestingFunctions.cpp b/js/src/builtin/TestingFunctions.cpp
+index eb04d37ce7ef..57fe47087e63 100644
+--- a/js/src/builtin/TestingFunctions.cpp
++++ b/js/src/builtin/TestingFunctions.cpp
+@@ -83,6 +83,7 @@
+ #include "js/experimental/JSStencil.h"  // JS::Stencil, JS::EncodeStencil, JS::DecodeStencil, JS::InstantiateGlobalStencil
+ #include "js/experimental/PCCountProfiling.h"  // JS::{Start,Stop}PCCountProfiling, JS::PurgePCCounts, JS::GetPCCountScript{Count,Summary,Contents}
+ #include "js/experimental/TypedData.h"         // JS_GetObjectAsUint8Array
++#include "js/ExternalCompilerHooks.h"
+ #include "js/friend/DumpFunctions.h"  // js::Dump{Backtrace,Heap,Object}, JS::FormatStackDump, js::IgnoreNurseryObjects
+ #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
+ #include "js/friend/WindowProxy.h"    // js::ToWindowProxyIfWindow
+@@ -154,6 +155,7 @@
+ #include "vm/JSObject-inl.h"
+ #include "vm/NativeObject-inl.h"
+ #include "vm/ObjectFlags-inl.h"
++#include "vm/PlainObject-inl.h"
+ #include "vm/StringType-inl.h"
+ #include "wasm/WasmInstance-inl.h"
+ 
+@@ -8545,6 +8547,215 @@ static bool NumAllocSitesPretenured(JSContext* cx, unsigned argc, Value* vp) {
+   return true;
+ }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++static bool WithExternalCompilerSlotPolicy(JSContext* cx, unsigned argc,
++                                           Value* vp) {
++  CallArgs args = CallArgsFromVp(argc, vp);
++  if (args.length() != 2 || !args[0].isObject() ||
++      !args[0].toObject().is<PlainObject>() || !args[1].isObject() ||
++      !JS::IsCallable(&args[1].toObject()) ||
++      JS::GetExternalCompilerHooks(cx->runtime()) ||
++      args[0].toObject().externalWord()) {
++    JS_ReportErrorASCII(
++        cx,
++        "expected (untagged plain object, callback) without an external tier");
++    return false;
++  }
++  Rooted<PlainObject*> obj(cx, &args[0].toObject().as<PlainObject>());
++  struct SlotPolicy {
++    uint32_t requested = 0;
++    uint32_t notified = 0;
++  } policy;
++  JS::ExternalCompilerHooks hooks{};
++  hooks.shapeForAdd = [](JSContext* cx, Handle<NativeObject*> obj, HandleId id,
++                         uint8_t flags, SharedShape** result) {
++    auto* state = static_cast<SlotPolicy*>(cx->getExternalCompilerState());
++    Rooted<SharedShape*> shape(cx, obj->sharedShape());
++    uint32_t slot = state->requested++ == 0 ? 3 : 0;
++    return ExternalShapeWithPropertyAtSlot(cx, shape, id, flags, slot, result);
++  };
++  hooks.propertyAdded = [](JSContext* cx, NativeObject*, PropertyKey, uint32_t,
++                           uint32_t) {
++    auto* state = static_cast<SlotPolicy*>(cx->getExternalCompilerState());
++    state->notified++;
++  };
++  JS::SetExternalCompilerHooks(cx->runtime(), &hooks);
++  cx->setExternalCompilerState(&policy);
++  obj->setExternalWord(1);
++  auto unregister = mozilla::MakeScopeExit([&] {
++    obj->setExternalWord(0);
++    JS::SetExternalCompilerHooks(cx->runtime(), nullptr);
++  });
++  RootedValue result(cx);
++  if (!JS::Call(cx, UndefinedHandleValue, args[1], HandleValueArray::empty(),
++                &result)) {
++    return false;
++  }
++  args.rval().setNumber(policy.notified);
++  return true;
++}
++
++static bool CopyCompatibleNativeObject(JSContext* cx, unsigned argc,
++                                       Value* vp) {
++  CallArgs args = CallArgsFromVp(argc, vp);
++  if (args.length() != 1 || !args[0].isObject() ||
++      !args[0].toObject().is<PlainObject>() ||
++      args[0].toObject().as<PlainObject>().inDictionaryMode()) {
++    JS_ReportErrorASCII(cx, "expected a plain object with a shared shape");
++    return false;
++  }
++  Rooted<PlainObject*> src(cx, &args[0].toObject().as<PlainObject>());
++  RootedObject proto(cx, nullptr);
++  Rooted<PlainObject*> dst(cx, NewPlainObjectWithProtoAndAllocKind(
++                                   cx, proto, src->allocKindForTenure()));
++  if (!dst ||
++      !JS_InitializePropertiesFromCompatibleNativeObject(cx, dst, src)) {
++    return false;
++  }
++  args.rval().setObject(*dst);
++  return true;
++}
++
++static bool ObserveExternalCompilerFuse(JSContext* cx, unsigned argc,
++                                        Value* vp) {
++  CallArgs args = CallArgsFromVp(argc, vp);
++  if (args.length() != 2 || !args[0].isObject() ||
++      !args[0].toObject().is<NativeObject>() || !args[1].isObject() ||
++      !JS::IsCallable(&args[1].toObject()) ||
++      JS::GetExternalCompilerHooks(cx->runtime())) {
++    JS_ReportErrorASCII(
++        cx, "expected (native object, callback) without an external tier");
++    return false;
++  }
++  Rooted<NativeObject*> obj(cx, &args[0].toObject().as<NativeObject>());
++  if (!NativeObject::setHasObjectFuse(cx, obj)) {
++    return false;
++  }
++  ObjectFuse* fuse = cx->zone()->objectFuses.getOrCreate(cx, obj);
++  if (!fuse) {
++    return false;
++  }
++  for (ShapePropertyIter<NoGC> iter(obj->shape()); !iter.done(); iter++) {
++    if (iter->hasSlot() && !fuse->tryOptimizeConstantProperty(*iter)) {
++      JS_ReportErrorASCII(cx, "unable to mark property constant");
++      return false;
++    }
++  }
++  struct Observations {
++    ObjectFuse* fuse;
++    uint32_t slots[16];
++    size_t length = 0;
++    bool overflow = false;
++  } observations{fuse};
++  JS::ExternalCompilerHooks hooks{};
++  hooks.objectFuseInvalidated = [](JSContext* cx, ObjectFuse* fuse,
++                                   uint32_t slot) {
++    auto* state = static_cast<Observations*>(cx->getExternalCompilerState());
++    if (fuse != state->fuse) {
++      return;
++    }
++    // This callback must not allocate or GC.
++    if (state->length == 16) {
++      state->overflow = true;
++    } else {
++      state->slots[state->length++] = slot;
++    }
++  };
++  JS::SetExternalCompilerHooks(cx->runtime(), &hooks);
++  cx->setExternalCompilerState(&observations);
++  auto unregister = mozilla::MakeScopeExit(
++      [&] { JS::SetExternalCompilerHooks(cx->runtime(), nullptr); });
++  RootedValue result(cx);
++  if (!JS::Call(cx, UndefinedHandleValue, args[1], HandleValueArray::empty(),
++                &result)) {
++    return false;
++  }
++  if (observations.overflow) {
++    JS_ReportErrorASCII(cx, "external fuse observation buffer overflow");
++    return false;
++  }
++  RootedObject array(cx, JS::NewArrayObject(cx, observations.length));
++  if (!array) {
++    return false;
++  }
++  for (size_t i = 0; i < observations.length; i++) {
++    RootedValue slot(cx, NumberValue(observations.slots[i]));
++    if (!JS_SetElement(cx, array, i, slot)) {
++      return false;
++    }
++  }
++  args.rval().setObject(*array);
++  return true;
++}
++
++// addPropertyAtSlot(obj, key, slot): add a writable, enumerable, configurable
++// data property `key` (value undefined) to plain object `obj` in slot `slot`
++// (SharedShape::getShapeWithPropertyAtSlot). Returns whether it was placed.
++static bool AddPropertyAtSlot(JSContext* cx, unsigned argc, Value* vp) {
++  CallArgs args = CallArgsFromVp(argc, vp);
++  if (args.length() != 3 || !args[0].isObject() ||
++      !args[0].toObject().is<PlainObject>() || !args[2].isInt32() ||
++      args[2].toInt32() < 0) {
++    JS_ReportErrorASCII(cx,
++                        "addPropertyAtSlot: expected (plain object, key, "
++                        "slot)");
++    return false;
++  }
++  Rooted<NativeObject*> obj(cx, &args[0].toObject().as<NativeObject>());
++  RootedId id(cx);
++  if (!ToPropertyKey(cx, args[1], &id)) {
++    return false;
++  }
++  if (id.isInt() || obj->inDictionaryMode() || !obj->isExtensible() ||
++      obj->containsPure(id)) {
++    args.rval().setBoolean(false);
++    return true;
++  }
++  Rooted<SharedShape*> shape(cx, obj->sharedShape());
++  SharedShape* newShape = nullptr;
++  if (!SharedShape::getShapeWithPropertyAtSlot(
++          cx, shape, id, PropertyFlags::defaultDataPropFlags,
++          uint32_t(args[2].toInt32()), &newShape)) {
++    return false;
++  }
++  if (!newShape) {
++    args.rval().setBoolean(false);
++    return true;
++  }
++  uint32_t slot;
++  if (!NativeObject::addPropertyWithShape(cx, obj, newShape, &slot)) {
++    return false;
++  }
++  args.rval().setBoolean(true);
++  return true;
++}
++
++// hasPermutedSlots(obj): whether obj's shape has ObjectFlag::PermutedSlots.
++static bool HasPermutedSlots(JSContext* cx, unsigned argc, Value* vp) {
++  CallArgs args = CallArgsFromVp(argc, vp);
++  if (args.length() != 1 || !args[0].isObject()) {
++    JS_ReportErrorASCII(cx, "hasPermutedSlots: expected an object");
++    return false;
++  }
++  args.rval().setBoolean(args[0].toObject().shape()->hasPermutedSlots());
++  return true;
++}
++
++// objectSlotSpan(obj): obj's slot span, or -1 for a non-native object.
++static bool ObjectSlotSpan(JSContext* cx, unsigned argc, Value* vp) {
++  CallArgs args = CallArgsFromVp(argc, vp);
++  if (args.length() != 1 || !args[0].isObject()) {
++    JS_ReportErrorASCII(cx, "objectSlotSpan: expected an object");
++    return false;
++  }
++  JSObject* obj = &args[0].toObject();
++  args.rval().setInt32(obj->is<NativeObject>()
++                           ? int32_t(obj->as<NativeObject>().slotSpan())
++                           : -1);
++  return true;
++}
++#endif
++
+ static bool GetLcovInfo(JSContext* cx, unsigned argc, Value* vp) {
+   CallArgs args = CallArgsFromVp(argc, vp);
+ 
+@@ -10986,6 +11197,33 @@ JS_FOR_WASM_FEATURES(WASM_FEATURE)
+ "  Return the number of allocation sites that were pretenured for the current\n"
+ "  global\n"),
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    JS_FN_HELP("withExternalCompilerSlotPolicy", WithExternalCompilerSlotPolicy, 2, 0,
++"withExternalCompilerSlotPolicy(object, callback)",
++"  Observe property additions, placing the first at slot 3 and the next at 0.\n"),
++
++    JS_FN_HELP("copyCompatibleNativeObject", CopyCompatibleNativeObject, 1, 0,
++"copyCompatibleNativeObject(object)",
++"  Copy shared-shape plain-object properties to an object with null prototype.\n"),
++
++    JS_FN_HELP("observeExternalCompilerFuse", ObserveExternalCompilerFuse, 2, 0,
++"observeExternalCompilerFuse(object, callback)",
++"  Mark properties constant and return slots invalidated while callback runs.\n"),
++
++    JS_FN_HELP("addPropertyAtSlot", AddPropertyAtSlot, 3, 0,
++"addPropertyAtSlot(obj, key, slot)",
++"  Add data property key (value undefined) to plain object obj in the given\n"
++"  slot, not at the slot span. Returns whether it was placed.\n"),
++
++    JS_FN_HELP("hasPermutedSlots", HasPermutedSlots, 1, 0,
++"hasPermutedSlots(obj)",
++"  Return whether obj's slots may not follow property insertion order.\n"),
++
++    JS_FN_HELP("objectSlotSpan", ObjectSlotSpan, 1, 0,
++"objectSlotSpan(obj)",
++"  Return obj's slot span (-1 for a non-native object).\n"),
++#endif
++
+     JS_FN_HELP("getLcovInfo", GetLcovInfo, 1, 0,
+ "getLcovInfo(global)",
+ "  Generate LCOV tracefile for the given compartment.  If no global are provided then\n"
+diff --git a/js/src/jit-test/tests/external-compiler/assign-slot-policy.js b/js/src/jit-test/tests/external-compiler/assign-slot-policy.js
+new file mode 100644
+index 000000000000..ea2b33a66fdb
+--- /dev/null
++++ b/js/src/jit-test/tests/external-compiler/assign-slot-policy.js
+@@ -0,0 +1,20 @@
++// |jit-test| skip-if: typeof withExternalCompilerSlotPolicy !== 'function'
++// Direct qualification requires the fixture; do not skip a missing hook.
++
++for (let warm of [false, true]) {
++  let source = {high: {value: 7}, low: 11};
++  if (warm) {
++    Object.assign({}, source);
++  }
++  let target = {};
++  let notified = withExternalCompilerSlotPolicy(target, function () {
++    Object.assign(target, source);
++  });
++  assertEq(notified, 2);
++  assertEq(hasPermutedSlots(target), true);
++  assertEq(objectSlotSpan(target), 4);
++  assertEq(Object.keys(target).join(','), 'high,low');
++  gc();
++  assertEq(target.high.value, 7);
++  assertEq(target.low, 11);
++}
+diff --git a/js/src/jit-test/tests/external-compiler/object-fuse-notifications.js b/js/src/jit-test/tests/external-compiler/object-fuse-notifications.js
+new file mode 100644
+index 000000000000..fb3c369990ee
+--- /dev/null
++++ b/js/src/jit-test/tests/external-compiler/object-fuse-notifications.js
+@@ -0,0 +1,32 @@
++// |jit-test| skip-if: typeof observeExternalCompilerFuse !== 'function'
++// Run directly in external-hook qualification so missing support is an error.
++
++let value = {method: function () { return 1; }};
++let slots = observeExternalCompilerFuse(value, function () {
++  value.method = function () { return 2; };
++});
++assertEq(slots.includes(0), true);
++assertEq(value.method(), 2);
++
++let proto = {method: function () { return 3; }};
++let child = Object.create(proto);
++slots = observeExternalCompilerFuse(proto, function () {
++  Object.setPrototypeOf(proto, {inherited: 4});
++});
++assertEq(slots.includes(4294967295), true);
++assertEq(proto.inherited, 4);
++assertEq(child.inherited, 4);
++
++let removed = {method: function () { return 5; }};
++slots = observeExternalCompilerFuse(removed, function () {
++  delete removed.method;
++});
++assertEq(slots.includes(0), true);
++assertEq('method' in removed, false);
++
++let stable = {method: function () { return 6; }};
++slots = observeExternalCompilerFuse(stable, function () {
++  gc();
++  assertEq(stable.method(), 6);
++});
++assertEq(slots.length, 0);
+diff --git a/js/src/jit-test/tests/external-compiler/permuted-slots.js b/js/src/jit-test/tests/external-compiler/permuted-slots.js
+new file mode 100644
+index 000000000000..8e6ef9c44131
+--- /dev/null
++++ b/js/src/jit-test/tests/external-compiler/permuted-slots.js
+@@ -0,0 +1,205 @@
++// |jit-test| skip-if: typeof addPropertyAtSlot !== 'function'
++// Imported from bytecodealliance/nightmonkey 8f5360d70707679a9080edf6a4dcd4f65d89aa71.
++// Qualification also runs this file directly so an absent hook fails.
++// The engine's custom-slot shapes (SharedShape::getShapeWithPropertyAtSlot,
++// via the shell's addPropertyAtSlot): a property placed in a slot of the
++// caller's choosing keeps the visible property order, the values, and the
++// engine's own paths (generic adds on top, delete, dictionary conversion,
++// attribute changes, Object.assign, JSON, GC) correct.
++
++function assertEq(a, b, msg) {
++  if (a !== b) {
++    throw new Error((msg || "") + ": got " + String(a) + ", expected " + String(b));
++  }
++}
++function keys(o) { return Object.keys(o).join(","); }
++
++// Two insertion orders, one slot assignment: x->0, y->1, z->2.
++function build(order) {
++  var o = {};
++  var slot = { x: 0, y: 1, z: 2 };
++  for (var k of order) {
++    assertEq(addPropertyAtSlot(o, k, slot[k]), true, "place " + k);
++    o[k] = k.toUpperCase();
++  }
++  return o;
++}
++var a = build(["x", "y", "z"]);
++var b = build(["x", "z", "y"]);
++assertEq(keys(a), "x,y,z");
++assertEq(keys(b), "x,z,y");
++assertEq(hasPermutedSlots(a), false, "in-order placement is sequential");
++assertEq(hasPermutedSlots(b), true);
++assertEq(objectSlotSpan(b), 3);
++assertEq(b.x + b.y + b.z, "XYZ");
++
++// Holes: z first at 2 leaves 0 and 1 as holes (undefined, no property).
++var h = {};
++assertEq(addPropertyAtSlot(h, "z", 2), true);
++assertEq(objectSlotSpan(h), 3);
++assertEq(keys(h), "z");
++assertEq("x" in h, false);
++assertEq(h.x, undefined);
++// A slot in use is refused; a hole is filled.
++assertEq(addPropertyAtSlot(h, "w", 2), false, "slot in use");
++assertEq(addPropertyAtSlot(h, "z", 1), false, "key present");
++assertEq(addPropertyAtSlot(h, "x", 0), true);
++assertEq(objectSlotSpan(h), 3);
++h.x = 10; h.z = 30;
++// Generic adds go on top of the span.
++h.g1 = 40;
++h.g2 = 50;
++assertEq(objectSlotSpan(h), 5);
++assertEq(keys(h), "z,x,g1,g2");
++assertEq(h.x + h.z + h.g1 + h.g2, 130);
++// The remaining hole can still be filled after generic adds.
++assertEq(addPropertyAtSlot(h, "y", 1), true);
++h.y = 20;
++assertEq(keys(h), "z,x,g1,g2,y");
++assertEq(h.x + h.y + h.z + h.g1 + h.g2, 150);
++
++// GC with holes present (minor and major), then values intact.
++var many = [];
++for (var i = 0; i < 200; i++) {
++  var o = {};
++  addPropertyAtSlot(o, "c", 5);
++  addPropertyAtSlot(o, "a", 1);
++  o.c = { v: i };
++  o.a = "s" + i;
++  o.tail = [i];
++  many.push(o);
++}
++minorgc();
++gc();
++for (var i = 0; i < 200; i++) {
++  var o = many[i];
++  assertEq(o.c.v, i);
++  assertEq(o.a, "s" + i);
++  assertEq(o.tail[0], i);
++  assertEq(keys(o), "c,a,tail");
++}
++
++// Delete: the last property (not the top slot) and a middle one.
++function holey() {
++  var o = {};
++  addPropertyAtSlot(o, "p", 3);
++  addPropertyAtSlot(o, "q", 0);
++  o.p = 1; o.q = 2;
++  o.r = 3;  // generic: slot 4
++  return o;
++}
++var d1 = holey();
++delete d1.r;
++assertEq(keys(d1), "p,q");
++d1.s = 4;
++assertEq(d1.p + d1.q + d1.s, 7);
++var d2 = holey();
++delete d2.q;
++assertEq(keys(d2), "p,r");
++d2.t = 5;
++assertEq(d2.p + d2.r + d2.t, 9);
++var d3 = holey();
++delete d3.p;
++delete d3.r;
++delete d3.q;
++assertEq(keys(d3), "");
++d3.u = 6;
++assertEq(d3.u, 6);
++
++// Dictionary conversion (many adds) keeps every value.
++var big = {};
++addPropertyAtSlot(big, "k7", 7);
++addPropertyAtSlot(big, "k2", 2);
++big.k7 = 7; big.k2 = 2;
++for (var i = 0; i < 400; i++) {
++  big["n" + i] = i;
++}
++assertEq(big.k7 + big.k2, 9);
++var sum = 0;
++for (var i = 0; i < 400; i++) {
++  sum += big["n" + i];
++}
++assertEq(sum, 399 * 400 / 2);
++
++// Attribute changes rebuild the map with each property's own slot.
++var c = holey();
++Object.defineProperty(c, "p", { enumerable: false });
++assertEq(keys(c), "q,r");
++assertEq(c.p + c.q + c.r, 6);
++Object.defineProperty(c, "q", { writable: false });
++c.q = 99;
++assertEq(c.q, 2);
++var f = holey();
++Object.freeze(f);
++assertEq(Object.isFrozen(f), true);
++assertEq(f.p + f.q + f.r, 6);
++
++// Object.assign, from and to permuted objects.
++var src = holey();
++var t1 = Object.assign({}, src);
++assertEq(keys(t1), "p,q,r");
++assertEq(t1.p * 100 + t1.q * 10 + t1.r, 123);
++for (var i = 0; i < 5; i++) {
++  var t2 = Object.assign({}, src);
++  assertEq(t2.p * 100 + t2.q * 10 + t2.r, 123);
++}
++var tgt = {};
++addPropertyAtSlot(tgt, "b", 1);
++tgt.b = "B";
++Object.assign(tgt, { a: "A", c: "C" });
++assertEq(keys(tgt), "b,a,c");
++assertEq(tgt.a + tgt.b + tgt.c, "ABC");
++var spread = { ...src };
++assertEq(spread.p * 100 + spread.q * 10 + spread.r, 123);
++
++// JSON round trip.
++var j = JSON.parse(JSON.stringify(src));
++assertEq(keys(j), "p,q,r");
++assertEq(JSON.stringify(j), JSON.stringify(src));
++assertEq(JSON.stringify(src), '{"p":1,"q":2,"r":3}');
++
++// Slots past the fixed slots, and large slot numbers: a first map entry
++// placed at 300 takes a normal map; a compact map refuses slots past its
++// small field.
++var dyn = {};
++assertEq(addPropertyAtSlot(dyn, "far", 40), true);
++dyn.far = "F";
++dyn.next = "N";
++assertEq(objectSlotSpan(dyn), 42);
++gc();
++assertEq(dyn.far + dyn.next, "FN");
++var n1 = {};
++assertEq(addPropertyAtSlot(n1, "a", 300), true);
++assertEq(addPropertyAtSlot(n1, "b", 301), true);
++n1.a = 1; n1.b = 2;
++assertEq(n1.a + n1.b, 3);
++var c1 = {};
++assertEq(addPropertyAtSlot(c1, "a", 0), true);
++assertEq(addPropertyAtSlot(c1, "b", 300), false, "compact map limit");
++c1.b = 2;
++assertEq(keys(c1), "a,b");
++
++// for-in and entries follow insertion order.
++var fi = [];
++for (var k in b) fi.push(k);
++assertEq(fi.join(","), "x,z,y");
++assertEq(Object.entries(b).map(e => e.join("=")).join(","), "x=X,z=Z,y=Y");
++
++// The compatible-native-object API reuses the map with a different prototype.
++// Its last property is below the highest slot, so losing PermutedSlots would
++// truncate the span and omit values during the copy.
++assertEq(keys(copyCompatibleNativeObject({ordinary: 5})), "ordinary");
++var compatibleSource = {};
++assertEq(addPropertyAtSlot(compatibleSource, "high", 3), true);
++assertEq(addPropertyAtSlot(compatibleSource, "low", 0), true);
++compatibleSource.high = {value: 7};
++compatibleSource.low = 11;
++var compatibleCopy = copyCompatibleNativeObject(compatibleSource);
++assertEq(Object.getPrototypeOf(compatibleCopy), null);
++assertEq(hasPermutedSlots(compatibleCopy), true);
++assertEq(objectSlotSpan(compatibleCopy), 4);
++assertEq(keys(compatibleCopy), "high,low");
++gc();
++assertEq(compatibleCopy.high.value, 7);
++compatibleCopy.extra = 13;
++assertEq(compatibleCopy.low + compatibleCopy.extra, 24);
+diff --git a/js/src/jit/CacheIR.cpp b/js/src/jit/CacheIR.cpp
+index 0b8127675399..70a50e6e95f8 100644
+--- a/js/src/jit/CacheIR.cpp
++++ b/js/src/jit/CacheIR.cpp
+@@ -5609,6 +5609,11 @@ AttachDecision SetPropIRGenerator::tryAttachAddSlotStub(
+     return AttachDecision::NoAction;
+   }
+ 
++  // Add stubs store only the new property's slot, which is the old span.
++  if (holder->shape()->hasPermutedSlots()) {
++    return AttachDecision::NoAction;
++  }
++
+   SharedShape* oldSharedShape = &oldShape->asShared();
+ 
+   // The property must be the last added property of the object.
+diff --git a/js/src/jit/VMFunctions.cpp b/js/src/jit/VMFunctions.cpp
+index 4e0563f9c3ff..a3e23d939c01 100644
+--- a/js/src/jit/VMFunctions.cpp
++++ b/js/src/jit/VMFunctions.cpp
+@@ -2345,7 +2345,10 @@ static bool TryAddOrSetPlainObjectProperty(JSContext* cx,
+   bool res = AddDataPropertyToPlainObject(cx, obj, keyRoot, value, &resultSlot);
+ 
+   if constexpr (UseCache) {
++    // A transition to permuted slots may skip slots (initialized by the add)
++    // that a cached replay would leave alone.
+     if (res && obj->shape()->isShared() &&
++        !obj->shape()->hasPermutedSlots() &&
+         resultSlot < SharedPropMap::MaxPropsForNonDictionary &&
+         !Watchtower::watchesPropertyAdd(obj)) {
+       TaggedSlotOffset offset = obj->getTaggedSlotOffset(resultSlot);
+diff --git a/js/src/vm/ExternalCompilerHooks.cpp b/js/src/vm/ExternalCompilerHooks.cpp
+index 6c79aa7df56c..c20ce8313fdb 100644
+--- a/js/src/vm/ExternalCompilerHooks.cpp
++++ b/js/src/vm/ExternalCompilerHooks.cpp
+@@ -10,6 +10,7 @@
+ #include "vm/JSObject.h"
+ #include "vm/NativeObject.h"
+ #include "vm/Runtime.h"
++#include "vm/Shape.h"
+ 
+ using namespace js;
+ 
+@@ -90,3 +91,38 @@ JS_PUBLIC_API void js::ExternalPropertyAdded(JSContext* cx, NativeObject* obj,
+     hooks->propertyAdded(cx, obj, id, slot, obj->numFixedSlots());
+   }
+ }
++
++JS_PUBLIC_API bool js::ExternalShapeForAdd(JSContext* cx,
++                                           JS::Handle<NativeObject*> obj,
++                                           JS::HandleId id, uint8_t flags,
++                                           SharedShape** result) {
++  *result = nullptr;
++  JS::ExternalCompilerHooks* hooks = cx->externalCompilerHooks();
++  if (!hooks || !hooks->shapeForAdd) {
++    return true;
++  }
++  if (!hooks->shapeForAdd(cx, obj, id, flags, result)) {
++    return false;
++  }
++  if (SharedShape* shape = *result) {
++    // Cheap validation of the tier's answer; addPropertyWithShape checks
++    // that the shape extends the object's by one property.
++    PropertyInfoWithKey prop = shape->lastProperty();
++    MOZ_RELEASE_ASSERT(prop.key() == id.get());
++    MOZ_RELEASE_ASSERT(prop.flags().toRaw() == flags);
++  }
++  return true;
++}
++
++JS_PUBLIC_API bool js::ExternalShapeWithPropertyAtSlot(
++    JSContext* cx, JS::Handle<SharedShape*> shape, JS::HandleId id,
++    uint8_t flags, uint32_t slot, SharedShape** result) {
++  return SharedShape::getShapeWithPropertyAtSlot(
++      cx, shape, id, PropertyFlags::fromRaw(flags), slot, result);
++}
++
++JS_PUBLIC_API bool js::ExternalAddPropertyWithShape(
++    JSContext* cx, JS::Handle<NativeObject*> obj, SharedShape* newShape,
++    uint32_t* slot) {
++  return NativeObject::addPropertyWithShape(cx, obj, newShape, slot);
++}
+diff --git a/js/src/vm/JSContext.h b/js/src/vm/JSContext.h
+index 7b1aad337156..d9207b97bcd5 100644
+--- a/js/src/vm/JSContext.h
++++ b/js/src/vm/JSContext.h
+@@ -482,6 +482,11 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
+     return externalCompilerHooks_;
+   }
+   void* getExternalCompilerState() const { return externalCompilerState_; }
++  // For a tier's compiled code, which reaches its per-context state from
++  // the context it is passed.
++  static constexpr size_t offsetOfExternalCompilerState() {
++    return offsetof(JSContext, externalCompilerState_);
++  }
+   void setExternalCompilerState(void* state) {
+     externalCompilerState_ = state;
+   }
+diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
+index 12dbdc35eb22..1b6b92165729 100644
+--- a/js/src/vm/NativeObject.h
++++ b/js/src/vm/NativeObject.h
+@@ -1058,6 +1058,15 @@ class NativeObject : public JSObject {
+     return addProperty(cx, obj, id, flags, slotOut);
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // Add the property that `newShape` (from
++  // SharedShape::getShapeWithPropertyAtSlot on the object's shape) adds, in
++  // that shape's slot, which is returned in *slot holding undefined. Slots
++  // the new span skips are initialized to undefined.
++  static bool addPropertyWithShape(JSContext* cx, Handle<NativeObject*> obj,
++                                   SharedShape* newShape, uint32_t* slot);
++#endif
++
+   static bool addPropertyInReservedSlot(JSContext* cx,
+                                         Handle<NativeObject*> obj, HandleId id,
+                                         uint32_t slot, PropertyFlags flags);
+diff --git a/js/src/vm/ObjectFlags-inl.h b/js/src/vm/ObjectFlags-inl.h
+index e2b468bdb865..abe01f89c1c8 100644
+--- a/js/src/vm/ObjectFlags-inl.h
++++ b/js/src/vm/ObjectFlags-inl.h
+@@ -77,6 +77,12 @@ inline ObjectFlags CopyPropMapObjectFlags(ObjectFlags dest,
+   if (source.hasFlag(ObjectFlag::NeedsProxyGetSetResultValidation)) {
+     dest.setFlag(ObjectFlag::NeedsProxyGetSetResultValidation);
+   }
++  if (source.hasFlag(ObjectFlag::PermutedSlots)) {
++    dest.setFlag(ObjectFlag::PermutedSlots);
++  }
++  if (source.hasFlag(ObjectFlag::HasEnumerable)) {
++    dest.setFlag(ObjectFlag::HasEnumerable);
++  }
+   return dest;
+ }
+ 
+diff --git a/js/src/vm/ObjectFlags.h b/js/src/vm/ObjectFlags.h
+index 9c8951b3557f..ace560518632 100644
+--- a/js/src/vm/ObjectFlags.h
++++ b/js/src/vm/ObjectFlags.h
+@@ -101,6 +101,16 @@ enum class ObjectFlag : uint32_t {
+   // If set, the object may have an accessor property where the getter or setter
+   // is a non-JSFunction callable object.
+   HasNonFunctionAccessor = 1 << 17,
++
++  // If set, the shape's slot numbers may not follow property insertion order:
++  // a property was placed in a slot of the embedder's choosing (see
++  // SharedShape::getShapeWithPropertyAtSlot), so the slot span is the highest
++  // slot plus one, not the last property's slot plus one, and slots below the
++  // span may be holes (undefined, owned by no property). Inherited by every
++  // shape derived from one that has it. Code that assumes slot i holds the
++  // i-th property, or that the last property holds the top slot, must check
++  // it. Only set with JS_EXTERNAL_COMPILER_HOOKS.
++  PermutedSlots = 1 << 18,
+ };
+ 
+ using ObjectFlags = EnumFlags<ObjectFlag>;
+diff --git a/js/src/vm/ObjectFuse.cpp b/js/src/vm/ObjectFuse.cpp
+index 1d235675a0fb..38c0e7be6f76 100644
+--- a/js/src/vm/ObjectFuse.cpp
++++ b/js/src/vm/ObjectFuse.cpp
+@@ -9,7 +9,9 @@
+ #include "gc/Barrier.h"
+ #include "gc/StableCellHasher.h"
+ #include "jit/InvalidationScriptSet.h"
++#include "js/ExternalCompilerHooks.h"
+ #include "js/SweepingAPI.h"
++#include "vm/JSContext.h"
+ #include "vm/JSScript.h"
+ #include "vm/NativeObject.h"
+ #include "vm/PropertyInfo.h"
+@@ -50,6 +52,15 @@ bool ObjectFuse::ensurePropertyStateLength(uint32_t length) {
+   return true;
+ }
+ 
++void ObjectFuse::notifyExternalTier(JSContext* cx, uint32_t propSlot) {
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (JS::ExternalCompilerHooks* hooks = cx->externalCompilerHooks();
++      hooks && hooks->objectFuseInvalidated) {
++    hooks->objectFuseInvalidated(cx, this, propSlot);
++  }
++#endif
++}
++
+ bool ObjectFuse::addDependency(uint32_t propSlot,
+                                const jit::IonScriptKey& ionScript) {
+   MOZ_ASSERT(getPropertyState(propSlot) == PropertyState::Constant);
+@@ -66,6 +77,7 @@ bool ObjectFuse::addDependency(uint32_t propSlot,
+ void ObjectFuse::invalidateDependentIonScriptsForProperty(JSContext* cx,
+                                                           PropertyInfo prop,
+                                                           const char* reason) {
++  notifyExternalTier(cx, prop.slot());
+   if (auto p = dependencies_.lookup(prop.slot())) {
+     p->value().invalidateAndClear(cx, reason);
+     dependencies_.remove(p);
+@@ -74,6 +86,7 @@ void ObjectFuse::invalidateDependentIonScriptsForProperty(JSContext* cx,
+ 
+ void ObjectFuse::invalidateAllDependentIonScripts(JSContext* cx,
+                                                   const char* reason) {
++  notifyExternalTier(cx, UINT32_MAX);
+   for (auto r = dependencies_.all(); !r.empty(); r.popFront()) {
+     r.front().value().invalidateAndClear(cx, reason);
+   }
+diff --git a/js/src/vm/ObjectFuse.h b/js/src/vm/ObjectFuse.h
+index 40d84d63e49d..c09e91476b41 100644
+--- a/js/src/vm/ObjectFuse.h
++++ b/js/src/vm/ObjectFuse.h
+@@ -131,6 +131,10 @@ class ObjectFuse {
+                                                 PropertyInfo prop,
+                                                 const char* reason);
+   void invalidateAllDependentIonScripts(JSContext* cx, const char* reason);
++  // Tell an external tier (JS::ExternalCompilerHooks::objectFuseInvalidated)
++  // what Ion's dependencies are told: the property in |propSlot|, or every
++  // property (UINT32_MAX), may no longer be assumed constant.
++  void notifyExternalTier(JSContext* cx, uint32_t propSlot);
+ 
+   static constexpr uint32_t propertyStateShift(uint32_t propSlot) {
+     return (propSlot % NumPropsPerWord) * NumBitsPerProp;
+diff --git a/js/src/vm/PlainObject.cpp b/js/src/vm/PlainObject.cpp
+index a4d0e7a19bf5..f6766b4670ed 100644
+--- a/js/src/vm/PlainObject.cpp
++++ b/js/src/vm/PlainObject.cpp
+@@ -309,7 +309,9 @@ static PlainObject* NewPlainObjectWithProperties(
+     }
+   }
+ 
+-  if (canCache && !obj->inDictionaryMode()) {
++  // The cache's users store property i in slot i.
++  if (canCache && !obj->inDictionaryMode() &&
++      !obj->shape()->hasPermutedSlots()) {
+     MOZ_ASSERT(obj->getDenseInitializedLength() == 0);
+     MOZ_ASSERT(obj->slotSpan() == properties.length());
+     cache.add(obj->sharedShape());
+diff --git a/js/src/vm/PropMap.cpp b/js/src/vm/PropMap.cpp
+index dacb66fbcd00..9a1ab2b36608 100644
+--- a/js/src/vm/PropMap.cpp
++++ b/js/src/vm/PropMap.cpp
+@@ -239,15 +239,62 @@ bool SharedPropMap::addChild(JSContext* cx, SharedPropMapAndIndex child,
+   return true;
+ }
+ 
++// static
++uint32_t SharedPropMap::permutedSlotSpan(const JSClass* clasp,
++                                         const SharedPropMap* map,
++                                         uint32_t mapLength) {
++  MOZ_ASSERT(clasp->isNativeObject());
++  uint32_t span = JSCLASS_RESERVED_SLOTS(clasp);
++  const SharedPropMap* cur = map;
++  uint32_t len = mapLength;
++  while (cur) {
++    for (uint32_t i = 0; i < len; i++) {
++      PropertyInfo prop = cur->getPropertyInfo(i);
++      if (prop.hasSlot()) {
++        span = std::max(span, prop.slot() + 1);
++      }
++    }
++    if (!cur->hasPrevious()) {
++      break;
++    }
++    cur = cur->asNormal()->previous();
++    len = PropMap::Capacity;
++  }
++  return span;
++}
++
++// static
++bool SharedPropMap::slotIsUnused(const SharedPropMap* map, uint32_t mapLength,
++                                 uint32_t slot) {
++  const SharedPropMap* cur = map;
++  uint32_t len = mapLength;
++  while (cur) {
++    for (uint32_t i = 0; i < len; i++) {
++      PropertyInfo prop = cur->getPropertyInfo(i);
++      if (prop.hasSlot() && prop.slot() == slot) {
++        return false;
++      }
++    }
++    if (!cur->hasPrevious()) {
++      break;
++    }
++    cur = cur->asNormal()->previous();
++    len = PropMap::Capacity;
++  }
++  return true;
++}
++
+ // static
+ bool SharedPropMap::addProperty(JSContext* cx, const JSClass* clasp,
+                                 MutableHandle<SharedPropMap*> map,
+                                 uint32_t* mapLength, HandleId id,
+-                                PropertyFlags flags, ObjectFlags* objectFlags,
+-                                uint32_t* slot) {
++                                PropertyFlags flags, uint32_t slotSpan,
++                                ObjectFlags* objectFlags, uint32_t* slot) {
+   MOZ_ASSERT(!flags.isCustomDataProperty());
++  MOZ_ASSERT_IF(!objectFlags->hasFlag(ObjectFlag::PermutedSlots),
++                slotSpan == SharedPropMap::slotSpan(clasp, map, *mapLength));
+ 
+-  *slot = SharedPropMap::slotSpan(clasp, map, *mapLength);
++  *slot = slotSpan;
+ 
+   if (MOZ_UNLIKELY(*slot > SHAPE_MAXIMUM_SLOT)) {
+     ReportAllocationOverflow(cx);
+@@ -261,6 +308,40 @@ bool SharedPropMap::addProperty(JSContext* cx, const JSClass* clasp,
+   return addPropertyInternal(cx, map, mapLength, id, prop);
+ }
+ 
++// static
++bool SharedPropMap::addPropertyAtSlot(JSContext* cx, const JSClass* clasp,
++                                      MutableHandle<SharedPropMap*> map,
++                                      uint32_t* mapLength, HandleId id,
++                                      PropertyFlags flags, uint32_t slot,
++                                      uint32_t slotSpan,
++                                      ObjectFlags* objectFlags) {
++  MOZ_ASSERT(!flags.isCustomDataProperty());
++  MOZ_ASSERT(slot >= JSCLASS_RESERVED_SLOTS(clasp));
++  MOZ_ASSERT(slot <= SHAPE_MAXIMUM_SLOT);
++  MOZ_ASSERT_IF(slot < slotSpan, slotIsUnused(map, *mapLength, slot));
++
++  // A new entry in a CompactPropMap (the first map of the chain, or its clone)
++  // must fit its small slot field; SharedPropMap::create uses one for a first
++  // property at or below this bound. Generic adds after it take the span, so
++  // with at most Capacity entries no slot there exceeds MaxSlotNumber.
++  static constexpr uint32_t MaxCompactSlot =
++      CompactPropertyInfo::MaxSlotNumber - (PropMap::Capacity - 1);
++  if (map && map->isCompact() && *mapLength < PropMap::Capacity &&
++      slot > MaxCompactSlot) {
++    map.set(nullptr);
++    return true;
++  }
++
++  *objectFlags =
++      GetObjectFlagsForNewProperty(clasp, *objectFlags, id, flags, cx);
++  if (slot != slotSpan) {
++    objectFlags->setFlag(ObjectFlag::PermutedSlots);
++  }
++
++  PropertyInfo prop = PropertyInfo(flags, slot);
++  return addPropertyInternal(cx, map, mapLength, id, prop);
++}
++
+ // static
+ bool SharedPropMap::addPropertyInReservedSlot(
+     JSContext* cx, const JSClass* clasp, MutableHandle<SharedPropMap*> map,
+@@ -292,7 +373,8 @@ bool SharedPropMap::addPropertyWithKnownSlot(JSContext* cx,
+                                      objectFlags);
+   }
+ 
+-  MOZ_ASSERT(slot == SharedPropMap::slotSpan(clasp, map, *mapLength));
++  MOZ_ASSERT_IF(!objectFlags->hasFlag(ObjectFlag::PermutedSlots),
++                slot == SharedPropMap::slotSpan(clasp, map, *mapLength));
+   MOZ_RELEASE_ASSERT(slot <= SHAPE_MAXIMUM_SLOT);
+ 
+   *objectFlags =
+@@ -1316,7 +1398,8 @@ void PropMap::checkConsistency(NativeObject* obj) const {
+       if (prop.hasSlot()) {
+         MOZ_ASSERT_IF((curMap != this || index < mapLength),
+                       prop.slot() < obj->slotSpan());
+-        MOZ_ASSERT_IF(nextSlot.isSome(), *nextSlot >= prop.slot());
++        MOZ_ASSERT_IF(nextSlot.isSome() && !obj->shape()->hasPermutedSlots(),
++                      *nextSlot >= prop.slot());
+         nextSlot = mozilla::Some(prop.slot());
+       }
+ 
+diff --git a/js/src/vm/PropMap.h b/js/src/vm/PropMap.h
+index 0dcf416f32cc..689315f9f675 100644
+--- a/js/src/vm/PropMap.h
++++ b/js/src/vm/PropMap.h
+@@ -690,6 +690,18 @@ class SharedPropMap : public PropMap {
+     return std::max(lastSlot + 1, numReserved);
+   }
+ 
++  // The slot span of a map whose slots may not follow insertion order
++  // (ObjectFlag::PermutedSlots): the highest slot plus one. Linear in the
++  // number of properties.
++  static uint32_t permutedSlotSpan(const JSClass* clasp,
++                                   const SharedPropMap* map,
++                                   uint32_t mapLength);
++
++  // Whether no property of map/mapLength has slot `slot`. Linear in the number
++  // of properties.
++  static bool slotIsUnused(const SharedPropMap* map, uint32_t mapLength,
++                           uint32_t slot);
++
+   static uint32_t indexOfNextProperty(uint32_t index) {
+     MOZ_ASSERT(index < PropMap::Capacity);
+     return (index + 1) % PropMap::Capacity;
+@@ -697,10 +709,26 @@ class SharedPropMap : public PropMap {
+ 
+   // Add a new property to this map. Returns the new map/mapLength, slot number,
+   // and object flags.
++  //
++  // The new property takes slot `slotSpan`, the span of the shape being
++  // extended (the map's last slot plus one, unless the shape has
++  // ObjectFlag::PermutedSlots).
+   static bool addProperty(JSContext* cx, const JSClass* clasp,
+                           MutableHandle<SharedPropMap*> map,
+                           uint32_t* mapLength, HandleId id, PropertyFlags flags,
+-                          ObjectFlags* objectFlags, uint32_t* slot);
++                          uint32_t slotSpan, ObjectFlags* objectFlags,
++                          uint32_t* slot);
++
++  // Like addProperty, but in a slot of the caller's choosing, which no
++  // property of the map may use. A slot other than the span sets
++  // ObjectFlag::PermutedSlots. Returns true with a null map, and no exception
++  // pending, if the map cannot hold the slot (a CompactPropMap holds small
++  // slot numbers only).
++  static bool addPropertyAtSlot(JSContext* cx, const JSClass* clasp,
++                                MutableHandle<SharedPropMap*> map,
++                                uint32_t* mapLength, HandleId id,
++                                PropertyFlags flags, uint32_t slot,
++                                uint32_t slotSpan, ObjectFlags* objectFlags);
+ 
+   // Like addProperty, but for when the slot number is a reserved slot. A few
+   // builtin objects use this for initial properties.
+diff --git a/js/src/vm/Shape.cpp b/js/src/vm/Shape.cpp
+index 4512f7509e62..9e19b273a99c 100644
+--- a/js/src/vm/Shape.cpp
++++ b/js/src/vm/Shape.cpp
+@@ -344,6 +344,19 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
+     return false;
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // The external tier may place the property in a slot of its choosing.
++  if (obj->externalWord() && !obj->inDictionaryMode()) {
++    SharedShape* chosen = nullptr;
++    if (!ExternalShapeForAdd(cx, obj, id, flags.toRaw(), &chosen)) {
++      return false;
++    }
++    if (chosen) {
++      return addPropertyWithShape(cx, obj, chosen, slot);
++    }
++  }
++#endif
++
+   if (auto* shape = LookupShapeForAdd(obj->shape(), id, flags, slot)) {
+     if (!obj->setShapeAndAddNewSlot(cx, shape, *slot)) {
+       return false;
+@@ -387,7 +400,8 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
+   uint32_t mapLength = obj->shape()->propMapLength();
+ 
+   if (!SharedPropMap::addProperty(cx, clasp, &map, &mapLength, id, flags,
+-                                  &objectFlags, slot)) {
++                                  obj->sharedShape()->slotSpan(), &objectFlags,
++                                  slot)) {
+     return false;
+   }
+ 
+@@ -441,6 +455,98 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
+   return true;
+ }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++/* static */
++bool SharedShape::getShapeWithPropertyAtSlot(JSContext* cx,
++                                             Handle<SharedShape*> shape,
++                                             HandleId id, PropertyFlags flags,
++                                             uint32_t slot,
++                                             SharedShape** result) {
++  *result = nullptr;
++
++  const JSClass* clasp = shape->getObjectClass();
++  MOZ_ASSERT(!flags.isCustomDataProperty());
++  if (slot < JSCLASS_RESERVED_SLOTS(clasp) || slot > SHAPE_MAXIMUM_SLOT ||
++      flags.isCustomDataProperty()) {
++    return true;
++  }
++
++  uint32_t index;
++  if (shape->lookupPure(id, &index)) {
++    return true;
++  }
++
++  Rooted<SharedPropMap*> map(cx, shape->propMap());
++  uint32_t mapLength = shape->propMapLength();
++  uint32_t span = shape->slotSpan();
++  if (slot < span && !SharedPropMap::slotIsUnused(map, mapLength, slot)) {
++    return true;
++  }
++
++  ObjectFlags objectFlags = shape->objectFlags();
++  if (!SharedPropMap::addPropertyAtSlot(cx, clasp, &map, &mapLength, id, flags,
++                                        slot, span, &objectFlags)) {
++    return false;
++  }
++  if (!map) {
++    return true;
++  }
++
++  Rooted<BaseShape*> base(cx, shape->base());
++  SharedShape* newShape = SharedShape::getPropMapShape(
++      cx, base, shape->numFixedSlots(), map, mapLength, objectFlags);
++  if (!newShape) {
++    return false;
++  }
++  MOZ_ASSERT(newShape->slotSpan() == std::max(span, slot + 1));
++  *result = newShape;
++  return true;
++}
++
++/* static */
++bool NativeObject::addPropertyWithShape(JSContext* cx,
++                                        Handle<NativeObject*> obj,
++                                        SharedShape* newShape, uint32_t* slot) {
++  MOZ_ASSERT(!obj->inDictionaryMode());
++
++  // The shape must add exactly one property to the object's shape; the
++  // external tier made it with getShapeWithPropertyAtSlot from that shape.
++  SharedShape* oldShape = obj->sharedShape();
++  MOZ_RELEASE_ASSERT(newShape->base() == oldShape->base());
++  MOZ_RELEASE_ASSERT(newShape->numFixedSlots() == oldShape->numFixedSlots());
++  MOZ_RELEASE_ASSERT(newShape->propMapLength() ==
++                     (oldShape->propMapLength() == PropMap::Capacity
++                          ? 1
++                          : oldShape->propMapLength() + 1));
++  PropertyInfoWithKey prop = newShape->lastProperty();
++  MOZ_RELEASE_ASSERT(prop.hasSlot());
++#ifdef DEBUG
++  uint32_t index;
++  MOZ_ASSERT(!oldShape->lookupPure(prop.key(), &index));
++#endif
++
++  uint32_t oldSpan = oldShape->slotSpan();
++  uint32_t newSpan = newShape->slotSpan();
++  *slot = prop.slot();
++  if (newSpan > oldSpan) {
++    // Skipped slots below the new property's become holes: undefined, as
++    // the GC traces the whole span.
++    if (!obj->setShapeAndAddNewSlots(cx, newShape, oldSpan, newSpan)) {
++      return false;
++    }
++  } else {
++    // A hole below the span: already allocated and holding undefined.
++    MOZ_RELEASE_ASSERT(newSpan == oldSpan && *slot < oldSpan);
++    obj->setShape(newShape);
++  }
++
++  if (obj->externalWord()) {
++    ExternalPropertyAdded(cx, obj, prop.key(), *slot);
++  }
++  return true;
++}
++#endif
++
+ void Shape::maybeCacheIterator(JSContext* cx, PropertyIteratorObject* iter) {
+   if (!cache().isNone() && !cache().isIterator()) {
+     // If we're already caching other shape data, skip caching the iterator.
+@@ -599,7 +705,12 @@ bool NativeObject::changeProperty(JSContext* cx, Handle<NativeObject*> obj,
+ 
+   bool isLast = propMap == map && propIndex == mapLength - 1;
+   bool nonLastCustomProperty = oldProp.isCustomDataProperty() && !isLast;
+-  if (map->isShared() && !nonLastCustomProperty && hasReasonableGap) {
++  // A custom data property getting a slot would take the span of the map
++  // before it, which with permuted slots may be in use.
++  bool permutedCustomProperty =
++      oldProp.isCustomDataProperty() && obj->shape()->hasPermutedSlots();
++  if (map->isShared() && !nonLastCustomProperty && !permutedCustomProperty &&
++      hasReasonableGap) {
+     // To change a property, we get the previous propmap and then call
+     // addProperty to re-add the changed property with the new flags. If it
+     // is not the last property, we have to re-add all the following
+@@ -620,8 +731,11 @@ bool NativeObject::changeProperty(JSContext* cx, Handle<NativeObject*> obj,
+         return false;
+       }
+     } else {
++      uint32_t span =
++          SharedPropMap::slotSpan(clasp, resultMap, resultMapLength);
+       if (!SharedPropMap::addProperty(cx, clasp, &resultMap, &resultMapLength,
+-                                      id, flags, &objectFlags, slotOut)) {
++                                      id, flags, span, &objectFlags,
++                                      slotOut)) {
+         return false;
+       }
+     }
+@@ -921,8 +1035,11 @@ bool NativeObject::removeProperty(JSContext* cx, Handle<NativeObject*> obj,
+     // 4) We add a new property P, reuse Shape S1, and mark P Constant.
+     // 5) We use the SetSlot IC stub again but this is invalid because P is
+     //    still marked Constant.
++    //
++    // With permuted slots the last property need not hold the top slot; such
++    // objects take the dictionary path below.
+     if (propMap == map && propIndex == mapLength - 1 &&
+-        !wasTrackedObjectFuseProp) {
++        !wasTrackedObjectFuseProp && !obj->shape()->hasPermutedSlots()) {
+       MOZ_ASSERT(obj->getLastProperty().key() == id);
+ 
+       Rooted<SharedPropMap*> sharedMap(cx, map->asShared());
+diff --git a/js/src/vm/Shape.h b/js/src/vm/Shape.h
+index 4ddbea5da1d0..9a6730dfcec4 100644
+--- a/js/src/vm/Shape.h
++++ b/js/src/vm/Shape.h
+@@ -358,6 +358,10 @@ class Shape : public gc::CellWithTenuredGCPointer<gc::TenuredCell, BaseShape> {
+     SMALL_SLOTSPAN_MAX = 0x3ff,  // 10 bits.
+     SMALL_SLOTSPAN_SHIFT = 11,
+     SMALL_SLOTSPAN_MASK = uint32_t(SMALL_SLOTSPAN_MAX << SMALL_SLOTSPAN_SHIFT),
++
++    // For NativeShape: mirrors ObjectFlag::PermutedSlots, so that code reading
++    // the slot span from this word can test both at once.
++    PERMUTED_SLOTS_BIT = 1 << 21,
+   };
+ 
+   uint32_t immutableFlags;   // Immutable flags, see above.
+@@ -401,6 +405,15 @@ class Shape : public gc::CellWithTenuredGCPointer<gc::TenuredCell, BaseShape> {
+     return objectFlags_.hasFlag(flag);
+   }
+ 
++  // See ObjectFlag::PermutedSlots.
++  bool hasPermutedSlots() const {
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    return objectFlags_.hasFlag(ObjectFlag::PermutedSlots);
++#else
++    return false;
++#endif
++  }
++
+  protected:
+   Shape(Kind kind, BaseShape* base, ObjectFlags objectFlags)
+       : CellWithTenuredGCPointer(base),
+@@ -495,6 +508,9 @@ class NativeShape : public Shape {
+     MOZ_ASSERT(base->clasp()->isNativeObject());
+     MOZ_ASSERT(mapLength <= PropMap::Capacity);
+     immutableFlags |= (nfixed << FIXED_SLOTS_SHIFT) | mapLength;
++    if (hasPermutedSlots()) {
++      immutableFlags |= PERMUTED_SLOTS_BIT;
++    }
+   }
+ 
+  public:
+@@ -520,6 +536,11 @@ class NativeShape : public Shape {
+   // For JIT usage.
+   static constexpr uint32_t fixedSlotsMask() { return FIXED_SLOTS_MASK; }
+   static constexpr uint32_t fixedSlotsShift() { return FIXED_SLOTS_SHIFT; }
++  static constexpr uint32_t smallSlotSpanMask() { return SMALL_SLOTSPAN_MASK; }
++  static constexpr uint32_t smallSlotSpanShift() {
++    return SMALL_SLOTSPAN_SHIFT;
++  }
++  static constexpr uint32_t permutedSlotsBit() { return PERMUTED_SLOTS_BIT; }
+ };
+ 
+ // Shared shape for a NativeObject.
+@@ -572,6 +593,9 @@ class SharedShape : public NativeShape {
+   uint32_t slotSpanSlow() const {
+     MOZ_ASSERT(isShared());
+     const JSClass* clasp = getObjectClass();
++    if (MOZ_UNLIKELY(hasPermutedSlots())) {
++      return SharedPropMap::permutedSlotSpan(clasp, propMap(), propMapLength());
++    }
+     return SharedPropMap::slotSpan(clasp, propMap(), propMapLength());
+   }
+   uint32_t slotSpan() const {
+@@ -585,6 +609,21 @@ class SharedShape : public NativeShape {
+     return slotSpanSlow();
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // The shape that adds property `id` with `flags` to `shape` in slot `slot`
++  // instead of at the slot span: for an external tier that manages object
++  // layouts itself. `slot` must not be a reserved slot or in use in `shape`;
++  // slots between the span and `slot` become holes. A slot other than the
++  // span sets ObjectFlag::PermutedSlots on the result. Returns true with a
++  // null *result, and no exception, when the placement is not possible (the
++  // slot is in use, `id` is already present, or the property map cannot hold
++  // the slot number).
++  static bool getShapeWithPropertyAtSlot(JSContext* cx,
++                                         Handle<SharedShape*> shape,
++                                         HandleId id, PropertyFlags flags,
++                                         uint32_t slot, SharedShape** result);
++#endif
++
+   /*
+    * Lookup an initial shape matching the given parameters, creating an empty
+    * shape if none was found.

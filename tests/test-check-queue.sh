@@ -142,6 +142,16 @@ passes_census_when_clean() {
   case $OUT in *"census ok"*) ;; *) echo "no census ok: $OUT"; return 1 ;; esac
 }
 
+# The census needs an explicit yurt ref; a default branch name can be stale.
+census_requires_yurt_ref() {
+  new_root
+  write_upstream "$(queue_tree)"
+  export PQ_YURT_REPO=$URL PQ_DOM_COUNT=0
+  run_check
+  assert_eq 2 "$RC" "$OUT"
+  case $OUT in *"PQ_YURT_REF is required"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
+}
+
 # The verdict does not depend on the caller's git config or exported
 # repository-selection variables, and the repository they name is not touched.
 passes_under_hostile_git() {
@@ -226,6 +236,7 @@ run_test fails_on_moved_tag fails_on_moved_tag
 run_test runs_census_when_configured runs_census_when_configured
 run_test census_skipped_is_announced census_skipped_is_announced
 run_test passes_census_when_clean passes_census_when_clean
+run_test census_requires_yurt_ref census_requires_yurt_ref
 run_test passes_under_hostile_git passes_under_hostile_git
 run_test refuses_readonly_repository_env refuses_readonly_repository_env
 run_test scripts_refuse_old_git scripts_refuse_old_git

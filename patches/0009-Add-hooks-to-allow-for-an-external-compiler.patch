@@ -1,0 +1,2492 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Fallin <chris@cfallin.org>
+Date: Tue, 22 Sep 2026 12:30:29 -0700
+Subject: [PATCH] Add hooks to allow for an external compiler
+
+The JS_EXTERNAL_COMPILER_HOOKS surface (js/public/ExternalCompilerHooks.h,
+--enable-external-compiler-hooks): object-model, script-entry, GC and
+regexp hooks an external compilation tier plugs into, the private-header
+export and the jsshell static library.
+
+Source commits in YurtOS/firefox (yurt dff5cf534448):
+  164f660a3602 Add hooks to allow for an external compiler.
+    (all included paths except build/moz.configure, config/system-headers.mozbuild)
+  f6cb6f9ddc21 Review feedback.
+    (all included paths)
+---
+ js/moz.configure                       |  23 ++++
+ js/public/ExternalCompilerHooks.h      | 161 ++++++++++++++++++++++
+ js/public/shadow/Object.h              |   5 +-
+ js/src/build/export_private_headers.py | 119 +++++++++++++++++
+ js/src/builtin/RegExp.cpp              |  21 ++-
+ js/src/builtin/RegExp.h                |  13 ++
+ js/src/builtin/String.cpp              |  11 +-
+ js/src/builtin/String.h                |   2 +
+ js/src/debugger/Script.cpp             |   6 +
+ js/src/gc/Nursery.h                    |   2 +-
+ js/src/irregexp/RegExpAPI.cpp          |  12 ++
+ js/src/irregexp/RegExpAPI.h            |   7 +
+ js/src/moz.build                       |  32 ++++-
+ js/src/shell/CommonShellGlobals.cpp    | 107 +++++++++++++++
+ js/src/shell/CommonShellGlobals.h      |  46 +++++++
+ js/src/shell/js.cpp                    | 176 +++++++++++++++----------
+ js/src/shell/jsshell.h                 |  25 ++++
+ js/src/shell/lib/moz.build             |  54 ++++++++
+ js/src/shell/moz.build                 |   6 +
+ js/src/shell/wizer.cpp                 |   6 +-
+ js/src/vm/BytecodeUtil.cpp             |  10 ++
+ js/src/vm/CommonPropertyNames.h        |   3 +
+ js/src/vm/EnvironmentObject.cpp        |  10 ++
+ js/src/vm/ExternalCompilerHooks.cpp    |  92 +++++++++++++
+ js/src/vm/Interpreter.cpp              |  64 +++++++++
+ js/src/vm/JSContext.cpp                |  15 +++
+ js/src/vm/JSContext.h                  |  25 +++-
+ js/src/vm/JSFunction-inl.h             |  11 ++
+ js/src/vm/JSObject.cpp                 |   7 +
+ js/src/vm/JSObject.h                   |  41 +++++-
+ js/src/vm/JSScript.cpp                 |  17 +++
+ js/src/vm/JSScript.h                   |  22 ++++
+ js/src/vm/MatchPairs.h                 |  10 ++
+ js/src/vm/NativeObject.cpp             |  27 ++++
+ js/src/vm/NativeObject.h               |  22 +++-
+ js/src/vm/Opcodes.h                    |  12 ++
+ js/src/vm/RealmFuses.cpp               |  25 ++++
+ js/src/vm/RealmFuses.h                 |  25 +++-
+ js/src/vm/RegExpObject.cpp             |  13 ++
+ js/src/vm/RegExpShared.h               |  11 ++
+ js/src/vm/RegExpStatics.h              |  30 +++++
+ js/src/vm/Runtime.h                    |  19 +++
+ js/src/vm/Scope.h                      |   8 ++
+ js/src/vm/Shape.cpp                    |  48 ++++++-
+ js/src/vm/Shape.h                      |   2 +-
+ js/src/vm/SharedStencil.h              |   9 ++
+ js/src/vm/StaticStrings.h              |   7 +
+ js/src/vm/Watchtower.cpp               |  30 +++++
+ 48 files changed, 1353 insertions(+), 96 deletions(-)
+ create mode 100644 js/public/ExternalCompilerHooks.h
+ create mode 100644 js/src/build/export_private_headers.py
+ create mode 100644 js/src/shell/CommonShellGlobals.cpp
+ create mode 100644 js/src/shell/CommonShellGlobals.h
+ create mode 100644 js/src/shell/lib/moz.build
+ create mode 100644 js/src/vm/ExternalCompilerHooks.cpp
+
+diff --git a/js/moz.configure b/js/moz.configure
+index e6944cda3fb9..c03166a5f96e 100644
+--- a/js/moz.configure
++++ b/js/moz.configure
+@@ -207,11 +207,13 @@ option(
+     help="{Support|Do not support} wevaling the PBL interpreter",
+ )
+ 
++
+ @depends("--enable-portable-baseline-interp", "--enable-pbl-weval")
+ def js_pbl_weval(pbl, weval):
+     if pbl and weval:
+         return True
+ 
++
+ set_define("ENABLE_JS_PBL_WEVAL", js_pbl_weval)
+ set_config("ENABLE_JS_PBL_WEVAL", js_pbl_weval)
+ 
+@@ -263,6 +265,26 @@ set_config(
+     depends_if("--enable-aot-ics-enforce")(lambda _: True),
+ )
+ 
++# External compiler hooks: the object-model, script-entry, GC and regexp
++# hook surface an external compilation tier (such as NightMonkey) plugs into
++# (js/public/ExternalCompilerHooks.h), plus the private-header export and the
++# `jsshell` static library such a tier links its own shell against. Off by
++# default; an ordinary build is unaffected.
++option(
++    "--enable-external-compiler-hooks",
++    default=False,
++    help="{Enable|Disable} the external compiler tier hook surface",
++)
++
++
++@depends("--enable-external-compiler-hooks")
++def external_compiler_hooks(value):
++    if value:
++        return True
++
++
++set_config("JS_EXTERNAL_COMPILER_HOOKS", external_compiler_hooks)
++set_define("JS_EXTERNAL_COMPILER_HOOKS", external_compiler_hooks)
+ 
+ # Enable JS Streams
+ # ===================================================
+@@ -282,6 +304,7 @@ def enable_js_streams(value):
+ set_config("MOZ_JS_STREAMS", enable_js_streams)
+ set_define("MOZ_JS_STREAMS", enable_js_streams)
+ 
++
+ # JIT support
+ # =======================================================
+ @depends(target, "--enable-portable-baseline-interp")
+diff --git a/js/public/ExternalCompilerHooks.h b/js/public/ExternalCompilerHooks.h
+new file mode 100644
+index 000000000000..741ff49a52f1
+--- /dev/null
++++ b/js/public/ExternalCompilerHooks.h
+@@ -0,0 +1,161 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/*
++ * Hooks for an external compilation tier layered on top of the engine.
++ *
++ * Built only with --enable-external-compiler-hooks
++ * (JS_EXTERNAL_COMPILER_HOOKS). The engine reserves one pointer-sized word per
++ * object, per script and per RegExpShared for the external tier's use, calls
++ * the hook table registered on the runtime at the points where the tier's
++ * assumptions about the heap or control flow can be invalidated, and lets the
++ * tier take over script entry. Each context caches the runtime's table and
++ * carries an opaque per-context state the tier creates and destroys with the
++ * context. With no table registered every hook site costs one load and a
++ * predictable branch.
++ */
++
++#ifndef js_ExternalCompilerHooks_h
++#define js_ExternalCompilerHooks_h
++
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++
++#  include <stddef.h>
++#  include <stdint.h>
++
++#  include "jstypes.h"
++
++#  include "js/CallArgs.h"
++#  include "js/Id.h"
++#  include "js/RootingAPI.h"
++#  include "js/TypeDecls.h"
++#  include "js/Value.h"
++
++namespace js {
++class AbstractGeneratorObject;
++class NativeObject;
++class RegExpShared;
++class RunState;
++class VectorMatchPairs;
++enum class RegExpRunStatus : int32_t;
++}  // namespace js
++
++namespace JS {
++
++// Why an object's external word was reset.
++enum class ExternalObjectMutation : uint32_t {
++  ToDictionary = 1,
++  ChangeProperty,
++  ChangeCustomDataProp,
++  RemoveProperty,
++  FreezeOrSeal,
++  Swap,
++  ObjectFlagChange,
++  // A slot store through an engine path cleared bits per the store masks.
++  StoredValue,
++};
++
++enum class ExternalEnterStatus : uint32_t { NotEntered, Ok, Error };
++
++// Every hook receives the context the engine is running on. The one site
++// without a context of its own, the slot-store choke, passes the runtime's
++// main context.
++struct ExternalCompilerHooks {
++  // Per-context state: created when a context is initialized (or when the
++  // table is registered on a runtime whose context already exists) and
++  // destroyed with the context. JSContext::getExternalCompilerState returns
++  // it. Either may be null.
++  void* (*newContext)(JSContext* cx);
++  void (*destroyContext)(JSContext* cx, void* state);
++
++  // Object model. Every object carries a pointer-sized external word, zero
++  // at birth. A structural change (shape change, dictionary mode, freeze,
++  // flag change, swap) on an object whose word is nonzero resets the word to
++  // zero and reports the old word here.
++  void (*objectDemoted)(JSContext* cx, JSObject* obj, uintptr_t oldWord,
++                        ExternalObjectMutation why);
++  // Slot-store policy, applied on every engine-path slot store to an object
++  // whose word intersects either mask: storeClearMask bits are cleared on any
++  // store, storeNonNumberClearMask bits when the value is not a number. When
++  // the word changes, objectDemoted fires with StoredValue.
++  uintptr_t storeClearMask;
++  uintptr_t storeNonNumberClearMask;
++  // A property was added to an object whose word is nonzero.
++  void (*propertyAdded)(JSContext* cx, js::NativeObject* obj,
++                        JS::PropertyKey id, uint32_t slot,
++                        uint32_t numFixedSlots);
++
++  // Global object. A property was defined or deleted on a global, a data
++  // property of a global was written, or a global lexical binding now
++  // shadows a same-named global property.
++  void (*globalKeyChanged)(JSContext* cx, JS::PropertyKey id);
++  void (*globalDataStored)(JSContext* cx, JS::PropertyKey id,
++                           uint64_t valueBits);
++  void (*globalLexicalShadowAdded)(JSContext* cx, uint64_t idBits);
++
++  // Script entry. Every script carries a pointer-sized external word, zero
++  // at birth; the engine consults these only for scripts whose word is
++  // nonzero.
++  ExternalEnterStatus (*enterScript)(JSContext* cx, js::RunState& state);
++  ExternalEnterStatus (*enterCall)(JSContext* cx, const JS::CallArgs& args,
++                                   JSScript* script, bool constructing);
++  // A generator whose frame belongs to the external tier cannot be resumed
++  // by the interpreter.
++  bool (*isForeignGenerator)(JSContext* cx, js::AbstractGeneratorObject* gen);
++  ExternalEnterStatus (*resumeGenerator)(
++      JSContext* cx, JS::Handle<js::AbstractGeneratorObject*> gen,
++      JS::HandleValue arg, JS::HandleValue resumeKind,
++      JS::MutableHandleValue rval);
++
++  // GC: traced on every collection, minor and major.
++  void (*traceRoots)(JSContext* cx, JSTracer* trc);
++
++  // Frontend: source text entered the compiler (eval, Function, module or
++  // embedder compile alike). Not reported for a compile with no context of
++  // its own (an off-thread compile).
++  void (*sourceAssigned)(JSContext* cx);
++  // Lower bound on the fixed-slot estimate for constructor `this` objects
++  // (0 leaves the engine's estimate alone).
++  uint32_t minConstructorThisSlots;
++
++  // RegExp: decide a match before the engine's own matcher runs. Return true
++  // with *status set to take over; false to fall through.
++  bool (*regexpMatch)(JSContext* cx, JS::MutableHandle<js::RegExpShared*> re,
++                      JS::Handle<JSLinearString*> input, size_t start,
++                      js::VectorMatchPairs* matches, bool latin1,
++                      js::RegExpRunStatus* status);
++};
++
++// Register (or, with nullptr, unregister) the hook table on a runtime. The
++// table must outlive its registration. The runtime's context caches the
++// table; per-context state is created for it here (and destroyed on
++// unregistration). Call from the runtime's own thread, before any script the
++// tier cares about runs.
++extern JS_PUBLIC_API void SetExternalCompilerHooks(
++    JSRuntime* rt, ExternalCompilerHooks* hooks);
++extern JS_PUBLIC_API ExternalCompilerHooks* GetExternalCompilerHooks(
++    JSRuntime* rt);
++
++}  // namespace JS
++
++namespace js {
++
++// Out-of-line halves of the inline hook sites (vm/JSObject.h).
++extern JS_PUBLIC_API void ExternalObjectDemoted(JSContext* cx, JSObject* obj,
++                                                uintptr_t oldWord,
++                                                JS::ExternalObjectMutation why);
++extern JS_PUBLIC_API void ExternalObjectStore(JSObject* obj,
++                                              const JS::Value& v);
++extern JS_PUBLIC_API void ExternalPropertyAdded(JSContext* cx,
++                                                NativeObject* obj,
++                                                JS::PropertyKey id,
++                                                uint32_t slot);
++
++}  // namespace js
++
++#endif  // JS_EXTERNAL_COMPILER_HOOKS
++
++#endif  // js_ExternalCompilerHooks_h
+diff --git a/js/public/shadow/Object.h b/js/public/shadow/Object.h
+index 6f77de71bab0..36c957d6135b 100644
+--- a/js/public/shadow/Object.h
++++ b/js/public/shadow/Object.h
+@@ -33,7 +33,10 @@ namespace shadow {
+  */
+ struct Object {
+   shadow::Shape* shape;
+-#ifndef JS_64BIT
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // Mirrors JSObject: the external tier's pointer-sized per-object word.
++  uintptr_t externalWord_;
++#elif !defined(JS_64BIT)
+   uint32_t padding_;
+ #endif
+   Value* slots;
+diff --git a/js/src/build/export_private_headers.py b/js/src/build/export_private_headers.py
+new file mode 100644
+index 000000000000..b87bb7861fa0
+--- /dev/null
++++ b/js/src/build/export_private_headers.py
+@@ -0,0 +1,119 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++# Export the engine's private headers and compile configuration for an
++# external compiler tier (--enable-external-compiler-hooks): mirrors js/src
++# (source and generated headers) under dist/include-private and records the
++# flags libjs was compiled with in dist/include-private/js-build-config.json.
++
++import json
++import os
++import shutil
++
++import buildconfig
++
++SKIP_DIRS = {
++    "ctypes",
++    "devtools",
++    "doc",
++    "editline",
++    "fuzz-tests",
++    "gdb",
++    "jit-test",
++    "jsapi-tests",
++    "octane",
++    "rust",
++    "tests",
++    "__pycache__",
++}
++
++
++def copy_tree(
++    src_root, dst_root, suffixes=(".h", ".msg", ".inc", ".def"), skip_dirs=SKIP_DIRS
++):
++    copied = []
++    for dirpath, dirnames, filenames in os.walk(src_root):
++        dirnames[:] = sorted(d for d in dirnames if d not in skip_dirs)
++        rel = os.path.relpath(dirpath, src_root)
++        for name in sorted(filenames):
++            if not name.endswith(suffixes):
++                continue
++            src = os.path.join(dirpath, name)
++            dst = (
++                os.path.join(dst_root, rel, name)
++                if rel != "."
++                else os.path.join(dst_root, name)
++            )
++            os.makedirs(os.path.dirname(dst), exist_ok=True)
++            if not os.path.exists(dst) or os.path.getmtime(dst) < os.path.getmtime(src):
++                shutil.copy2(src, dst)
++            copied.append(dst)
++    return copied
++
++
++def subst(name, default=None):
++    value = buildconfig.substs.get(name)
++    return default if value is None else value
++
++
++def main(output, *inputs):
++    topsrcdir = buildconfig.topsrcdir
++    topobjdir = buildconfig.topobjdir
++    dist = os.path.join(topobjdir, "dist")
++    out = os.path.join(dist, "include-private")
++    os.makedirs(out, exist_ok=True)
++
++    copied = []
++    copied += copy_tree(os.path.join(topsrcdir, "js", "src"), out)
++    # Generated headers live in the objdir mirror of js/src; js-confdefs.h is
++    # the force-included configuration header every engine TU sees.
++    copied += copy_tree(
++        os.path.join(topobjdir, "js", "src"), out, skip_dirs=SKIP_DIRS | {"build"}
++    )
++    for extra in ("config/gcc_hidden.h",):
++        src = os.path.join(topsrcdir, extra)
++        dst = os.path.join(out, os.path.basename(extra))
++        shutil.copy2(src, dst)
++        copied.append(dst)
++
++    config = {
++        "topsrcdir": topsrcdir,
++        "topobjdir": topobjdir,
++        "cxx": subst("CXX", []),
++        "cc": subst("CC", []),
++        "ar": subst("AR", ""),
++        "cxx_base_flags": subst("CXX_BASE_FLAGS", []),
++        "os_cxxflags": subst("OS_CXXFLAGS", []),
++        "optimize_flags": (
++            subst("MOZ_OPTIMIZE_FLAGS", []) if subst("MOZ_OPTIMIZE") else []
++        ),
++        "debug_flags": subst("MOZ_DEBUG_FLAGS", []) if subst("MOZ_DEBUG") else [],
++        "warnings_cxxflags": subst("WARNINGS_CXXFLAGS", []),
++        "debug_defines": subst("MOZ_DEBUG_DEFINES", []),
++        "extra_cxxflags": ["-fno-strict-aliasing", "-ffp-contract=off"],
++        "library_defines": [
++            "MOZILLA_CLIENT",
++            "EXPORT_JS_API",
++            "MOZ_HAS_MOZGLUE",
++            "MOZ_SUPPORT_LEAKCHECKING",
++        ],
++        "force_includes": ["gcc_hidden.h", "js-confdefs.h"],
++        "include_dirs": ["include-private", "include", "system_wrappers"],
++        "os_ldflags": subst("OS_LDFLAGS", []),
++        "rust_target": subst("RUST_TARGET", ""),
++        "os_arch": subst("OS_ARCH", ""),
++        "moz_debug": bool(subst("MOZ_DEBUG")),
++        "js_shell_wizer": bool(subst("JS_SHELL_WIZER")),
++        "libraries": [
++            "lib/libjsshell.a",
++            "lib/libjs_static.a",
++            "lib/libjsrust.a",
++            "lib/libpure_virtual.a",
++        ],
++    }
++    with open(os.path.join(out, "js-build-config.json"), "w") as f:
++        json.dump(config, f, indent=2, sort_keys=True)
++
++    output.write("%d headers\n" % len(copied))
++    return 0
+diff --git a/js/src/builtin/RegExp.cpp b/js/src/builtin/RegExp.cpp
+index 943ea0e6ed00..4d7a30019196 100644
+--- a/js/src/builtin/RegExp.cpp
++++ b/js/src/builtin/RegExp.cpp
+@@ -302,8 +302,8 @@ bool js::CreateRegExpMatchResult(JSContext* cx, HandleRegExpShared re,
+   return true;
+ }
+ 
+-static int32_t CreateRegExpSearchResult(JSContext* cx,
+-                                        const MatchPairs& matches) {
++namespace js {
++int32_t CreateRegExpSearchResult(JSContext* cx, const MatchPairs& matches) {
+   MOZ_ASSERT(matches[0].start >= 0);
+   MOZ_ASSERT(matches[0].limit >= 0);
+ 
+@@ -317,6 +317,7 @@ static int32_t CreateRegExpSearchResult(JSContext* cx,
+   cx->regExpSearcherLastLimit = matches[0].limit;
+   return matches[0].start;
+ }
++}  // namespace js
+ 
+ /*
+  * ES 2017 draft rev 6a13789aa9e7c6de4e96b7d3e24d9e6eba6584ad 21.2.5.2.2
+@@ -332,9 +333,15 @@ static RegExpRunStatus ExecuteRegExpImpl(JSContext* cx, RegExpStatics* res,
+ 
+   /* Out of spec: Update RegExpStatics. */
+   if (status == RegExpRunStatus::Success && res) {
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    // Lazy scheme: record the replay recipe instead of copying the pairs
++    // per match; the first statics read re-executes (executeLazy).
++    res->updateLazily(cx, input, re, searchIndex);
++#else
+     if (!res->updateFromMatchPairs(cx, input, *matches)) {
+       return RegExpRunStatus::Error;
+     }
++#endif
+   }
+   return status;
+ }
+@@ -531,9 +538,10 @@ bool js::IsRegExp(JSContext* cx, HandleValue value, bool* result) {
+ // The "lastIndex" property is non-configurable, but it can be made
+ // non-writable. If CalledFromJit is true, we have emitted guards to ensure it's
+ // writable.
++namespace js {
+ template <bool CalledFromJit = false>
+-static bool SetLastIndex(JSContext* cx, Handle<RegExpObject*> regexp,
+-                         int32_t lastIndex) {
++bool SetLastIndex(JSContext* cx, Handle<RegExpObject*> regexp,
++                  int32_t lastIndex) {
+   MOZ_ASSERT(lastIndex >= 0);
+ 
+   if (CalledFromJit || MOZ_LIKELY(RegExpObject::isInitialShape(regexp)) ||
+@@ -545,6 +553,11 @@ static bool SetLastIndex(JSContext* cx, Handle<RegExpObject*> regexp,
+   Rooted<Value> val(cx, Int32Value(lastIndex));
+   return SetProperty(cx, regexp, cx->names().lastIndex, val);
+ }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++template bool SetLastIndex<false>(JSContext* cx, Handle<RegExpObject*> regexp,
++                                  int32_t lastIndex);
++#endif
++}  // namespace js
+ 
+ /* ES6 B.2.5.1. */
+ MOZ_ALWAYS_INLINE bool regexp_compile_impl(JSContext* cx,
+diff --git a/js/src/builtin/RegExp.h b/js/src/builtin/RegExp.h
+index 24ad7057809c..b865fe68eaba 100644
+--- a/js/src/builtin/RegExp.h
++++ b/js/src/builtin/RegExp.h
+@@ -56,6 +56,19 @@ JSObject* InitRegExpClass(JSContext* cx, HandleObject obj);
+                                            const MatchPairs& matches,
+                                            MutableHandleValue rval);
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++// RegExp.cpp internals reused by an external compiler tier's regexp fast
++// paths. `SetLastIndex` is declared without its default template argument
++// (RegExp.cpp's definition supplies it), so callers here must name the
++// specialization.
++extern int32_t CreateRegExpSearchResult(JSContext* cx,
++                                        const MatchPairs& matches);
++
++template <bool CalledFromJit>
++bool SetLastIndex(JSContext* cx, Handle<RegExpObject*> regexp,
++                  int32_t lastIndex);
++#endif
++
+ [[nodiscard]] extern bool RegExpMatcher(JSContext* cx, unsigned argc,
+                                         Value* vp);
+ 
+diff --git a/js/src/builtin/String.cpp b/js/src/builtin/String.cpp
+index 3d7a05c5c2ba..b9dbcb57bb07 100644
+--- a/js/src/builtin/String.cpp
++++ b/js/src/builtin/String.cpp
+@@ -1834,7 +1834,7 @@ static MOZ_ALWAYS_INLINE bool ToRelativeStringIndex(
+  *
+  * ES2024 draft rev 7d2644968bd56d54d2886c012d18698ff3f72c35
+  */
+-static bool str_charAt(JSContext* cx, unsigned argc, Value* vp) {
++bool js::str_charAt(JSContext* cx, unsigned argc, Value* vp) {
+   AutoJSMethodProfilerEntry pseudoFrame(cx, "String.prototype", "charAt");
+   CallArgs args = CallArgsFromVp(argc, vp);
+ 
+@@ -4345,6 +4345,15 @@ static bool StringClassFinish(JSContext* cx, HandleObject ctor,
+     return false;
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // Watchtower-watch the prototype and constructor so mutations of the
++  // char-op methods pop OptimizeStringCharOpsFuse.
++  if (!JSObject::setHasRealmFuseProperty(cx, proto) ||
++      !JSObject::setHasRealmFuseProperty(cx, ctor)) {
++    return false;
++  }
++#endif
++
+   return true;
+ }
+ 
+diff --git a/js/src/builtin/String.h b/js/src/builtin/String.h
+index c4caed037600..2c2a2ae24fd9 100644
+--- a/js/src/builtin/String.h
++++ b/js/src/builtin/String.h
+@@ -34,6 +34,8 @@ extern bool str_startsWith(JSContext* cx, unsigned argc, Value* vp);
+ 
+ extern bool str_toString(JSContext* cx, unsigned argc, Value* vp);
+ 
++extern bool str_charAt(JSContext* cx, unsigned argc, Value* vp);
++
+ extern bool str_charCodeAt(JSContext* cx, unsigned argc, Value* vp);
+ 
+ extern bool str_codePointAt(JSContext* cx, unsigned argc, Value* vp);
+diff --git a/js/src/debugger/Script.cpp b/js/src/debugger/Script.cpp
+index 47317186785a..3cf196a384f4 100644
+--- a/js/src/debugger/Script.cpp
++++ b/js/src/debugger/Script.cpp
+@@ -579,6 +579,12 @@ static bool ScriptOffset(JSContext* cx, const Value& v, size_t* offsetp) {
+   bool ok = v.isNumber();
+   if (ok) {
+     d = v.toNumber();
++    // Range-check before converting: a double outside size_t's range makes
++    // the conversion undefined, and a compiler may then fold the equality
++    // check below away.
++    ok = d >= 0 && d <= double(SIZE_MAX);
++  }
++  if (ok) {
+     off = size_t(d);
+   }
+   if (!ok || off != d) {
+diff --git a/js/src/gc/Nursery.h b/js/src/gc/Nursery.h
+index d282ddb6e09f..cf1eefef9059 100644
+--- a/js/src/gc/Nursery.h
++++ b/js/src/gc/Nursery.h
+@@ -134,7 +134,7 @@ class Nursery {
+   // now succeed.
+   [[nodiscard]] JS::GCReason handleAllocationFailure();
+ 
+-  static size_t nurseryCellHeaderSize() {
++  static constexpr size_t nurseryCellHeaderSize() {
+     return sizeof(gc::NurseryCellHeader);
+   }
+ 
+diff --git a/js/src/irregexp/RegExpAPI.cpp b/js/src/irregexp/RegExpAPI.cpp
+index 679f3856892b..f5ff2e39a2b9 100644
+--- a/js/src/irregexp/RegExpAPI.cpp
++++ b/js/src/irregexp/RegExpAPI.cpp
+@@ -916,9 +916,21 @@ RegExpRunStatus Interpret(JSContext* cx, MutableHandleRegExpShared re,
+   return status;
+ }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++// An external matcher reports a status word without including the imported
++// V8 header; keep the exported constants pinned to the values they mirror.
++static_assert(kExternalMatcherSuccess ==
++              v8::internal::RegExp::kInternalRegExpSuccess);
++static_assert(kExternalMatcherFailure ==
++              v8::internal::RegExp::kInternalRegExpFailure);
++#endif  // JS_EXTERNAL_COMPILER_HOOKS
++
+ RegExpRunStatus Execute(JSContext* cx, MutableHandleRegExpShared re,
+                         Handle<JSLinearString*> input, size_t startIndex,
+                         VectorMatchPairs* matches) {
++  // An external matcher (JS::ExternalCompilerHooks::regexpMatch) is consulted
++  // in RegExpShared::execute, the only caller; reaching here means it
++  // declined.
+   bool latin1 = input->hasLatin1Chars();
+   jit::JitCode* jitCode = re->getJitCode(latin1);
+   bool isCompiled = !!jitCode;
+diff --git a/js/src/irregexp/RegExpAPI.h b/js/src/irregexp/RegExpAPI.h
+index 1c32ada9988d..22e690577a87 100644
+--- a/js/src/irregexp/RegExpAPI.h
++++ b/js/src/irregexp/RegExpAPI.h
+@@ -45,6 +45,13 @@ class TokenStreamAnyChars;
+ 
+ namespace irregexp {
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++// Status words an external matcher may report, pinned to the V8 matcher's
++// own values (static_asserts in RegExpAPI.cpp).
++constexpr int32_t kExternalMatcherSuccess = 1;
++constexpr int32_t kExternalMatcherFailure = 0;
++#endif
++
+ Isolate* CreateIsolate(JSContext* cx);
+ void TraceIsolate(JSTracer* trc, Isolate* isolate);
+ void DestroyIsolate(Isolate* isolate);
+diff --git a/js/src/moz.build b/js/src/moz.build
+index ae5af29eda3f..e9b62aad32e8 100644
+--- a/js/src/moz.build
++++ b/js/src/moz.build
+@@ -50,6 +50,8 @@ with Files("builtin/intl/*"):
+ if not CONFIG["JS_DISABLE_SHELL"]:
+     DIRS += [
+         "rust",
++    ]
++    DIRS += [
+         "shell",
+     ]
+ 
+@@ -144,6 +146,7 @@ EXPORTS.js += [
+     "../public/ErrorInterceptor.h",
+     "../public/ErrorReport.h",
+     "../public/Exception.h",
++    "../public/ExternalCompilerHooks.h",
+     "../public/ForOfIterator.h",
+     "../public/GCAnnotations.h",
+     "../public/GCAPI.h",
+@@ -498,6 +501,31 @@ if CONFIG["ENABLE_PORTABLE_BASELINE_INTERP"]:
+         "vm/PortableBaselineInterpret.cpp",
+     ]
+ 
++if CONFIG["JS_EXTERNAL_COMPILER_HOOKS"]:
++    UNIFIED_SOURCES += [
++        "vm/ExternalCompilerHooks.cpp",
++    ]
++    # Export the private headers (source and generated) an external compiler
++    # tier builds against, mirroring js/src under dist/include-private, and
++    # the compile flags this library was built with.
++    GeneratedFile(
++        "external-headers.stamp",
++        script="build/export_private_headers.py",
++        entry_point="main",
++        inputs=[
++            "!selfhosted.out.h",
++            "!frontend/ReservedWordsGenerated.h",
++            "!gc/StatsPhasesGenerated.h",
++            "!jit/ABIFunctionTypeGenerated.h",
++            "!jit/AtomicOperationsGenerated.h",
++            "!jit/CacheIROpsGenerated.h",
++            "!jit/LIROpsGenerated.h",
++            "!jit/MIROpsGenerated.h",
++            "!wasm/WasmBuiltinModuleGenerated.h",
++        ],
++        force=True,
++    )
++
+ if CONFIG["ENABLE_EXPLICIT_RESOURCE_MANAGEMENT"]:
+     UNIFIED_SOURCES += [
+         "builtin/AsyncDisposableStackObject.cpp",
+@@ -705,6 +733,4 @@ if CONFIG["USE_LIBZ_RS"]:
+     DEFINES["USE_LIBZ_RS"] = True
+ 
+ if CONFIG["ENABLE_JS_PBL_WEVAL"]:
+-    LOCAL_INCLUDES += [
+-        "../../third_party/weval"
+-    ]
++    LOCAL_INCLUDES += ["../../third_party/weval"]
+diff --git a/js/src/shell/CommonShellGlobals.cpp b/js/src/shell/CommonShellGlobals.cpp
+new file mode 100644
+index 000000000000..12c78a120ce6
+--- /dev/null
++++ b/js/src/shell/CommonShellGlobals.cpp
+@@ -0,0 +1,107 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "shell/CommonShellGlobals.h"
++
++#include <stdio.h>
++
++#include "jsapi.h"  // JS_DefineFunction, JS_ValueToSource, JS_ClearPendingException
++
++#include "js/CallArgs.h"
++#include "js/CharacterEncoding.h"  // JS_EncodeStringToUTF8
++#include "js/Conversions.h"        // JS::ToString
++#include "js/Equality.h"           // JS::SameValue
++#include "js/ErrorReport.h"        // JS_ReportErrorUTF8
++#include "js/Printer.h"            // js::QuoteString
++#include "js/RootingAPI.h"         // JS::Rooted
++#include "js/Utility.h"            // JS::UniqueChars
++#include "js/Value.h"
++
++using namespace JS;
++
++namespace {
++
++// Best-effort source representation of a value for error messages.
++const char* ValueToSource(JSContext* cx, HandleValue v, UniqueChars* bytes) {
++  RootedString str(cx, JS_ValueToSource(cx, v));
++  if (str) {
++    *bytes = JS_EncodeStringToUTF8(cx, str);
++    if (*bytes) {
++      return bytes->get();
++    }
++  }
++  JS_ClearPendingException(cx);
++  return "<<error converting value to string>>";
++}
++
++bool Print(JSContext* cx, unsigned argc, Value* vp) {
++  CallArgs args = CallArgsFromVp(argc, vp);
++  return js::shell::PrintArgs(cx, args, stdout, /* newline = */ true);
++}
++
++}  // namespace
++
++bool js::shell::PrintArgs(JSContext* cx, const CallArgs& args, FILE* out,
++                          bool newline) {
++  for (unsigned i = 0; i < args.length(); i++) {
++    RootedString str(cx, ToString(cx, args[i]));
++    if (!str) {
++      return false;
++    }
++    UniqueChars bytes = JS_EncodeStringToUTF8(cx, str);
++    if (!bytes) {
++      return false;
++    }
++    fprintf(out, "%s%s", i ? " " : "", bytes.get());
++  }
++  if (newline) {
++    fputc('\n', out);
++  }
++  fflush(out);
++  args.rval().setUndefined();
++  return true;
++}
++
++bool js::shell::AssertEq(JSContext* cx, unsigned argc, Value* vp) {
++  CallArgs args = CallArgsFromVp(argc, vp);
++  if (!(args.length() == 2 || (args.length() == 3 && args[2].isString()))) {
++    JS_ReportErrorUTF8(cx, "assertEq: %s",
++                       (args.length() < 2)    ? "not enough arguments"
++                       : (args.length() == 3) ? "invalid arguments"
++                                              : "too many arguments");
++    return false;
++  }
++
++  bool same;
++  if (!SameValue(cx, args[0], args[1], &same)) {
++    return false;
++  }
++  if (!same) {
++    UniqueChars bytes0, bytes1;
++    const char* actual = ValueToSource(cx, args[0], &bytes0);
++    const char* expected = ValueToSource(cx, args[1], &bytes1);
++    if (args.length() == 2) {
++      JS_ReportErrorUTF8(cx, "Assertion failed: got %s, expected %s", actual,
++                         expected);
++    } else {
++      RootedString message(cx, args[2].toString());
++      UniqueChars bytes2 = js::QuoteString(cx, message);
++      if (!bytes2) {
++        return false;
++      }
++      JS_ReportErrorUTF8(cx, "Assertion failed: got %s, expected %s: %s",
++                         actual, expected, bytes2.get());
++    }
++    return false;
++  }
++  args.rval().setUndefined();
++  return true;
++}
++
++bool js::shell::InstallCommonShellGlobals(JSContext* cx, HandleObject global) {
++  return JS_DefineFunction(cx, global, "print", Print, 0, 0) &&
++         JS_DefineFunction(cx, global, "assertEq", js::shell::AssertEq, 2, 0);
++}
+diff --git a/js/src/shell/CommonShellGlobals.h b/js/src/shell/CommonShellGlobals.h
+new file mode 100644
+index 000000000000..9647b139200f
+--- /dev/null
++++ b/js/src/shell/CommonShellGlobals.h
+@@ -0,0 +1,46 @@
++/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++// Common shell-style global builtins, factored out of the js shell so that
++// minimal embeddings (currently the AOT runtime reactor, js/src/night/runtime/) can
++// install the same `print`/`assertEq` the shell exposes without depending on
++// the shell program itself. Homed under shell/ so the dependency runs
++// embedding -> shell, never the reverse. Self-contained: uses only the public
++// JS API (plus js::QuoteString), no shell-only state.
++
++#ifndef shell_CommonShellGlobals_h
++#define shell_CommonShellGlobals_h
++
++#include <stdio.h>
++
++#include "js/CallArgs.h"
++#include "js/TypeDecls.h"
++
++namespace js {
++namespace shell {
++
++// The shared `print` loop: ToString each argument and write it to `out`,
++// space-separated, with a trailing newline when `newline` is set. Sets
++// args.rval() to undefined. The shell's redirectable print/printErr wrap this
++// (passing their RCFile's stream); InstallCommonShellGlobals uses it for
++// stdout.
++[[nodiscard]] bool PrintArgs(JSContext* cx, const JS::CallArgs& args, FILE* out,
++                             bool newline);
++
++// assertEq(actual, expected[, message]): throw if SameValue(actual, expected)
++// is false. Error messages match the shell's historical text.
++bool AssertEq(JSContext* cx, unsigned argc, JS::Value* vp);
++
++// Install the modeled common globals on `global`: `print` (-> stdout) and
++// `assertEq`. For minimal embeddings; the shell defines its own redirectable
++// print but shares PrintArgs/AssertEq above.
++[[nodiscard]] bool InstallCommonShellGlobals(JSContext* cx,
++                                             JS::HandleObject global);
++
++}  // namespace shell
++}  // namespace js
++
++#endif  // shell_CommonShellGlobals_h
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+index c09a9a4c9c5c..3165147173e1 100644
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -172,6 +172,7 @@
+ #include "js/WasmModule.h"    // JS::WasmModule
+ #include "js/Wrapper.h"
+ #include "proxy/DeadObjectProxy.h"  // js::IsDeadProxyObject
++#include "shell/CommonShellGlobals.h"
+ #include "shell/jsoptparse.h"
+ #include "shell/jsshell.h"
+ #include "shell/OSObject.h"
+@@ -874,6 +875,20 @@ bool shell::OOM_printAllocationCount = false;
+ 
+ MOZ_RUNINIT UniqueChars shell::processWideModuleLoadPath;
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++static const ShellExtension* gShellExtension = nullptr;
++// Set while the positional script is processed (see ShellExtension).
++static bool processingPrimaryScript = false;
++
++void js::shell::SetShellExtension(const ShellExtension* ext) {
++  gShellExtension = ext;
++}
++
++const ShellExtension* js::shell::GetShellExtension() {
++  return gShellExtension;
++}
++#endif
++
+ static bool SetTimeoutValue(JSContext* cx, double t);
+ 
+ static void KillWatchdog(JSContext* cx);
+@@ -1313,7 +1328,13 @@ enum class CompileUtf8 {
+         .setIsRunOnce(true)
+         .setNoScriptRval(true);
+ 
+-    if (fullParse) {
++    bool wantFullParse = fullParse;
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    if (gShellExtension && gShellExtension->wantsFullParse) {
++      wantFullParse |= gShellExtension->wantsFullParse(processingPrimaryScript);
++    }
++#endif
++    if (wantFullParse) {
+       options.setForceFullParse();
+     } else {
+       options.setEagerDelazificationStrategy(defaultDelazificationMode);
+@@ -1358,6 +1379,13 @@ enum class CompileUtf8 {
+     return false;
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (gShellExtension && gShellExtension->scriptCompiled &&
++      !gShellExtension->scriptCompiled(cx, script, processingPrimaryScript)) {
++    return false;
++  }
++#endif
++
+ #ifdef DEBUG
+   if (dumpEntrainedVariables) {
+     AnalyzeEntrainedVariables(cx, script);
+@@ -1371,6 +1399,12 @@ enum class CompileUtf8 {
+     if (printTiming) {
+       printf("runtime = %.3f ms\n", double(t2) / PRMJ_USEC_PER_MSEC);
+     }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    if (gShellExtension && gShellExtension->scriptExecuted &&
++        !gShellExtension->scriptExecuted(cx, script, processingPrimaryScript)) {
++      return false;
++    }
++#endif
+   }
+   return true;
+ }
+@@ -3566,23 +3600,8 @@ static bool PrintInternal(JSContext* cx, const CallArgs& args, RCFile* file) {
+     return false;
+   }
+ 
+-  for (unsigned i = 0; i < args.length(); i++) {
+-    RootedString str(cx, JS::ToString(cx, args[i]));
+-    if (!str) {
+-      return false;
+-    }
+-    UniqueChars bytes = JS_EncodeStringToUTF8(cx, str);
+-    if (!bytes) {
+-      return false;
+-    }
+-    fprintf(file->fp, "%s%s", i ? " " : "", bytes.get());
+-  }
+-
+-  fputc('\n', file->fp);
+-  fflush(file->fp);
+-
+-  args.rval().setUndefined();
+-  return true;
++  // Shared with the AOT runtime via shell/CommonShellGlobals.
++  return js::shell::PrintArgs(cx, args, file->fp, /* newline = */ true);
+ }
+ 
+ static bool Print(JSContext* cx, unsigned argc, Value* vp) {
+@@ -3677,56 +3696,6 @@ static bool StopTimingMutator(JSContext* cx, unsigned argc, Value* vp) {
+   return true;
+ }
+ 
+-static const char* ToSource(JSContext* cx, HandleValue vp, UniqueChars* bytes) {
+-  RootedString str(cx, JS_ValueToSource(cx, vp));
+-  if (str) {
+-    *bytes = JS_EncodeStringToUTF8(cx, str);
+-    if (*bytes) {
+-      return bytes->get();
+-    }
+-  }
+-  JS_ClearPendingException(cx);
+-  return "<<error converting value to string>>";
+-}
+-
+-static bool AssertEq(JSContext* cx, unsigned argc, Value* vp) {
+-  CallArgs args = CallArgsFromVp(argc, vp);
+-  if (!(args.length() == 2 || (args.length() == 3 && args[2].isString()))) {
+-    JS_ReportErrorNumberASCII(cx, my_GetErrorMessage, nullptr,
+-                              (args.length() < 2)    ? JSSMSG_NOT_ENOUGH_ARGS
+-                              : (args.length() == 3) ? JSSMSG_INVALID_ARGS
+-                                                     : JSSMSG_TOO_MANY_ARGS,
+-                              "assertEq");
+-    return false;
+-  }
+-
+-  bool same;
+-  if (!JS::SameValue(cx, args[0], args[1], &same)) {
+-    return false;
+-  }
+-  if (!same) {
+-    UniqueChars bytes0, bytes1;
+-    const char* actual = ToSource(cx, args[0], &bytes0);
+-    const char* expected = ToSource(cx, args[1], &bytes1);
+-    if (args.length() == 2) {
+-      JS_ReportErrorNumberUTF8(cx, my_GetErrorMessage, nullptr,
+-                               JSSMSG_ASSERT_EQ_FAILED, actual, expected);
+-    } else {
+-      RootedString message(cx, args[2].toString());
+-      UniqueChars bytes2 = QuoteString(cx, message);
+-      if (!bytes2) {
+-        return false;
+-      }
+-      JS_ReportErrorNumberUTF8(cx, my_GetErrorMessage, nullptr,
+-                               JSSMSG_ASSERT_EQ_FAILED_MSG, actual, expected,
+-                               bytes2.get());
+-    }
+-    return false;
+-  }
+-  args.rval().setUndefined();
+-  return true;
+-}
+-
+ static JSScript* GetTopScript(JSContext* cx) {
+   NonBuiltinScriptFrameIter iter(cx);
+   return iter.done() ? nullptr : iter.script();
+@@ -10177,7 +10146,7 @@ static const JSFunctionSpecWithHelp shell_functions[] = {
+ "quit()",
+ "  Quit the shell."),
+ 
+-    JS_FN_HELP("assertEq", AssertEq, 2, 0,
++    JS_FN_HELP("assertEq", js::shell::AssertEq, 2, 0,
+ "assertEq(actual, expected[, msg])",
+ "  Throw if the first two arguments are not the same (both +0 or both -0,\n"
+ "  both NaN, or non-zero and ===)."),
+@@ -11888,6 +11857,12 @@ static JSObject* NewGlobalObject(JSContext* cx, JS::RealmOptions& options,
+         !JS_DefineProfilingFunctions(cx, glob)) {
+       return nullptr;
+     }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    if (gShellExtension && gShellExtension->defineGlobals &&
++        !gShellExtension->defineGlobals(cx, glob)) {
++      return nullptr;
++    }
++#endif
+ #ifdef FUZZING_JS_FUZZILLI
+     if (!JS_DefineFunctions(cx, glob, shell_function_fuzzilli_hash)) {
+       return nullptr;
+@@ -12144,9 +12119,40 @@ auto minVal(T a, Ts... args) {
+       }
+ 
+       RootedValue rval(cx);
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++      // -e code is the primary script only when there is no positional
++      // script; an extension sees it compiled and executed as a script.
++      if (gShellExtension && gShellExtension->scriptCompiled &&
++          !op->getStringArg("script")) {
++        opts.setIsRunOnce(true).setNoScriptRval(true);
++        if (gShellExtension->wantsFullParse &&
++            gShellExtension->wantsFullParse(/* primary = */ true)) {
++          opts.setForceFullParse();
++        }
++        RootedScript script(cx, JS::Compile(cx, opts, srcBuf));
++        if (!script) {
++          return false;
++        }
++        if (!gShellExtension->scriptCompiled(cx, script,
++                                             /* primary = */ true)) {
++          return false;
++        }
++        if (!JS_ExecuteScript(cx, script)) {
++          return false;
++        }
++        if (gShellExtension->scriptExecuted &&
++            !gShellExtension->scriptExecuted(cx, script,
++                                             /* primary = */ true)) {
++          return false;
++        }
++      } else if (!JS::Evaluate(cx, opts, srcBuf, &rval)) {
++        return false;
++      }
++#else
+       if (!JS::Evaluate(cx, opts, srcBuf, &rval)) {
+         return false;
+       }
++#endif
+ 
+       codeChunks.popFront();
+       if (sc->quitting) {
+@@ -12179,9 +12185,15 @@ auto minVal(T a, Ts... args) {
+     if (!pathUtf8) {
+       return false;
+     }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    processingPrimaryScript = true;
++#endif
+     if (!Process(cx, pathUtf8.get(), false, FileScript)) {
+       return false;
+     }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    processingPrimaryScript = false;
++#endif
+   }
+ 
+   if (op->getBoolOption('i')) {
+@@ -12694,6 +12706,12 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+   if (!InitOptionParser(op)) {
+     return AsVariant(EXIT_FAILURE);
+   }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (gShellExtension && gShellExtension->addOptions &&
++      !gShellExtension->addOptions(op)) {
++    return AsVariant(EXIT_FAILURE);
++  }
++#endif
+ 
+   switch (op.parseArgs(argc, argv)) {
+     case OptionParser::EarlyExit:
+@@ -12714,6 +12732,12 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+   if (!SetGlobalOptionsPreJSInit(op)) {
+     return AsVariant(EXIT_FAILURE);
+   }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (gShellExtension && gShellExtension->optionsParsed &&
++      !gShellExtension->optionsParsed(op)) {
++    return AsVariant(EXIT_FAILURE);
++  }
++#endif
+ 
+   if (!JS::SetLoggingInterface(shellLoggingInterface)) {
+     return AsVariant(1);
+@@ -12756,6 +12780,13 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+ 
+   auto destroyCx = MakeScopeExit([cx] { JS_DestroyContext(cx); });
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (gShellExtension && gShellExtension->contextCreated &&
++      !gShellExtension->contextCreated(cx)) {
++    return AsVariant(1);
++  }
++#endif
++
+   UniquePtr<ShellContext> sc =
+       MakeUnique<ShellContext>(cx, ShellContext::MainThread);
+   if (!sc || !sc->registerWithCx(cx)) {
+@@ -12861,14 +12892,15 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+   }
+ }
+ 
+-// N.B.: When Wizer support is enabled, a separate main() is used.
+-#ifndef JS_SHELL_WIZER
++// N.B.: When Wizer support is enabled, a separate main() is used, and the
++// `jsshell` library build leaves main() to the embedding shell.
++#if !defined(JS_SHELL_WIZER) && !defined(JS_SHELL_LIBRARY)
+ 
+ int main(int argc, char** argv) {
+   return ShellMain(argc, argv, /* returnContext = */ false).as<int>();
+ }
+ 
+-#endif  // !JS_SHELL_WIZER
++#endif  // !JS_SHELL_WIZER && !JS_SHELL_LIBRARY
+ 
+ bool InitOptionParser(OptionParser& op) {
+   op.setDescription(
+diff --git a/js/src/shell/jsshell.h b/js/src/shell/jsshell.h
+index 35e04fae1a8d..1df3eeb09987 100644
+--- a/js/src/shell/jsshell.h
++++ b/js/src/shell/jsshell.h
+@@ -279,6 +279,31 @@ extern ShellContext* GetShellContext(JSContext* cx);
+ mozilla::Variant<JSAndShellContext, int> ShellMain(int argc, char** argv,
+                                                    bool retainContext);
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++}  // namespace shell
++namespace cli {
++class OptionParser;
++}  // namespace cli
++namespace shell {
++
++// Extension points an external compiler tier's own shell registers before
++// calling ShellMain (built as the `jsshell` library under
++// --enable-external-compiler-hooks). Every member may be null. `primary`
++// marks the positional script, or -e code when there is no positional script.
++struct ShellExtension {
++  bool (*addOptions)(cli::OptionParser& op);
++  bool (*optionsParsed)(cli::OptionParser& op);
++  bool (*contextCreated)(JSContext* cx);
++  bool (*defineGlobals)(JSContext* cx, JS::HandleObject global);
++  bool (*wantsFullParse)(bool primary);
++  bool (*scriptCompiled)(JSContext* cx, JS::HandleScript script, bool primary);
++  bool (*scriptExecuted)(JSContext* cx, JS::HandleScript script, bool primary);
++};
++
++void SetShellExtension(const ShellExtension* ext);
++const ShellExtension* GetShellExtension();
++#endif
++
+ } /* namespace shell */
+ } /* namespace js */
+ 
+diff --git a/js/src/shell/lib/moz.build b/js/src/shell/lib/moz.build
+new file mode 100644
+index 000000000000..a04284e664f1
+--- /dev/null
++++ b/js/src/shell/lib/moz.build
+@@ -0,0 +1,54 @@
++# -*- Mode: python; indent-tabs-mode: nil; tab-width: 40 -*-
++# vim: set filetype=python:
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++# The JS shell as a static library (--enable-external-compiler-hooks): the
++# shell minus main() and the wizer entry point, so an external compiler tier
++# can link its own shell around js::shell::ShellMain with a ShellExtension
++# registered. The archive folds in the shell's static dependencies (mozglue,
++# mfbt); the engine itself stays in libjs_static.a. Everything an external
++# link needs is installed under dist/lib.
++
++Library("jsshell")
++FORCE_STATIC_LIB = True
++NO_EXPAND_LIBS = True
++
++USE_LIBS += ["mozglue"]
++
++include("../../js-config.mozbuild")
++include("../../js-cxxflags.mozbuild")
++
++UNIFIED_SOURCES += [
++    "../js.cpp",
++    "../jsoptparse.cpp",
++    "../jsshell.cpp",
++    "../ModuleLoader.cpp",
++    "../OSObject.cpp",
++    "../ShellModuleObjectWrapper.cpp",
++    "../WasmTesting.cpp",
++]
++
++SOURCES += [
++    "../CommonShellGlobals.cpp",
++]
++
++DEFINES["EXPORT_JS_API"] = True
++DEFINES["MOZ_HAS_MOZGLUE"] = True
++DEFINES["JS_SHELL_LIBRARY"] = True
++
++LOCAL_INCLUDES += [
++    "!../..",
++    "../..",
++    "/third_party/wizer",
++]
++
++rust_profile = "debug" if CONFIG["MOZ_DEBUG_RUST"] else "release"
++
++OBJDIR_FILES.dist.lib += [
++    "!/build/pure_virtual/libpure_virtual.a",
++    "!/js/src/build/libjs_static.a",
++    "!/js/src/shell/lib/libjsshell.a",
++    "!/%s/%s/libjsrust.a" % (CONFIG["RUST_TARGET"], rust_profile),
++]
+diff --git a/js/src/shell/moz.build b/js/src/shell/moz.build
+index e8ca9e67a1e2..782c8cbcd4a5 100644
+--- a/js/src/shell/moz.build
++++ b/js/src/shell/moz.build
+@@ -5,6 +5,8 @@
+ # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ 
+ GeckoProgram("js", linkage=None)
++if CONFIG["JS_EXTERNAL_COMPILER_HOOKS"]:
++    DIRS += ["lib"]
+ if CONFIG["JS_BUNDLED_EDITLINE"]:
+     DIRS += ["../editline"]
+     USE_LIBS += ["editline"]
+@@ -25,6 +27,10 @@ UNIFIED_SOURCES += [
+     "wizer.cpp",
+ ]
+ 
++SOURCES += [
++    "CommonShellGlobals.cpp",
++]
++
+ if CONFIG["FUZZING_INTERFACES"]:
+     UNIFIED_SOURCES += ["jsrtfuzzing/jsrtfuzzing.cpp"]
+     if CONFIG["LIBFUZZER"]:
+diff --git a/js/src/shell/wizer.cpp b/js/src/shell/wizer.cpp
+index 3e0a3fa91a11..3a0f43e3d184 100644
+--- a/js/src/shell/wizer.cpp
++++ b/js/src/shell/wizer.cpp
+@@ -46,8 +46,10 @@ int main(int argc, char** argv) {
+ 
+     // Look up a function called "main" in the global.
+     JS::Rooted<JS::Value> ret(cx);
+-    if (!JS_CallFunctionName(cx, cx->global(), "main",
+-                             JS::HandleValueArray::empty(), &ret)) {
++    // `glob`, not `cx->global()`: the latter is a Handle<GlobalObject*>,
++    // which does not convert to the Handle<JSObject*> this takes.
++    if (!JS_CallFunctionName(cx, glob, "main", JS::HandleValueArray::empty(),
++                             &ret)) {
+       fprintf(stderr, "Failed to call main() in Wizened JS source!\n");
+       abort();
+     }
+diff --git a/js/src/vm/BytecodeUtil.cpp b/js/src/vm/BytecodeUtil.cpp
+index 37e58ff749b6..1787f31b1434 100644
+--- a/js/src/vm/BytecodeUtil.cpp
++++ b/js/src/vm/BytecodeUtil.cpp
+@@ -2467,8 +2467,18 @@ static bool DecompileArgumentFromStack(JSContext* cx, int formalIndex,
+    * called the intrinsic.
+    */
+   FrameIter frameIter(cx);
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // An external tier's frames are invisible to FrameIter, so the expected
++  // frame may be missing entirely; fall back to no decompiled name rather
++  // than walking some unrelated frame.
++  if (frameIter.done() || !frameIter.hasScript() ||
++      !frameIter.script()->selfHosted()) {
++    return true;
++  }
++#else
+   MOZ_ASSERT(!frameIter.done());
+   MOZ_ASSERT(frameIter.script()->selfHosted());
++#endif
+ 
+   /*
+    * Get the second-to-top frame, the non-self-hosted caller of the builtin
+diff --git a/js/src/vm/CommonPropertyNames.h b/js/src/vm/CommonPropertyNames.h
+index bce1ddfe35e3..190bc413ce72 100644
+--- a/js/src/vm/CommonPropertyNames.h
++++ b/js/src/vm/CommonPropertyNames.h
+@@ -78,6 +78,8 @@
+   MACRO_(caseFirst, "caseFirst")                                               \
+   MACRO_(catch_, "catch")                                                      \
+   MACRO_(cause, "cause")                                                       \
++  MACRO_(charAt, "charAt")                                                     \
++  MACRO_(charCodeAt, "charCodeAt")                                             \
+   MACRO_(chunks, "chunks")                                                     \
+   MACRO_(class_, "class")                                                      \
+   MACRO_(cleanupSome, "cleanupSome")                                           \
+@@ -199,6 +201,7 @@
+   MACRO_(frame, "frame")                                                       \
+   MACRO_(from, "from")                                                         \
+   MACRO_(fromBase64, "fromBase64")                                             \
++  MACRO_(fromCharCode, "fromCharCode")                                         \
+   MACRO_(fromHex, "fromHex")                                                   \
+   MACRO_(fulfilled, "fulfilled")                                               \
+   MACRO_(gcCycleNumber, "gcCycleNumber")                                       \
+diff --git a/js/src/vm/EnvironmentObject.cpp b/js/src/vm/EnvironmentObject.cpp
+index d845440e07b9..5e8b145bc2d8 100644
+--- a/js/src/vm/EnvironmentObject.cpp
++++ b/js/src/vm/EnvironmentObject.cpp
+@@ -3907,6 +3907,16 @@ static bool InitGlobalOrEvalDeclarations(
+                                       attrs)) {
+           return false;
+         }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++        // A global lexical binding shadows any same-named global-object
++        // binding for every later read and write.
++        if (lexicalEnv->is<GlobalLexicalEnvironmentObject>() &&
++            cx->externalCompilerHooks() &&
++            cx->externalCompilerHooks()->globalLexicalShadowAdded) {
++          cx->externalCompilerHooks()->globalLexicalShadowAdded(
++              cx, id.get().asRawBits());
++        }
++#endif
+ 
+         break;
+       }
+diff --git a/js/src/vm/ExternalCompilerHooks.cpp b/js/src/vm/ExternalCompilerHooks.cpp
+new file mode 100644
+index 000000000000..6c79aa7df56c
+--- /dev/null
++++ b/js/src/vm/ExternalCompilerHooks.cpp
+@@ -0,0 +1,92 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "js/ExternalCompilerHooks.h"
++
++#include "vm/JSContext.h"
++#include "vm/JSObject.h"
++#include "vm/NativeObject.h"
++#include "vm/Runtime.h"
++
++using namespace js;
++
++void JSRuntime::setExternalCompilerHooks(JS::ExternalCompilerHooks* hooks) {
++  externalCompilerHooks_ = hooks;
++  externalObjectStoreMask_ =
++      hooks ? (hooks->storeClearMask | hooks->storeNonNumberClearMask) : 0;
++}
++
++JS_PUBLIC_API void JS::SetExternalCompilerHooks(JSRuntime* rt,
++                                                ExternalCompilerHooks* hooks) {
++  rt->setExternalCompilerHooks(hooks);
++  if (JSContext* cx = rt->mainContextFromAnyThread()) {
++    cx->updateExternalCompilerHooks();
++  }
++}
++
++JS_PUBLIC_API JS::ExternalCompilerHooks* JS::GetExternalCompilerHooks(
++    JSRuntime* rt) {
++  return rt->externalCompilerHooks();
++}
++
++void JSContext::updateExternalCompilerHooks() {
++  destroyExternalCompilerState();
++  externalCompilerHooks_ = runtime()->externalCompilerHooks();
++  if (externalCompilerHooks_ && externalCompilerHooks_->newContext) {
++    externalCompilerState_ = externalCompilerHooks_->newContext(this);
++  }
++}
++
++void JSContext::destroyExternalCompilerState() {
++  if (externalCompilerState_ && externalCompilerHooks_ &&
++      externalCompilerHooks_->destroyContext) {
++    externalCompilerHooks_->destroyContext(this, externalCompilerState_);
++  }
++  externalCompilerState_ = nullptr;
++}
++
++JS_PUBLIC_API void js::ExternalObjectDemoted(JSContext* cx, JSObject* obj,
++                                             uintptr_t oldWord,
++                                             JS::ExternalObjectMutation why) {
++  JS::ExternalCompilerHooks* hooks = cx->externalCompilerHooks();
++  if (hooks && hooks->objectDemoted) {
++    hooks->objectDemoted(cx, obj, oldWord, why);
++  }
++}
++
++JS_PUBLIC_API void js::ExternalObjectStore(JSObject* obj, const JS::Value& v) {
++  // The store chokes carry no context: reach the table through the object's
++  // runtime, and report on the runtime's main context.
++  JSRuntime* rt = obj->runtimeFromAnyThread();
++  JS::ExternalCompilerHooks* hooks = rt->externalCompilerHooks();
++  if (!hooks) {
++    return;
++  }
++  uintptr_t w = obj->externalWord();
++  if ((w & rt->externalObjectStoreMask()) == 0) {
++    return;
++  }
++  uintptr_t nw = w & ~hooks->storeClearMask;
++  if (!v.isNumber()) {
++    nw &= ~hooks->storeNonNumberClearMask;
++  }
++  if (nw != w) {
++    obj->setExternalWord(nw);
++    if (hooks->objectDemoted) {
++      hooks->objectDemoted(rt->mainContextFromAnyThread(), obj, w,
++                           JS::ExternalObjectMutation::StoredValue);
++    }
++  }
++}
++
++JS_PUBLIC_API void js::ExternalPropertyAdded(JSContext* cx, NativeObject* obj,
++                                             JS::PropertyKey id,
++                                             uint32_t slot) {
++  JS::ExternalCompilerHooks* hooks = cx->externalCompilerHooks();
++  if (hooks && hooks->propertyAdded) {
++    hooks->propertyAdded(cx, obj, id, slot, obj->numFixedSlots());
++  }
++}
+diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
+index 743716e06028..0d5ee7060f70 100644
+--- a/js/src/vm/Interpreter.cpp
++++ b/js/src/vm/Interpreter.cpp
+@@ -51,6 +51,9 @@
+ #include "vm/GeneratorObject.h"
+ #include "vm/Iteration.h"
+ #include "vm/JSContext.h"
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++#  include "js/ExternalCompilerHooks.h"
++#endif
+ #include "vm/JSFunction.h"
+ #include "vm/JSObject.h"
+ #include "vm/JSScript.h"
+@@ -457,6 +460,20 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+       break;
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (state.script()->externalTierWord() && cx->externalCompilerHooks() &&
++      cx->externalCompilerHooks()->enterScript) {
++    switch (cx->externalCompilerHooks()->enterScript(cx, state)) {
++      case JS::ExternalEnterStatus::Error:
++        return false;
++      case JS::ExternalEnterStatus::Ok:
++        return true;
++      case JS::ExternalEnterStatus::NotEntered:
++        break;
++    }
++  }
++#endif
++
+   bool ok = MaybeEnterInterpreterTrampoline(cx, state);
+   if (!ok) {
+     AssertExceptionResult(cx);
+@@ -3321,6 +3338,24 @@ bool MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER js::Interpret(JSContext* cx,
+               break;
+           }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++          if (funScript->externalTierWord() && cx->externalCompilerHooks() &&
++              cx->externalCompilerHooks()->enterCall) {
++            switch (cx->externalCompilerHooks()->enterCall(
++                cx, args, funScript, bool(construct))) {
++              case JS::ExternalEnterStatus::Error:
++                goto error;
++              case JS::ExternalEnterStatus::Ok:
++                interpReturnOK = true;
++                CHECK_BRANCH();
++                REGS.sp = args.spAfterCall();
++                goto jit_return;
++              case JS::ExternalEnterStatus::NotEntered:
++                break;
++            }
++          }
++#endif
++
+ #ifdef NIGHTLY_BUILD
+           // If entry trampolines are enabled, call back into
+           // MaybeEnterInterpreterTrampoline so we can generate an
+@@ -4232,6 +4267,35 @@ bool MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER js::Interpret(JSContext* cx,
+     END_CASE(CheckResumeKind)
+ 
+     CASE(Resume) {
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++      if (cx->externalCompilerHooks() &&
++          cx->externalCompilerHooks()->isForeignGenerator) {
++        // A generator whose frame belongs to the external tier cannot be
++        // resumed by the interpreter: the tier runs it to its next suspend
++        // point or completion synchronously and yields the result value.
++        auto* genRaw = &REGS.sp[-3].toObject().as<AbstractGeneratorObject>();
++        if (cx->externalCompilerHooks()->isForeignGenerator(cx, genRaw)) {
++          bool ok;
++          {
++            // The rooted scope closes before the dispatch below: an indirect
++            // goto cannot leave a scope holding non-trivial locals.
++            Rooted<AbstractGeneratorObject*> gen(cx, genRaw);
++            ReservedRooted<Value> val(&rootValue0, REGS.sp[-2]);
++            ReservedRooted<Value> resumeKindVal(&rootValue1, REGS.sp[-1]);
++            // Inputs are rooted here; consume the three operands and write
++            // the completion value in their place.
++            REGS.sp -= 2;
++            ok = cx->externalCompilerHooks()->resumeGenerator(
++                     cx, gen, val, resumeKindVal, REGS.stackHandleAt(-1)) ==
++                 JS::ExternalEnterStatus::Ok;
++          }
++          if (!ok) {
++            goto error;
++          }
++          ADVANCE_AND_DISPATCH(JSOpLength_Resume);
++        }
++      }
++#endif
+       {
+         Rooted<AbstractGeneratorObject*> gen(
+             cx, &REGS.sp[-3].toObject().as<AbstractGeneratorObject>());
+diff --git a/js/src/vm/JSContext.cpp b/js/src/vm/JSContext.cpp
+index 9e8eadd80104..b974ead9e0ae 100644
+--- a/js/src/vm/JSContext.cpp
++++ b/js/src/vm/JSContext.cpp
+@@ -138,6 +138,10 @@ bool JSContext::init() {
+     return false;
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  updateExternalCompilerHooks();
++#endif
++
+ #ifdef DEBUG
+   // Set the initialized_ last, so that ProtectedData checks will allow us to
+   // initialize this context before it becomes the runtime's active context.
+@@ -213,6 +217,10 @@ void js::DestroyContext(JSContext* cx) {
+ 
+   cx->checkNoGCRooters();
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  cx->destroyExternalCompilerState();
++#endif
++
+   // Cancel all off thread compiles. Completed compiles may try to
+   // interrupt this context. See HelperThread::handleIonWorkload.
+   CancelOffThreadCompile(cx->runtime());
+@@ -1548,6 +1556,13 @@ void JSContext::trace(JSTracer* trc) {
+ #ifdef ENABLE_WASM_JSPI
+   wasm().promiseIntegration.trace(trc);
+ #endif
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // Traced on every GC, minor and major, unlike an embedding extra-roots
++  // tracer: the external tier's frames may hold nursery pointers.
++  if (externalCompilerHooks_ && externalCompilerHooks_->traceRoots) {
++    externalCompilerHooks_->traceRoots(this, trc);
++  }
++#endif
+ }
+ 
+ JS::NativeStackLimit JSContext::stackLimitForJitCode(JS::StackKind kind) {
+diff --git a/js/src/vm/JSContext.h b/js/src/vm/JSContext.h
+index 5330f54df7da..7b1aad337156 100644
+--- a/js/src/vm/JSContext.h
++++ b/js/src/vm/JSContext.h
+@@ -371,7 +371,7 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
+   }
+ 
+   // For JIT use.
+-  static size_t offsetOfZone() { return offsetof(JSContext, zone_); }
++  static constexpr size_t offsetOfZone() { return offsetof(JSContext, zone_); }
+ 
+   // Current global. This is only safe to use within the scope of the
+   // AutoRealm from which it's called.
+@@ -396,7 +396,9 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
+   JSRuntime* runtime() { return runtime_; }
+   const JSRuntime* runtime() const { return runtime_; }
+ 
+-  static size_t offsetOfRealm() { return offsetof(JSContext, realm_); }
++  static constexpr size_t offsetOfRealm() {
++    return offsetof(JSContext, realm_);
++  }
+ 
+   friend class JS::AutoSaveExceptionState;
+   friend class js::jit::DebugModeOSRVolatileJitFrameIter;
+@@ -468,6 +470,25 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
+   js::InterpreterStack& interpreterStack() {
+     return runtime()->interpreterStack();
+   }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++ private:
++  // The runtime's external compiler hook table, cached here, and the tier's
++  // opaque per-context state (js/ExternalCompilerHooks.h).
++  JS::ExternalCompilerHooks* externalCompilerHooks_ = nullptr;
++  void* externalCompilerState_ = nullptr;
++
++ public:
++  JS::ExternalCompilerHooks* externalCompilerHooks() const {
++    return externalCompilerHooks_;
++  }
++  void* getExternalCompilerState() const { return externalCompilerState_; }
++  void setExternalCompilerState(void* state) {
++    externalCompilerState_ = state;
++  }
++  // Re-cache the runtime's table, destroying and recreating the state.
++  void updateExternalCompilerHooks();
++  void destroyExternalCompilerState();
++#endif
+ #ifdef ENABLE_PORTABLE_BASELINE_INTERP
+   js::PortableBaselineStack& portableBaselineStack() {
+     return runtime()->portableBaselineStack();
+diff --git a/js/src/vm/JSFunction-inl.h b/js/src/vm/JSFunction-inl.h
+index 2b003c1ef1d9..f058d709f232 100644
+--- a/js/src/vm/JSFunction-inl.h
++++ b/js/src/vm/JSFunction-inl.h
+@@ -15,6 +15,9 @@
+ #include "vm/JSContext-inl.h"
+ #include "vm/JSObject-inl.h"
+ #include "vm/NativeObject-inl.h"
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++#  include "js/ExternalCompilerHooks.h"
++#endif
+ 
+ namespace js {
+ 
+@@ -151,6 +154,14 @@ inline JSAtom* JSFunction::infallibleGetUnresolvedName(JSContext* cx) {
+   size_t propertyCountEstimate =
+       script->immutableScriptData()->propertyCountEstimate;
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (cx->externalCompilerHooks()) {
++    propertyCountEstimate = std::max(
++        propertyCountEstimate,
++        size_t(cx->externalCompilerHooks()->minConstructorThisSlots));
++  }
++#endif
++
+   // Choose the alloc assuming at least the default NewObjectKind slots, but
+   // bigger if our estimate shows we need it.
+   allocKind = js::gc::GetGCObjectKind(std::max(
+diff --git a/js/src/vm/JSObject.cpp b/js/src/vm/JSObject.cpp
+index 1833bdd89c63..3147822b51d7 100644
+--- a/js/src/vm/JSObject.cpp
++++ b/js/src/vm/JSObject.cpp
+@@ -1344,6 +1344,13 @@ void JSObject::swap(JSContext* cx, HandleObject a, HandleObject b,
+     }
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  a->externalStructuralChange(
++      cx, JS::ExternalObjectMutation::Swap);
++  b->externalStructuralChange(
++      cx, JS::ExternalObjectMutation::Swap);
++#endif
++
+   // Restore original unique IDs.
+   if ((aid || bid) && (na || nb)) {
+     if ((aid && !gc::SetOrUpdateUniqueId(cx, a, aid)) ||
+diff --git a/js/src/vm/JSObject.h b/js/src/vm/JSObject.h
+index 84acd43ed81c..d76801e74c26 100644
+--- a/js/src/vm/JSObject.h
++++ b/js/src/vm/JSObject.h
+@@ -11,6 +11,7 @@
+ 
+ #include "jsfriendapi.h"
+ 
++#include "js/ExternalCompilerHooks.h"
+ #include "js/friend/ErrorMessages.h"  // JSErrNum
+ #include "js/GCVector.h"
+ #include "js/shadow/Zone.h"  // JS::shadow::Zone
+@@ -96,7 +97,13 @@ class JSObject
+   // Like shape(), but uses getAtomic to read the header word.
+   js::Shape* shapeMaybeForwarded() const { return headerPtrAtomic(); }
+ 
+-#ifndef JS_64BIT
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // The external tier's per-object word (js/ExternalCompilerHooks.h), zeroed
++  // at birth in initShape. Pointer-sized, not 32-bit: on 32-bit platforms it
++  // takes the place of the alignment padding below, so the object does not
++  // grow.
++  uintptr_t externalWord_;
++#elif !defined(JS_64BIT)
+   // Ensure fixed slots have 8-byte alignment on 32-bit platforms.
+   uint32_t padding_;
+ #endif
+@@ -151,7 +158,39 @@ class JSObject
+     // shape we still have to initialize.
+     MOZ_ASSERT(Cell::zone() == shape->zone());
+     initHeaderPtr(shape);
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    externalWord_ = 0;
++#endif
++  }
++
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // The external tier's per-object word. Its bits are the tier's own; the
++  // engine only resets it on a structural change and applies the tier's
++  // slot-store masks (js/ExternalCompilerHooks.h).
++  uintptr_t externalWord() const { return externalWord_; }
++  void setExternalWord(uintptr_t w) { externalWord_ = w; }
++  static constexpr size_t offsetOfExternalWord() {
++    return offsetof(JSObject, externalWord_);
+   }
++  // Structural-change choke: the word describes the object's current
++  // structure, so a change resets it and reports the old word.
++  void externalStructuralChange(JSContext* cx, JS::ExternalObjectMutation why) {
++    uintptr_t w = externalWord_;
++    if (MOZ_LIKELY(w == 0)) {
++      return;
++    }
++    externalWord_ = 0;
++    js::ExternalObjectDemoted(cx, this, w, why);
++  }
++  // Slot-store choke: one load and a branch unless the object carries an
++  // external word; the store policy is applied out of line.
++  MOZ_ALWAYS_INLINE void externalStoreCheck(const JS::Value& v) {
++    if (MOZ_LIKELY(externalWord_ == 0)) {
++      return;
++    }
++    js::ExternalObjectStore(this, v);
++  }
++#endif
+   void setShape(js::Shape* shape) {
+     MOZ_ASSERT(maybeCCWRealm() == shape->realm());
+     setHeaderPtr(shape);
+diff --git a/js/src/vm/JSScript.cpp b/js/src/vm/JSScript.cpp
+index 9a5f260cbf62..0df69a7e8a17 100644
+--- a/js/src/vm/JSScript.cpp
++++ b/js/src/vm/JSScript.cpp
+@@ -80,6 +80,10 @@
+ #  include "vtune/VTuneWrapper.h"
+ #endif
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++#  include "js/ExternalCompilerHooks.h"
++#endif
++
+ #include "gc/Marking-inl.h"
+ #include "vm/BytecodeIterator-inl.h"
+ #include "vm/BytecodeLocation-inl.h"
+@@ -1678,6 +1682,19 @@ bool ScriptSource::assignSource(FrontendContext* fc,
+   MOZ_ASSERT(data.is<Missing>(),
+              "source assignment should only occur on fresh ScriptSources");
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // Source text is entering the frontend, and this is the one place every
++  // compile-from-source passes through (delazification reuses an existing
++  // ScriptSource and does not come here). Report before anything can run,
++  // and before the option-dependent early returns below.
++  if (JSContext* cx = fc->maybeCurrentJSContext()) {
++    if (cx->externalCompilerHooks() &&
++        cx->externalCompilerHooks()->sourceAssigned) {
++      cx->externalCompilerHooks()->sourceAssigned(cx);
++    }
++  }
++#endif
++
+   mutedErrors_ = options.mutedErrors();
+   delazificationMode_ = options.eagerDelazificationStrategy();
+ 
+diff --git a/js/src/vm/JSScript.h b/js/src/vm/JSScript.h
+index bed6c7d01f05..000cf4a5e296 100644
+--- a/js/src/vm/JSScript.h
++++ b/js/src/vm/JSScript.h
+@@ -1411,6 +1411,10 @@ class alignas(uintptr_t) PrivateScriptData final
+     return sizeof(PrivateScriptData);
+   }
+ 
++  static constexpr size_t offsetOfNGCThings() {
++    return offsetof(PrivateScriptData, ngcthings);
++  }
++
+   // Accessors for typed array spans.
+   mozilla::Span<JS::GCCellPtr> gcthings() {
+     Offset offset = offsetOfGCThings();
+@@ -1576,6 +1580,13 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
+   UniquePtr<Weval> weval_ = {};
+ #endif
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // The external tier's pointer-sized per-script word
++  // (js/ExternalCompilerHooks.h): 0 means the tier has no code for this
++  // script and the engine never consults it.
++  uintptr_t externalTierWord_ = 0;
++#endif
++
+   // End of fields.
+ 
+   BaseScript(uint8_t* stubEntry, JSFunction* function,
+@@ -1599,6 +1610,14 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
+ 
+   bool isUsingInterpreterTrampoline(JSRuntime* rt) const;
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  uintptr_t externalTierWord() const { return externalTierWord_; }
++  void setExternalTierWord(uintptr_t w) { externalTierWord_ = w; }
++  static constexpr size_t offsetOfExternalTierWord() {
++    return offsetof(BaseScript, externalTierWord_);
++  }
++#endif
++
+   // Canonical function for the script, if it has a function. For top-level
+   // scripts this is nullptr.
+   JSFunction* function() const { return function_; }
+@@ -1751,6 +1770,9 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
+   static constexpr size_t offsetOfWarmUpData() {
+     return offsetof(BaseScript, warmUpData_);
+   }
++  static constexpr size_t offsetOfFunction() {
++    return offsetof(BaseScript, function_);
++  }
+ 
+ #if defined(DEBUG) || defined(JS_JITSPEW)
+   void dumpStringContent(js::GenericPrinter& out) const;
+diff --git a/js/src/vm/MatchPairs.h b/js/src/vm/MatchPairs.h
+index 6bb60b46ddb3..66f56cd3c452 100644
+--- a/js/src/vm/MatchPairs.h
++++ b/js/src/vm/MatchPairs.h
+@@ -125,6 +125,16 @@ class VectorMatchPairs : public MatchPairs {
+  protected:
+   friend class RegExpShared;
+   friend class RegExpStatics;
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++ public:
++  // An external compiler tier's regexp fast paths allocate their own pairs
++  // without going through RegExpShared::execute.
++  bool externalAllocOrExpandArray(size_t pairCount) {
++    return allocOrExpandArray(pairCount);
++  }
++
++ protected:
++#endif
+ 
+   /* MatchPair buffer allocator: set pairs_ and pairCount_. */
+   bool allocOrExpandArray(size_t pairCount);
+diff --git a/js/src/vm/NativeObject.cpp b/js/src/vm/NativeObject.cpp
+index 6297e6f396ae..8280b96ea46c 100644
+--- a/js/src/vm/NativeObject.cpp
++++ b/js/src/vm/NativeObject.cpp
+@@ -24,6 +24,10 @@
+ #include "vm/PlainObject.h"         // js::PlainObject
+ #include "vm/TypedArrayObject.h"
+ #include "vm/Watchtower.h"
++
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++#  include "vm/GlobalObject.h"
++#endif
+ #include "gc/Nursery-inl.h"
+ #include "vm/JSObject-inl.h"
+ #include "vm/Shape-inl.h"
+@@ -1475,6 +1479,11 @@ bool js::AddSlotAndCallAddPropHook(JSContext* cx, Handle<NativeObject*> obj,
+     return false;
+   }
+   obj->initSlot(slot, v);
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (obj->externalWord()) {
++    ExternalPropertyAdded(cx, obj, id, slot);
++  }
++#endif
+ 
+   if (MOZ_UNLIKELY(hasUnpreservedWrapper)) {
+     MaybePreserveDOMWrapper(cx, obj);
+@@ -1589,6 +1598,12 @@ bool js::NativeDefineProperty(JSContext* cx, Handle<NativeObject*> obj,
+                               HandleId id, Handle<PropertyDescriptor> desc_,
+                               ObjectOpResult& result) {
+   desc_.assertValid();
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (MOZ_UNLIKELY(obj->is<GlobalObject>()) && cx->externalCompilerHooks() &&
++      cx->externalCompilerHooks()->globalKeyChanged) {
++    cx->externalCompilerHooks()->globalKeyChanged(cx, id);
++  }
++#endif
+ 
+   // Section numbers and step numbers below refer to ES2025, draft rev
+   // ac21460fedf4b926520b06c9820bdbebad596a8b.
+@@ -2446,6 +2461,12 @@ static bool NativeSetExistingDataProperty(JSContext* cx,
+ 
+   if (prop.isDataProperty()) {
+     // The common path. Standard data property.
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    if (MOZ_UNLIKELY(obj->is<GlobalObject>()) && cx->externalCompilerHooks() &&
++        cx->externalCompilerHooks()->globalDataStored) {
++      cx->externalCompilerHooks()->globalDataStored(cx, id, v.asRawBits());
++    }
++#endif
+     obj->setSlot(prop.slot(), v);
+     return result.succeed();
+   }
+@@ -2865,6 +2886,12 @@ bool js::NativeDeleteProperty(JSContext* cx, Handle<NativeObject*> obj,
+                               result)) {
+     return false;
+   }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (MOZ_UNLIKELY(obj->is<GlobalObject>()) && cx->externalCompilerHooks() &&
++      cx->externalCompilerHooks()->globalKeyChanged) {
++    cx->externalCompilerHooks()->globalKeyChanged(cx, id);
++  }
++#endif
+   if (!result) {
+     return true;
+   }
+diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
+index 74eb0d0daa9b..12dbdc35eb22 100644
+--- a/js/src/vm/NativeObject.h
++++ b/js/src/vm/NativeObject.h
+@@ -361,18 +361,18 @@ class ObjectElements {
+ 
+   bool isSharedMemory() const { return flags & SHARED_MEMORY; }
+ 
+-  static int offsetOfFlags() {
++  static constexpr int offsetOfFlags() {
+     return int(offsetof(ObjectElements, flags)) - int(sizeof(ObjectElements));
+   }
+-  static int offsetOfInitializedLength() {
++  static constexpr int offsetOfInitializedLength() {
+     return int(offsetof(ObjectElements, initializedLength)) -
+            int(sizeof(ObjectElements));
+   }
+-  static int offsetOfCapacity() {
++  static constexpr int offsetOfCapacity() {
+     return int(offsetof(ObjectElements, capacity)) -
+            int(sizeof(ObjectElements));
+   }
+-  static int offsetOfLength() {
++  static constexpr int offsetOfLength() {
+     return int(offsetof(ObjectElements, length)) - int(sizeof(ObjectElements));
+   }
+ 
+@@ -1170,6 +1170,9 @@ class NativeObject : public JSObject {
+     MOZ_ASSERT(AtomIsMarked(zoneFromAnyThread(), v));
+     MOZ_ASSERT_IF(v.isMagic() && v.whyMagic() == JS_ELEMENTS_HOLE,
+                   !denseElementsArePacked());
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    externalStoreCheck(v);
++#endif
+   }
+ 
+   MOZ_ALWAYS_INLINE void setSlot(uint32_t slot, const Value& value) {
+@@ -1186,6 +1189,9 @@ class NativeObject : public JSObject {
+   }
+ 
+   MOZ_ALWAYS_INLINE void initSlotUnchecked(uint32_t slot, const Value& value) {
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    externalStoreCheck(value);
++#endif
+     getSlotAddressUnchecked(slot)->init(this, HeapSlot::Slot, slot, value);
+   }
+ 
+@@ -1743,7 +1749,9 @@ class NativeObject : public JSObject {
+   }
+ 
+   /* JIT Accessors */
+-  static size_t offsetOfElements() { return offsetof(NativeObject, elements_); }
++  static constexpr size_t offsetOfElements() {
++    return offsetof(NativeObject, elements_);
++  }
+   static size_t offsetOfFixedElements() {
+     return sizeof(NativeObject) + sizeof(ObjectElements);
+   }
+@@ -1763,7 +1771,9 @@ class NativeObject : public JSObject {
+     MOZ_ASSERT(offset % sizeof(Value) == 0);
+     return offset / sizeof(Value);
+   }
+-  static size_t offsetOfSlots() { return offsetof(NativeObject, slots_); }
++  static constexpr size_t offsetOfSlots() {
++    return offsetof(NativeObject, slots_);
++  }
+ };
+ 
+ inline void NativeObject::privatePreWriteBarrier(HeapSlot* pprivate) {
+diff --git a/js/src/vm/Opcodes.h b/js/src/vm/Opcodes.h
+index c1ca3c867eda..0792b4e3f183 100644
+--- a/js/src/vm/Opcodes.h
++++ b/js/src/vm/Opcodes.h
+@@ -13,6 +13,18 @@
+ 
+ #include "js/TypeDecls.h"
+ 
++/*
++ * Bytecode semantics version, for consumers of the opcode table outside the
++ * engine (an external compiler tier compiles this bytecode, see
++ * js/public/ExternalCompilerHooks.h). Bump it whenever the meaning of the
++ * bytecode changes: an opcode's semantics, operand format, stack effect or
++ * number, or a change in what the bytecode emitter produces for a construct,
++ * even when the FOR_EACH_OPCODE table below keeps the same shape. A consumer
++ * compares it against the version it was written for and refuses to build
++ * on a mismatch, so a bump is the signal that its lowerings need review.
++ */
++#define JSOP_SEMANTICS_VERSION 1
++
+ // clang-format off
+ /*
+  * [SMDOC] Bytecode Definitions
+diff --git a/js/src/vm/RealmFuses.cpp b/js/src/vm/RealmFuses.cpp
+index 33369ccb99b3..960da56fbd17 100644
+--- a/js/src/vm/RealmFuses.cpp
++++ b/js/src/vm/RealmFuses.cpp
+@@ -10,6 +10,9 @@
+ #include "builtin/MapObject.h"
+ #include "builtin/Promise.h"
+ #include "builtin/RegExp.h"
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++#  include "builtin/String.h"
++#endif
+ #include "builtin/WeakMapObject.h"
+ #include "builtin/WeakSetObject.h"
+ #include "js/experimental/TypedData.h"
+@@ -643,3 +646,25 @@ bool js::OptimizeWeakSetPrototypeAddFuse::checkInvariant(JSContext* cx) {
+   return ObjectHasDataPropertyFunction(proto, NameToId(cx->names().add),
+                                        WeakSetObject::add);
+ }
++
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++bool js::OptimizeStringCharOpsFuse::checkInvariant(JSContext* cx) {
++  auto* proto = cx->global()->maybeGetPrototype<NativeObject>(JSProto_String);
++  if (!proto) {
++    // No proto, invariant still holds
++    return true;
++  }
++  if (!ObjectHasDataPropertyFunction(proto, NameToId(cx->names().charCodeAt),
++                                     js::str_charCodeAt) ||
++      !ObjectHasDataPropertyFunction(proto, NameToId(cx->names().charAt),
++                                     js::str_charAt)) {
++    return false;
++  }
++  auto* ctor = cx->global()->maybeGetConstructor<NativeObject>(JSProto_String);
++  if (!ctor) {
++    return true;
++  }
++  return ObjectHasDataPropertyFunction(ctor, NameToId(cx->names().fromCharCode),
++                                       js::str_fromCharCode);
++}
++#endif  // JS_EXTERNAL_COMPILER_HOOKS
+diff --git a/js/src/vm/RealmFuses.h b/js/src/vm/RealmFuses.h
+index decb0b2763b7..bfb79152da63 100644
+--- a/js/src/vm/RealmFuses.h
++++ b/js/src/vm/RealmFuses.h
+@@ -311,6 +311,28 @@ struct OptimizeWeakSetPrototypeAddFuse final : public RealmFuse {
+   virtual bool checkInvariant(JSContext* cx) override;
+ };
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++// Fuse guarding the original String char-op natives. If this fuse is intact,
++// the following invariants must hold:
++//
++// - The builtin `String.prototype` object has unchanged `charCodeAt` and
++//   `charAt` data properties (the original natives).
++// - The builtin `String` constructor has an unchanged `fromCharCode` data
++//   property.
++//
++// Its only consumer is an external compiler tier's inline string char-op fast
++// paths, which is why it is not read by CacheIR.
++struct OptimizeStringCharOpsFuse final : public RealmFuse {
++  virtual const char* name() override { return "OptimizeStringCharOpsFuse"; }
++  virtual bool checkInvariant(JSContext* cx) override;
++};
++
++#  define FOR_EACH_EXTERNAL_HOOKS_REALM_FUSE(FUSE) \
++    FUSE(OptimizeStringCharOpsFuse, optimizeStringCharOpsFuse)
++#else
++#  define FOR_EACH_EXTERNAL_HOOKS_REALM_FUSE(FUSE)
++#endif
++
+ #define FOR_EACH_REALM_FUSE(FUSE)                                              \
+   FUSE(OptimizeGetIteratorFuse, optimizeGetIteratorFuse)                       \
+   FUSE(OptimizeArrayIteratorPrototypeFuse, optimizeArrayIteratorPrototypeFuse) \
+@@ -336,7 +358,8 @@ struct OptimizeWeakSetPrototypeAddFuse final : public RealmFuse {
+   FUSE(OptimizeMapPrototypeSetFuse, optimizeMapPrototypeSetFuse)               \
+   FUSE(OptimizeSetPrototypeAddFuse, optimizeSetPrototypeAddFuse)               \
+   FUSE(OptimizeWeakMapPrototypeSetFuse, optimizeWeakMapPrototypeSetFuse)       \
+-  FUSE(OptimizeWeakSetPrototypeAddFuse, optimizeWeakSetPrototypeAddFuse)
++  FUSE(OptimizeWeakSetPrototypeAddFuse, optimizeWeakSetPrototypeAddFuse)       \
++  FOR_EACH_EXTERNAL_HOOKS_REALM_FUSE(FUSE)
+ 
+ struct RealmFuses {
+   RealmFuses() = default;
+diff --git a/js/src/vm/RegExpObject.cpp b/js/src/vm/RegExpObject.cpp
+index 5d32fea55068..d1c2fc8a0d4b 100644
+--- a/js/src/vm/RegExpObject.cpp
++++ b/js/src/vm/RegExpObject.cpp
+@@ -724,6 +724,19 @@ RegExpRunStatus RegExpShared::execute(JSContext* cx,
+     return RegExpRunStatus::Error;
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // An external matcher decides the match here, skipping the irregexp
++  // jit-choice and interpreter layering below, or declines.
++  if (cx->externalCompilerHooks() && cx->externalCompilerHooks()->regexpMatch) {
++    RegExpRunStatus externalStatus;
++    if (cx->externalCompilerHooks()->regexpMatch(cx, re, input, start, matches,
++                                            input->hasLatin1Chars(),
++                                            &externalStatus)) {
++      return externalStatus;
++    }
++  }
++#endif
++
+   uint32_t interruptRetries = 0;
+   const uint32_t maxInterruptRetries = 4;
+   do {
+diff --git a/js/src/vm/RegExpShared.h b/js/src/vm/RegExpShared.h
+index 99f048a5eabd..4b98fd553291 100644
+--- a/js/src/vm/RegExpShared.h
++++ b/js/src/vm/RegExpShared.h
+@@ -121,6 +121,12 @@ class RegExpShared
+   uint32_t maxRegisters_ = 0;
+   uint32_t ticks_ = 0;
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // The external tier's pointer-sized per-RegExpShared word
++  // (js/ExternalCompilerHooks.h).
++  uintptr_t externalWord_ = 0;
++#endif
++
+   // With duplicate named capture groups, it's possible that the number of
+   // distinct named groups is less than the total number of named captures.
+   // If they are equal, we used the namedCaptureIndices_ array directly to
+@@ -216,6 +222,11 @@ class RegExpShared
+     maxRegisters_ = std::max(maxRegisters_, numRegisters);
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  uintptr_t externalWord() const { return externalWord_; }
++  void setExternalWord(uintptr_t v) { externalWord_ = v; }
++#endif
++
+   uint32_t numNamedCaptures() const { return numNamedCaptures_; }
+   uint32_t numDistinctNamedCaptures() const {
+     return numDistinctNamedCaptures_;
+diff --git a/js/src/vm/RegExpStatics.h b/js/src/vm/RegExpStatics.h
+index f34ae2dc9a96..9ffbc1944ed0 100644
+--- a/js/src/vm/RegExpStatics.h
++++ b/js/src/vm/RegExpStatics.h
+@@ -10,10 +10,15 @@
+ #include "js/RegExpFlags.h"
+ #include "vm/JSContext.h"
+ #include "vm/MatchPairs.h"
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++#  include "vm/RegExpShared.h"  // used only by updateLazily (AOT-only)
++#endif
+ #include "vm/Runtime.h"
+ 
+ namespace js {
+ 
++class RegExpShared;
++
+ class RegExpStatics {
+   /* The latest RegExp output, set after execution. */
+   VectorMatchPairs matches;
+@@ -59,6 +64,17 @@ class RegExpStatics {
+   inline bool updateFromMatchPairs(JSContext* cx, JSLinearString* input,
+                                    VectorMatchPairs& newPairs);
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // Lazy update: record only what executeLazy needs to replay the match on
++  // the first statics read (source atom, flags, start index, input),
++  // skipping the per-match pairs copy. Only valid for a match that
++  // SUCCEEDED with exactly these arguments -- executeLazy asserts the
++  // replay succeeds. This is the cheap scheme an external compiler tier's
++  // per-match paths use.
++  inline void updateLazily(JSContext* cx, JSLinearString* input,
++                           RegExpShared* shared, size_t lastIndex);
++#endif
++
+   inline void clear();
+ 
+   /* Corresponds to JSAPI functionality to set the pending RegExp input. */
+@@ -233,6 +249,20 @@ inline bool RegExpStatics::createRightContext(JSContext* cx,
+   return createDependent(cx, matches[0].limit, matchesInput->length(), out);
+ }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++inline void RegExpStatics::updateLazily(JSContext* cx, JSLinearString* input,
++                                        RegExpShared* shared,
++                                        size_t lastIndex) {
++  MOZ_ASSERT(input && shared);
++  BarrieredSetPair<JSString, JSLinearString>(cx->zone(), pendingInput, input,
++                                             matchesInput, input);
++  lazySource = shared->getSource();
++  lazyFlags = shared->getFlags();
++  lazyIndex = lastIndex;
++  pendingLazyEvaluation = 1;
++}
++#endif
++
+ inline bool RegExpStatics::updateFromMatchPairs(JSContext* cx,
+                                                 JSLinearString* input,
+                                                 VectorMatchPairs& newPairs) {
+diff --git a/js/src/vm/Runtime.h b/js/src/vm/Runtime.h
+index e7d9e55422e0..b15f3e409eb7 100644
+--- a/js/src/vm/Runtime.h
++++ b/js/src/vm/Runtime.h
+@@ -62,6 +62,11 @@
+ #include "wasm/WasmTypeDecls.h"
+ 
+ struct JSAtomState;
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++namespace JS {
++struct ExternalCompilerHooks;
++}
++#endif
+ struct JSClass;
+ struct JSErrorInterceptor;
+ struct JSWrapObjectCallbacks;
+@@ -311,6 +316,13 @@ struct JSRuntime {
+ 
+   /* Space for interpreter frames. */
+   js::MainThreadData<js::InterpreterStack> interpreterStack_;
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // The external compiler tier's hook table (js/ExternalCompilerHooks.h) and
++  // the union of its store masks. Plain fields: the slot-store choke reaches
++  // them through an object's runtime from whatever thread stores.
++  JS::ExternalCompilerHooks* externalCompilerHooks_ = nullptr;
++  uintptr_t externalObjectStoreMask_ = 0;
++#endif
+ 
+ #ifdef ENABLE_PORTABLE_BASELINE_INTERP
+   /* Space for portable baseline interpreter frames. */
+@@ -319,6 +331,13 @@ struct JSRuntime {
+ 
+  public:
+   js::InterpreterStack& interpreterStack() { return interpreterStack_.ref(); }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  JS::ExternalCompilerHooks* externalCompilerHooks() const {
++    return externalCompilerHooks_;
++  }
++  uintptr_t externalObjectStoreMask() const { return externalObjectStoreMask_; }
++  void setExternalCompilerHooks(JS::ExternalCompilerHooks* hooks);
++#endif
+ #ifdef ENABLE_PORTABLE_BASELINE_INTERP
+   js::PortableBaselineStack& portableBaselineStack() {
+     return portableBaselineStack_.ref();
+diff --git a/js/src/vm/Scope.h b/js/src/vm/Scope.h
+index 8c4bc90f6cd6..8263f451336a 100644
+--- a/js/src/vm/Scope.h
++++ b/js/src/vm/Scope.h
+@@ -383,6 +383,14 @@ class Scope : public gc::TenuredCellWithNonGCPointer<BaseScopeData> {
+ 
+   ScopeKind kind() const { return kind_; }
+ 
++  static constexpr size_t offsetOfKind() { return offsetof(Scope, kind_); }
++  static constexpr size_t offsetOfEnvironmentShape() {
++    return offsetof(Scope, environmentShape_);
++  }
++  static constexpr size_t offsetOfEnclosingScope() {
++    return offsetof(Scope, enclosingScope_);
++  }
++
+   bool isNamedLambda() const {
+     return kind() == ScopeKind::NamedLambda ||
+            kind() == ScopeKind::StrictNamedLambda;
+diff --git a/js/src/vm/Shape.cpp b/js/src/vm/Shape.cpp
+index 87d89b5f1dc9..4512f7509e62 100644
+--- a/js/src/vm/Shape.cpp
++++ b/js/src/vm/Shape.cpp
+@@ -130,6 +130,11 @@ bool js::NativeObject::toDictionaryMode(JSContext* cx,
+ 
+   obj->setShape(shape);
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  obj->externalStructuralChange(
++      cx, JS::ExternalObjectMutation::ToDictionary);
++#endif
++
+   MOZ_ASSERT(obj->inDictionaryMode());
+   obj->setDictionaryModeSlotSpan(span);
+ 
+@@ -340,7 +345,15 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
+   }
+ 
+   if (auto* shape = LookupShapeForAdd(obj->shape(), id, flags, slot)) {
+-    return obj->setShapeAndAddNewSlot(cx, shape, *slot);
++    if (!obj->setShapeAndAddNewSlot(cx, shape, *slot)) {
++      return false;
++    }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++    if (obj->externalWord()) {
++      ExternalPropertyAdded(cx, obj, id, *slot);
++    }
++#endif
++    return true;
+   }
+ 
+   if (obj->inDictionaryMode()) {
+@@ -390,6 +403,11 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
+   if (!obj->setShapeAndAddNewSlot(cx, newShape, *slot)) {
+     return false;
+   }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  if (obj->externalWord()) {
++    ExternalPropertyAdded(cx, obj, id, *slot);
++  }
++#endif
+ 
+   // Add the new shape to the old shape's shape cache, to optimize this shape
+   // transition. Don't do this if we just allocated a new shape, because that
+@@ -523,6 +541,11 @@ bool NativeObject::changeProperty(JSContext* cx, Handle<NativeObject*> obj,
+                                   uint32_t* slotOut) {
+   MOZ_ASSERT(!id.isVoid());
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  obj->externalStructuralChange(
++      cx, JS::ExternalObjectMutation::ChangeProperty);
++#endif
++
+   AutoCheckShapeConsistency check(obj);
+   AssertValidArrayIndex(obj, id);
+   MOZ_ASSERT(!flags.isCustomDataProperty(),
+@@ -696,6 +719,11 @@ bool NativeObject::changeCustomDataPropAttributes(JSContext* cx,
+   AssertValidArrayIndex(obj, id);
+   AssertValidCustomDataProp(obj, flags);
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  obj->externalStructuralChange(
++      cx, JS::ExternalObjectMutation::ChangeCustomDataProp);
++#endif
++
+   Rooted<PropMap*> map(cx, obj->shape()->propMap());
+   uint32_t mapLength = obj->shape()->propMapLength();
+ 
+@@ -839,6 +867,11 @@ bool NativeObject::removeProperty(JSContext* cx, Handle<NativeObject*> obj,
+                                   HandleId id) {
+   AutoCheckShapeConsistency check(obj);
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  obj->externalStructuralChange(
++      cx, JS::ExternalObjectMutation::RemoveProperty);
++#endif
++
+   Rooted<PropMap*> map(cx, obj->shape()->propMap());
+   uint32_t mapLength = obj->shape()->propMapLength();
+ 
+@@ -1008,6 +1041,11 @@ bool NativeObject::freezeOrSealProperties(JSContext* cx,
+                                           IntegrityLevel level) {
+   AutoCheckShapeConsistency check(obj);
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  obj->externalStructuralChange(
++      cx, JS::ExternalObjectMutation::FreezeOrSeal);
++#endif
++
+   if (!Watchtower::watchFreezeOrSeal(cx, obj, level)) {
+     return false;
+   }
+@@ -1077,6 +1115,14 @@ bool JSObject::setFlag(JSContext* cx, HandleObject obj, ObjectFlag flag) {
+   ObjectFlags objectFlags = obj->shape()->objectFlags();
+   objectFlags.setFlag(flag);
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // An object flag changes the object's semantics (Watchtower watches,
++  // NotExtensible, Frozen), so the external tier's word no longer describes
++  // it. Rare by construction: flags are set once per object.
++  obj->externalStructuralChange(
++      cx, JS::ExternalObjectMutation::ObjectFlagChange);
++#endif
++
+   uint32_t numFixed =
+       obj->is<NativeObject>() ? obj->as<NativeObject>().numFixedSlots() : 0;
+   return Shape::replaceShape(cx, obj, objectFlags, obj->shape()->proto(),
+diff --git a/js/src/vm/Shape.h b/js/src/vm/Shape.h
+index e2e2f09966ab..4ddbea5da1d0 100644
+--- a/js/src/vm/Shape.h
++++ b/js/src/vm/Shape.h
+@@ -459,7 +459,7 @@ class Shape : public gc::CellWithTenuredGCPointer<gc::TenuredCell, BaseShape> {
+     return offsetof(Shape, objectFlags_);
+   }
+ 
+-  static inline size_t offsetOfImmutableFlags() {
++  static constexpr size_t offsetOfImmutableFlags() {
+     return offsetof(Shape, immutableFlags);
+   }
+ 
+diff --git a/js/src/vm/SharedStencil.h b/js/src/vm/SharedStencil.h
+index a402895bd658..f0cf1cc51c02 100644
+--- a/js/src/vm/SharedStencil.h
++++ b/js/src/vm/SharedStencil.h
+@@ -619,6 +619,15 @@ class alignas(uint32_t) ImmutableScriptData final
+                   "JIT expect Offset to be uint32_t");
+     return offsetof(ImmutableScriptData, optArrayOffset_);
+   }
++  static constexpr size_t offsetOfCodeLength() {
++    return offsetof(ImmutableScriptData, codeLength_);
++  }
++  static constexpr size_t offsetOfMainOffset() {
++    return offsetof(ImmutableScriptData, mainOffset);
++  }
++  static constexpr size_t offsetOfBodyScopeIndex() {
++    return offsetof(ImmutableScriptData, bodyScopeIndex);
++  }
+   static constexpr size_t offsetOfNfixed() {
+     return offsetof(ImmutableScriptData, nfixed);
+   }
+diff --git a/js/src/vm/StaticStrings.h b/js/src/vm/StaticStrings.h
+index e34df5090941..27a7089e30b9 100644
+--- a/js/src/vm/StaticStrings.h
++++ b/js/src/vm/StaticStrings.h
+@@ -97,6 +97,13 @@ class StaticStrings {
+     return unitStaticTable[c];
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // The raw unit-string table base, for an external compiler tier's inline
++  // s[i] on linear latin1 strings (every latin1 char has a static unit
++  // string).
++  JSAtom* const* unitStaticTableBase() const { return unitStaticTable; }
++#endif
++
+   /* May not return atom, returns null on (reported) failure. */
+   inline JSLinearString* getUnitString(JSContext* cx, char16_t c);
+ 
+diff --git a/js/src/vm/Watchtower.cpp b/js/src/vm/Watchtower.cpp
+index bcebe2b23f10..a2015951ce9a 100644
+--- a/js/src/vm/Watchtower.cpp
++++ b/js/src/vm/Watchtower.cpp
+@@ -421,6 +421,30 @@ static void MaybePopWeakSetPrototypeFuses(JSContext* cx, NativeObject* obj,
+   }
+ }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++static void MaybePopStringPrototypeFuses(JSContext* cx, NativeObject* obj,
++                                         jsid id) {
++  if (obj != obj->global().maybeGetPrototype(JSProto_String)) {
++    return;
++  }
++  if (id.isAtom(cx->names().charCodeAt) || id.isAtom(cx->names().charAt)) {
++    obj->realm()->realmFuses.optimizeStringCharOpsFuse.popFuse(
++        cx, obj->realm()->realmFuses);
++  }
++}
++
++static void MaybePopStringConstructorFuses(JSContext* cx, NativeObject* obj,
++                                           jsid id) {
++  if (obj != obj->global().maybeGetConstructor(JSProto_String)) {
++    return;
++  }
++  if (id.isAtom(cx->names().fromCharCode)) {
++    obj->realm()->realmFuses.optimizeStringCharOpsFuse.popFuse(
++        cx, obj->realm()->realmFuses);
++  }
++}
++#endif  // JS_EXTERNAL_COMPILER_HOOKS
++
+ static void MaybePopPromiseConstructorFuses(JSContext* cx, NativeObject* obj,
+                                             jsid id) {
+   if (obj != obj->global().maybeGetConstructor(JSProto_Promise)) {
+@@ -564,6 +588,12 @@ static void MaybePopRealmFuses(JSContext* cx, NativeObject* obj, jsid id) {
+   // Handle writes to WeakSet.prototype fuse properties.
+   MaybePopWeakSetPrototypeFuses(cx, obj, id);
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // Handle writes to String.prototype / String constructor fuse properties.
++  MaybePopStringPrototypeFuses(cx, obj, id);
++  MaybePopStringConstructorFuses(cx, obj, id);
++#endif
++
+   // Handle writes to Promise constructor fuse properties.
+   MaybePopPromiseConstructorFuses(cx, obj, id);
+ 

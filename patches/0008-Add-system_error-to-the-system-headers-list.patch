@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Fallin <chris@cfallin.org>
+Date: Fri, 4 Sep 2026 16:33:36 -0700
+Subject: [PATCH] Add system_error to the system headers list
+
+Needed by the WASI system-wrapper generation for the external compiler
+hooks build.
+
+Source commits in YurtOS/firefox (yurt dff5cf534448):
+  164f660a3602 Add hooks to allow for an external compiler.
+    (only config/system-headers.mozbuild)
+---
+ config/system-headers.mozbuild | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/config/system-headers.mozbuild b/config/system-headers.mozbuild
+index b14afa4c37f0..d974cd9ae714 100644
+--- a/config/system-headers.mozbuild
++++ b/config/system-headers.mozbuild
+@@ -835,6 +835,7 @@ system_headers = [
+     "sys/link.h",
+     "sys/locking.h",
+     "syslog.h",
++    "system_error",
+     "sys/lwp.h",
+     "sys/machine.h",
+     "sys/mman.h",

@@ -1,0 +1,2391 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Trevor Elliott <telliott@fastly.com>
+Date: Fri, 24 Feb 2023 16:48:12 -0800
+Subject: [PATCH] Wire the JS Streams builtin into the engine and shell
+
+--enable-js-streams (MOZ_JS_STREAMS), the build, prototype keys, realm
+options, error messages, runtime and global-object hooks, shell support,
+the jsapi tests and the non262 streams test, and the libpref switch.
+The browser-side dom/ and testing/web-platform/meta parts of the source
+commit are not in the queue.
+
+Source commits in YurtOS/firefox (yurt dff5cf534448):
+  71f34b31f32f Bring back the JS Streams implementation
+    (all included paths except js/src/builtin/streams, js/public/Stream.h)
+---
+ js/moz.configure                              |   18 +
+ js/public/ProtoKey.h                          |   21 +-
+ js/public/RealmOptions.h                      |   14 +
+ js/public/TypeDecls.h                         |    6 +
+ js/public/Value.h                             |   18 +
+ js/public/friend/ErrorNumbers.msg             |   60 +
+ js/src/builtin/TestingFunctions.cpp           |   10 +
+ js/src/frontend/FrontendContext.cpp           |    4 +-
+ js/src/fuzz-tests/tests.cpp                   |    5 +-
+ js/src/jsapi-tests/moz.build                  |    5 +
+ js/src/jsapi-tests/testReadableStream.cpp     | 1195 +++++++++++++++++
+ js/src/jsapi-tests/tests.cpp                  |    4 +-
+ js/src/moz.build                              |   29 +
+ js/src/shell/js.cpp                           |   26 +
+ js/src/shell/jsshell.h                        |    5 +
+ .../ReadableStream/readable-stream-globals.js |  367 +++++
+ js/src/vm/CommonPropertyNames.h               |   12 +
+ js/src/vm/GlobalObject.cpp                    |   23 +
+ js/src/vm/List-inl.h                          |   65 +-
+ js/src/vm/List.h                              |   13 +
+ js/src/vm/NativeObject.h                      |    2 +
+ js/src/vm/Runtime.h                           |   25 +
+ js/xpconnect/src/XPCJSRuntime.cpp             |    1 +
+ modules/libpref/init/StaticPrefList.yaml      |   16 +
+ 24 files changed, 1939 insertions(+), 5 deletions(-)
+ create mode 100644 js/src/jsapi-tests/testReadableStream.cpp
+ create mode 100644 js/src/tests/non262/ReadableStream/readable-stream-globals.js
+
+diff --git a/js/moz.configure b/js/moz.configure
+index 765c1de95f38..a363235983ab 100644
+--- a/js/moz.configure
++++ b/js/moz.configure
+@@ -233,6 +233,24 @@ set_config(
+ )
+ 
+ 
++# Enable JS Streams
++# ===================================================
++option(
++    "--enable-js-streams",
++    default=False,
++    help="Enable non-default JS Streams implementation",
++)
++
++
++@depends("--enable-js-streams")
++def enable_js_streams(value):
++    if value:
++        return True
++
++
++set_config("MOZ_JS_STREAMS", enable_js_streams)
++set_define("MOZ_JS_STREAMS", enable_js_streams)
++
+ # JIT support
+ # =======================================================
+ @depends(target, "--enable-portable-baseline-interp")
+diff --git a/js/public/ProtoKey.h b/js/public/ProtoKey.h
+index 7fdafc1956e5..140bb85c0d9e 100644
+--- a/js/public/ProtoKey.h
++++ b/js/public/ProtoKey.h
+@@ -158,7 +158,26 @@
+   REAL_IF_INTL(PlainYearMonth, OCLASP(temporal::PlainYearMonth))             \
+   REAL_IF_INTL(PlainTime, OCLASP(temporal::PlainTime))                       \
+   REAL_IF_INTL(TemporalNow, OCLASP(temporal::TemporalNow))                   \
+-  REAL_IF_INTL(ZonedDateTime, OCLASP(temporal::ZonedDateTime))
++  REAL_IF_INTL(ZonedDateTime, OCLASP(temporal::ZonedDateTime))               \
++  IF_JS_STREAMS(REAL(ReadableStream, &js::ReadableStream::class_))             \
++  IF_JS_STREAMS(REAL(ReadableStreamBYOBReader,                                 \
++                    &js::ReadableStreamBYOBReader::class_))                    \
++  IF_JS_STREAMS(REAL(ReadableStreamBYOBRequest,                                \
++                    &js::ReadableStreamBYOBRequest::class_))                   \
++  IF_JS_STREAMS(REAL(ReadableStreamDefaultReader,                              \
++                     &js::ReadableStreamDefaultReader::class_))                \
++  IF_JS_STREAMS(REAL(ReadableStreamDefaultController,                          \
++                     &js::ReadableStreamDefaultController::class_))            \
++  IF_JS_STREAMS(REAL(ReadableByteStreamController,                             \
++                     &js::ReadableByteStreamController::class_))               \
++  IF_JS_STREAMS(REAL(WritableStream, &js::WritableStream::class_))             \
++  IF_JS_STREAMS(REAL(WritableStreamDefaultController,                          \
++                     &js::WritableStreamDefaultController::class_))            \
++  IF_JS_STREAMS(REAL(WritableStreamDefaultWriter,                              \
++                     &js::WritableStreamDefaultWriter::class_))                \
++  IF_JS_STREAMS(                                                               \
++      REAL(ByteLengthQueuingStrategy, &js::ByteLengthQueuingStrategy::class_)) \
++  IF_JS_STREAMS(REAL(CountQueuingStrategy, &js::CountQueuingStrategy::class_))
+ // DO NOT ADD CONDITIONAL ENTRIES TO THIS LIST! (As in, do not add entries
+ // guarded by #ifdef.) It will break binary compatibility. Instead, create an
+ // IF_<feature> macro and add it to the parameter list below and add a
+diff --git a/js/public/RealmOptions.h b/js/public/RealmOptions.h
+index 42b806b020bb..c9ea131fc65d 100644
+--- a/js/public/RealmOptions.h
++++ b/js/public/RealmOptions.h
+@@ -186,6 +186,19 @@ class JS_PUBLIC_API RealmCreationOptions {
+   bool getCoopAndCoepEnabled() const;
+   RealmCreationOptions& setCoopAndCoepEnabled(bool flag);
+ 
++  bool getStreamsEnabled() const { return streams_; }
++  RealmCreationOptions& setStreamsEnabled(bool flag) {
++#ifdef MOZ_JS_STREAMS
++#  ifdef MOZ_DOM_STREAMS
++#    error "JS and DOM streams shouldn't be simultaneously configured"
++#  endif
++    streams_ = flag;
++#else
++    MOZ_ASSERT(!streams_);
++#endif
++    return *this;
++  }
++
+   bool getToSourceEnabled() const { return toSource_; }
+   RealmCreationOptions& setToSourceEnabled(bool flag) {
+     toSource_ = flag;
+@@ -239,6 +252,7 @@ class JS_PUBLIC_API RealmCreationOptions {
+   bool sharedMemoryAndAtomics_ = false;
+   bool defineSharedArrayBufferConstructor_ = true;
+   bool coopAndCoep_ = false;
++  bool streams_ = false;
+   bool toSource_ = false;
+ 
+   bool secureContext_ = false;
+diff --git a/js/public/TypeDecls.h b/js/public/TypeDecls.h
+index ea95dc4e9875..cde4093aa993 100644
+--- a/js/public/TypeDecls.h
++++ b/js/public/TypeDecls.h
+@@ -138,6 +138,12 @@ using jsid = JS::PropertyKey;
+ #  define IF_EXPLICIT_RESOURCE_MANAGEMENT(x, ...) __VA_ARGS__
+ #endif
+ 
++#ifdef MOZ_JS_STREAMS
++#  define IF_JS_STREAMS(x, ...) x
++#else
++#  define IF_JS_STREAMS(x, ...) __VA_ARGS__
++#endif
++
+ // Helper macros to combine build flags
+ // TODO: need to find more generalised way to combine build flags
+ #if defined(ENABLE_EXPLICIT_RESOURCE_MANAGEMENT) || defined(ENABLE_DECORATORS)
+diff --git a/js/public/Value.h b/js/public/Value.h
+index db428d9387e9..3a049f281e3a 100644
+--- a/js/public/Value.h
++++ b/js/public/Value.h
+@@ -371,6 +371,24 @@ enum JSWhyMagic {
+   /** for local use */
+   JS_GENERIC_MAGIC,
+ 
++  /**
++   * Write records queued up in WritableStreamDefaultController.[[queue]] in the
++   * spec are either "close" (a String) or Record { [[chunk]]: chunk }, where
++   * chunk is an arbitrary user-provided (and therefore non-magic) value.
++   * Represent "close" the String as this magic value; represent Record records
++   * as the |chunk| value within each of them.
++   */
++  JS_WRITABLESTREAM_CLOSE_RECORD,
++
++  /**
++   * The ReadableStream pipe-to operation concludes with a "finalize" operation
++   * that accepts an optional |error| argument.  In certain cases that optional
++   * |error| must be stored in a handler function, for use after a promise has
++   * settled.  We represent the argument not being provided, in those cases,
++   * using this magic value.
++   */
++  JS_READABLESTREAM_PIPETO_FINALIZE_WITHOUT_ERROR,
++
+   /**
+    * When an error object is created without the error cause argument, we set
+    * the error's cause slot to this magic value.
+diff --git a/js/public/friend/ErrorNumbers.msg b/js/public/friend/ErrorNumbers.msg
+index 96ce067fcaea..41e5ef114617 100644
+--- a/js/public/friend/ErrorNumbers.msg
++++ b/js/public/friend/ErrorNumbers.msg
+@@ -808,6 +808,66 @@ MSG_DEF(JSMSG_NOT_AN_ASYNC_GENERATOR,  0, JSEXN_TYPEERR, "Not an async generator
+ MSG_DEF(JSMSG_GET_ASYNC_ITER_RETURNED_PRIMITIVE, 0, JSEXN_TYPEERR, "[Symbol.asyncIterator]() returned a non-object value")
+ MSG_DEF(JSMSG_SUSPENDED_QUEUE_NOT_EMPTY, 0, JSEXN_INTERNALERR, "Async generator is in invalid state due to debugger interaction")
+ 
++// ReadableStream
++MSG_DEF(JSMSG_READABLESTREAM_UNDERLYINGSOURCE_TYPE_WRONG,0, JSEXN_RANGEERR,"'underlyingSource.type' must be \"bytes\" or undefined.")
++MSG_DEF(JSMSG_READABLESTREAM_BYTES_TYPE_NOT_IMPLEMENTED, 0, JSEXN_RANGEERR,"support for 'new ReadableStream({ type: \"bytes\" })' is not yet implemented")
++MSG_DEF(JSMSG_READABLESTREAM_BYOB_READER_FOR_NON_BYTE_STREAM,0,JSEXN_TYPEERR,"can't get a BYOB reader for a non-byte stream")
++MSG_DEF(JSMSG_READABLESTREAM_INVALID_READER_MODE,        0, JSEXN_TYPEERR,"'mode' must be \"byob\" or undefined.")
++MSG_DEF(JSMSG_NUMBER_MUST_BE_FINITE_NON_NEGATIVE, 1, JSEXN_RANGEERR, "'{0}' must be a finite, non-negative number.")
++MSG_DEF(JSMSG_READABLEBYTESTREAMCONTROLLER_INVALID_BYTESWRITTEN, 0, JSEXN_RANGEERR, "'bytesWritten' exceeds remaining length.")
++MSG_DEF(JSMSG_READABLEBYTESTREAMCONTROLLER_INVALID_VIEW_SIZE, 0, JSEXN_RANGEERR, "view size does not match requested data.")
++MSG_DEF(JSMSG_READABLEBYTESTREAMCONTROLLER_INVALID_VIEW_OFFSET, 0, JSEXN_RANGEERR, "view offset does not match requested position.")
++MSG_DEF(JSMSG_READABLEBYTESTREAMCONTROLLER_EMPTY_VIEW,   0, JSEXN_TYPEERR, "view must contain a length greater than zero for ReadableByteStreamController.enqueue(view).")
++MSG_DEF(JSMSG_READABLEBYTESTREAMCONTROLLER_NO_VIEW,      1, JSEXN_TYPEERR, "view must be a valid ArrayBufferView for ReadableByteStreamController.{0}(view).")
++MSG_DEF(JSMSG_READABLESTREAM_LOCKED_METHOD,              1, JSEXN_TYPEERR, "'{0}' can't be called on a locked stream.")
++MSG_DEF(JSMSG_READABLESTREAM_LOCKED,                     0, JSEXN_TYPEERR, "A Reader may only be created for an unlocked ReadableStream.")
++MSG_DEF(JSMSG_READABLESTREAM_NOT_BYTE_STREAM_CONTROLLER, 1, JSEXN_TYPEERR, "{0} requires a ReadableByteStreamController.")
++MSG_DEF(JSMSG_READABLESTREAM_NOT_DEFAULT_CONTROLLER,     1, JSEXN_TYPEERR, "{0} requires a ReadableStreamDefaultController.")
++MSG_DEF(JSMSG_READABLESTREAM_CONTROLLER_SET,             0, JSEXN_TYPEERR, "The ReadableStream already has a controller defined.")
++MSG_DEF(JSMSG_READABLESTREAMREADER_NOT_OWNED,            1, JSEXN_TYPEERR, "The ReadableStream reader method '{0}' may only be called on a reader owned by a stream.")
++MSG_DEF(JSMSG_READABLESTREAMREADER_NOT_EMPTY,            1, JSEXN_TYPEERR, "The ReadableStream reader method '{0}' may not be called on a reader with read requests.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREADER_READ_NOT_BUFFER,  0, JSEXN_TYPEERR, "ReadableStreamBYOBReader.read() wasn't passed a Buffer, TypedArrayBuffer or view.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREADER_READ_EMPTY_VIEW,  0, JSEXN_TYPEERR, "ReadableStreamBYOBReader.read() was passed an empty zero-len buffer.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREADER_READ_DETACHED,    0, JSEXN_TYPEERR, "ReadableStreamBYOBReader.read() was passed a detached buffer.")
++
++MSG_DEF(JSMSG_READABLESTREAMREADER_RELEASED,             0, JSEXN_TYPEERR, "The ReadableStream reader was released.")
++MSG_DEF(JSMSG_READABLESTREAMCONTROLLER_CLOSED,           1, JSEXN_TYPEERR, "'{0}' called on a stream already closing.")
++MSG_DEF(JSMSG_READABLESTREAMCONTROLLER_NOT_READABLE,     1, JSEXN_TYPEERR, "'{0}' may only be called on a stream in the 'readable' state.")
++MSG_DEF(JSMSG_READABLEBYTESTREAMCONTROLLER_BAD_CHUNKSIZE,0, JSEXN_RANGEERR, "ReadableByteStreamController requires a positive integer or undefined for 'autoAllocateChunkSize'.")
++MSG_DEF(JSMSG_READABLEBYTESTREAMCONTROLLER_BAD_CHUNK,    1, JSEXN_TYPEERR, "{0} passed a bad chunk.")
++MSG_DEF(JSMSG_READABLEBYTESTREAMCONTROLLER_DETACHED,     1, JSEXN_TYPEERR, "ReadableByteStreamController.{0}() provided a detached buffer.")
++MSG_DEF(JSMSG_READABLEBYTESTREAMCONTROLLER_CLOSE_PENDING_PULL, 0, JSEXN_TYPEERR, "The ReadableByteStreamController cannot be closed while the buffer is being filled.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREQUEST_NO_CONTROLLER,   1, JSEXN_TYPEERR, "ReadableStreamBYOBRequest method '{0}' called on a request with no controller.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREQUEST_RESPOND_INVALID_WRITTEN_LEN, 0, JSEXN_RANGEERR, "ReadableStreamBYOBRequest method 'respond(bytesWritten)' must include a bytesWritten positive integer.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREQUEST_RESPOND_CLOSED,  0, JSEXN_TYPEERR, "ReadableStreamBYOBRequest method 'respond' called with non-zero number of bytes with a closed controller.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREQUEST_RESPOND_DETACHED,0, JSEXN_TYPEERR, "ReadableStreamBYOBRequest method 'respond' called for a detached buffer.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREQUEST_RESPOND_ZERO    ,0, JSEXN_TYPEERR, "ReadableStreamBYOBRequest method 'respond' wrote zero bytes.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREQUEST_RESPOND_EXCEED  ,0, JSEXN_RANGEERR, "ReadableStreamBYOBRequest method 'respond' byte size exceeded buffer length.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREQUEST_RESPOND_BAD_OFFSET ,0, JSEXN_RANGEERR, "ReadableStreamBYOBRequest method 'respondWithNewView' returned a view with an invalid offset.")
++MSG_DEF(JSMSG_READABLESTREAMBYOBREQUEST_RESPOND_BAD_LEN ,0, JSEXN_RANGEERR, "ReadableStreamBYOBRequest method 'respondWithNewView' returned a view with an invalid length.")
++MSG_DEF(JSMSG_READABLESTREAM_METHOD_NOT_IMPLEMENTED,     1, JSEXN_TYPEERR, "ReadableStream method {0} not yet implemented")
++MSG_DEF(JSMSG_READABLESTREAM_PIPETO_BAD_SIGNAL,          0, JSEXN_TYPEERR, "signal must be either undefined or an AbortSignal")
++MSG_DEF(JSMSG_READABLESTREAMTEE_BYOB,                   0, JSEXN_ERR,     "tee() for readable byte streams is not yet implemented")
++MSG_DEF(JSMSG_READABLESTREAMTEE_CLONE,                   0, JSEXN_ERR,     "tee() support for cloneForBranch2=true is not yet implemented")
++
++// WritableStream
++MSG_DEF(JSMSG_READABLESTREAM_UNDERLYINGSINK_TYPE_WRONG,  0, JSEXN_RANGEERR,"'underlyingSink.type' must be undefined.")
++MSG_DEF(JSMSG_WRITABLESTREAMWRITER_NOT_OWNED,            1, JSEXN_TYPEERR, "the WritableStream writer method '{0}' may only be called on a writer owned by a stream")
++MSG_DEF(JSMSG_WRITABLESTREAM_CLOSED_OR_ERRORED,          0, JSEXN_TYPEERR, "writable stream is already closed or errored")
++MSG_DEF(JSMSG_WRITABLESTREAM_RELEASED_DURING_WRITE,      0, JSEXN_TYPEERR, "writer's lock on the stream was released before writing completed")
++MSG_DEF(JSMSG_WRITABLESTREAM_WRITE_CLOSING_OR_CLOSED,    0, JSEXN_TYPEERR, "can't write to a stream that's currently closing or already closed")
++MSG_DEF(JSMSG_CANT_USE_LOCKED_WRITABLESTREAM,            1, JSEXN_TYPEERR, "can't {0} a WritableStream that's locked to a writer")
++MSG_DEF(JSMSG_WRITABLESTREAM_CLOSE_CLOSING_OR_CLOSED,    0, JSEXN_TYPEERR, "can't close a stream that's currently closing or already closed")
++MSG_DEF(JSMSG_WRITABLESTREAM_CANT_RELEASE_ALREADY_CLOSED,0, JSEXN_TYPEERR, "writer has already been released and can't be closed")
++MSG_DEF(JSMSG_WRITABLESTREAM_ALREADY_LOCKED,             0, JSEXN_TYPEERR, "writable stream is already locked by another writer")
++MSG_DEF(JSMSG_READABLESTREAM_NYI,                        0, JSEXN_ERR,     "full WritableStream support is not yet implemented")
++
++// Other Stream-related
++MSG_DEF(JSMSG_STREAM_MISSING_HIGHWATERMARK,              0, JSEXN_TYPEERR,  "'highWaterMark' must not be undefined.")
++MSG_DEF(JSMSG_STREAM_INVALID_HIGHWATERMARK,              0, JSEXN_RANGEERR, "'highWaterMark' must be a non-negative, non-NaN number.")
++MSG_DEF(JSMSG_STREAM_AUTOALLOCATECHUNKSIZE_ZERO,         0, JSEXN_TYPEERR,  "'autoAllocateChunkSize' must not be 0.")
++MSG_DEF(JSMSG_READABLESTREAM_BYOB_SIZE,                  0, JSEXN_RANGEERR, "size unsupported for byob streams")
++
+ // (wasm) Response-related
+ MSG_DEF(JSMSG_WASM_ERROR_CONSUMING_RESPONSE,             0, JSEXN_TYPEERR,  "WebAssembly: There was an error consuming the Response")
+ MSG_DEF(JSMSG_WASM_BAD_RESPONSE_VALUE,                   0, JSEXN_TYPEERR,  "WebAssembly: Expected Response or Promise resolving to Response")
+diff --git a/js/src/builtin/TestingFunctions.cpp b/js/src/builtin/TestingFunctions.cpp
+index 7d269ff06bd5..eb04d37ce7ef 100644
+--- a/js/src/builtin/TestingFunctions.cpp
++++ b/js/src/builtin/TestingFunctions.cpp
+@@ -4962,6 +4962,12 @@ static bool RejectPromise(JSContext* cx, unsigned argc, Value* vp) {
+   return result;
+ }
+ 
++static bool StreamsAreEnabled(JSContext* cx, unsigned argc, Value* vp) {
++  CallArgs args = CallArgsFromVp(argc, vp);
++  args.rval().setBoolean(cx->realm()->creationOptions().getStreamsEnabled());
++  return true;
++}
++
+ static unsigned finalizeCount = 0;
+ 
+ static void finalize_counter_finalize(JS::GCContext* gcx, JSObject* obj) {
+@@ -10334,6 +10340,10 @@ JS_FN_HELP("rejectPromise", RejectPromise, 2, 0,
+ "rejectPromise(promise, reason)",
+ "  Reject a Promise by calling the JSAPI function JS::RejectPromise."),
+ 
++JS_FN_HELP("streamsAreEnabled", StreamsAreEnabled, 0, 0,
++"streamsAreEnabled()",
++"  Returns a boolean indicating whether WHATWG Streams are enabled for the current realm."),
++
+     JS_FN_HELP("makeFinalizeObserver", MakeFinalizeObserver, 0, 0,
+ "makeFinalizeObserver()",
+ "  Get a special object whose finalization increases the counter returned\n"
+diff --git a/js/src/frontend/FrontendContext.cpp b/js/src/frontend/FrontendContext.cpp
+index 3066ce4ec686..f12bea502951 100644
+--- a/js/src/frontend/FrontendContext.cpp
++++ b/js/src/frontend/FrontendContext.cpp
+@@ -62,7 +62,7 @@ void FrontendContext::setStackQuota(JS::NativeStackSize stackSize) {
+   }
+ #endif  // !__wasi__
+ 
+-#ifdef DEBUG
++#if defined(DEBUG) && !defined(__wasi__)
+   setNativeStackLimitThread();
+ #endif
+ }
+@@ -250,7 +250,9 @@ static size_t GetTid() {
+ }
+ 
+ void FrontendContext::setNativeStackLimitThread() {
++#ifndef __wasi__
+   stackLimitThreadId_.emplace(GetTid());
++#endif
+ }
+ 
+ void FrontendContext::assertNativeStackLimitThread() {
+diff --git a/js/src/fuzz-tests/tests.cpp b/js/src/fuzz-tests/tests.cpp
+index b730db188eaf..85ea0c3b6bbf 100644
+--- a/js/src/fuzz-tests/tests.cpp
++++ b/js/src/fuzz-tests/tests.cpp
+@@ -38,7 +38,10 @@ static const JSClass* getGlobalClass() {
+ static JSObject* jsfuzz_createGlobal(JSContext* cx, JSPrincipals* principals) {
+   /* Create the global object. */
+   JS::RealmOptions options;
+-  options.creationOptions().setSharedMemoryAndAtomicsEnabled(true);
++  options.creationOptions()
++      .setWeakRefsEnabled(JS::WeakRefSpecifier::EnabledWithCleanupSome)
++      .setStreamsEnabled(true)
++      .setSharedMemoryAndAtomicsEnabled(true);
+   return JS_NewGlobalObject(cx, getGlobalClass(), principals,
+                             JS::FireOnNewGlobalHook, options);
+ }
+diff --git a/js/src/jsapi-tests/moz.build b/js/src/jsapi-tests/moz.build
+index a76d1de55450..a6963f63d372 100644
+--- a/js/src/jsapi-tests/moz.build
++++ b/js/src/jsapi-tests/moz.build
+@@ -182,6 +182,11 @@ if not CONFIG["JS_CODEGEN_NONE"]:
+         "testsJit.cpp",
+     ]
+ 
++if CONFIG["MOZ_JS_STREAMS"]:
++    UNIFIED_SOURCES += [
++        "testReadableStream.cpp",
++    ]
++
+ if CONFIG["NIGHTLY_BUILD"]:
+     # The Error interceptor only exists on Nightly.
+     UNIFIED_SOURCES += [
+diff --git a/js/src/jsapi-tests/testReadableStream.cpp b/js/src/jsapi-tests/testReadableStream.cpp
+new file mode 100644
+index 000000000000..ea987915d3b9
+--- /dev/null
++++ b/js/src/jsapi-tests/testReadableStream.cpp
+@@ -0,0 +1,1195 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
++ * vim: set ts=8 sts=2 et sw=2 tw=80:
++ */
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "jsapi.h"
++#include "jsfriendapi.h"
++#include "js/experimental/TypedData.h"  // JS_GetArrayBufferViewData, JS_IsUint8Array
++#include "js/PropertyAndElement.h"  // JS_GetProperty, JS_HasProperty, JS_SetProperty
++#include "js/Stream.h"
++#include "jsapi-tests/tests.h"
++
++using namespace JS;
++
++char testBufferData[] =
++    "1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
++
++struct StubExternalUnderlyingSource
++    : public JS::ReadableStreamUnderlyingSource {
++  void* buffer = testBufferData;
++  bool dataRequestCBCalled = false;
++  bool writeIntoRequestBufferCBCalled = false;
++  bool cancelStreamCBCalled = false;
++  Value cancelStreamReason;
++  bool streamClosedCBCalled = false;
++  Value streamClosedReason;
++  bool streamErroredCBCalled = false;
++  Value streamErroredReason;
++  bool finalizeStreamCBCalled = false;
++  void* finalizedStreamUnderlyingSource;
++
++  static StubExternalUnderlyingSource instance;
++
++  void requestData(JSContext* cx, HandleObject stream,
++                   size_t desiredSize) override {
++    js::AssertSameCompartment(cx, stream);
++    MOZ_RELEASE_ASSERT(!dataRequestCBCalled, "Invalid test setup");
++    dataRequestCBCalled = true;
++  }
++
++  void writeIntoReadRequestBuffer(JSContext* cx, HandleObject stream,
++                                  JS::HandleObject chunk, size_t length,
++                                  size_t* bytesWritten) override {
++    js::AssertSameCompartment(cx, stream);
++    MOZ_RELEASE_ASSERT(!writeIntoRequestBufferCBCalled, "Invalid test setup");
++    writeIntoRequestBufferCBCalled = true;
++
++    MOZ_RELEASE_ASSERT(this == &StubExternalUnderlyingSource::instance);
++    MOZ_RELEASE_ASSERT(StubExternalUnderlyingSource::instance.buffer ==
++                       testBufferData);
++    MOZ_RELEASE_ASSERT(length <= sizeof(testBufferData));
++
++    JS::AutoCheckCannotGC noGC;
++    bool isSharedMemory;
++
++    void* buffer = JS_GetArrayBufferViewData(chunk, &isSharedMemory, noGC);
++    MOZ_ASSERT(!isSharedMemory);
++
++    memcpy(buffer, testBufferData, length);
++    *bytesWritten = length;
++  }
++
++  Value cancel(JSContext* cx, HandleObject stream,
++               HandleValue reason) override {
++    js::AssertSameCompartment(cx, stream);
++    js::AssertSameCompartment(cx, reason);
++    MOZ_RELEASE_ASSERT(!cancelStreamCBCalled, "Invalid test setup");
++    cancelStreamCBCalled = true;
++    cancelStreamReason = reason;
++    return reason;
++  }
++
++  void onClosed(JSContext* cx, HandleObject stream) override {
++    js::AssertSameCompartment(cx, stream);
++    MOZ_RELEASE_ASSERT(!streamClosedCBCalled, "Invalid test setup");
++    streamClosedCBCalled = true;
++  }
++
++  void onErrored(JSContext* cx, HandleObject stream,
++                 HandleValue reason) override {
++    js::AssertSameCompartment(cx, stream);
++    js::AssertSameCompartment(cx, reason);
++    MOZ_RELEASE_ASSERT(!streamErroredCBCalled, "Invalid test setup");
++    streamErroredCBCalled = true;
++    streamErroredReason = reason;
++  }
++
++  void finalize() override {
++    MOZ_RELEASE_ASSERT(!finalizeStreamCBCalled, "Invalid test setup");
++    finalizeStreamCBCalled = true;
++    finalizedStreamUnderlyingSource = this;
++  }
++
++  void reset() {
++    dataRequestCBCalled = false;
++    writeIntoRequestBufferCBCalled = false;
++    cancelStreamReason = UndefinedValue();
++    cancelStreamCBCalled = false;
++    streamClosedCBCalled = false;
++    streamErroredCBCalled = false;
++    finalizeStreamCBCalled = false;
++  }
++};
++
++StubExternalUnderlyingSource StubExternalUnderlyingSource::instance;
++
++static_assert(alignof(StubExternalUnderlyingSource) > 1,
++              "UnderlyingSource pointers must not have the low bit set");
++
++static JSObject* NewDefaultStream(JSContext* cx, HandleObject source = nullptr,
++                                  HandleFunction size = nullptr,
++                                  double highWaterMark = 1,
++                                  HandleObject proto = nullptr) {
++  RootedObject stream(cx, NewReadableDefaultStreamObject(cx, source, size,
++                                                         highWaterMark, proto));
++  if (stream) {
++    MOZ_RELEASE_ASSERT(IsReadableStream(stream));
++  }
++  return stream;
++}
++
++static bool GetIterResult(JSContext* cx, HandleObject promise,
++                          MutableHandleValue value, bool* done) {
++  RootedObject iterResult(cx, &GetPromiseResult(promise).toObject());
++
++  bool found;
++  if (!JS_HasProperty(cx, iterResult, "value", &found)) {
++    return false;
++  }
++  MOZ_RELEASE_ASSERT(found);
++  if (!JS_HasProperty(cx, iterResult, "done", &found)) {
++    return false;
++  }
++  MOZ_RELEASE_ASSERT(found);
++
++  RootedValue doneVal(cx);
++  if (!JS_GetProperty(cx, iterResult, "value", value)) {
++    return false;
++  }
++  if (!JS_GetProperty(cx, iterResult, "done", &doneVal)) {
++    return false;
++  }
++
++  *done = doneVal.toBoolean();
++  if (*done) {
++    MOZ_RELEASE_ASSERT(value.isUndefined());
++  }
++
++  return true;
++}
++
++static JSObject* GetReadChunk(JSContext* cx, HandleObject readRequest) {
++  MOZ_RELEASE_ASSERT(GetPromiseState(readRequest) == PromiseState::Fulfilled);
++  RootedValue resultVal(cx, GetPromiseResult(readRequest));
++  MOZ_RELEASE_ASSERT(resultVal.isObject());
++  RootedObject result(cx, &resultVal.toObject());
++  RootedValue chunkVal(cx);
++  JS_GetProperty(cx, result, "value", &chunkVal);
++  return &chunkVal.toObject();
++}
++
++struct StreamTestFixture : public JSAPIRuntimeTest {
++  virtual ~StreamTestFixture() {}
++};
++
++BEGIN_FIXTURE_TEST(StreamTestFixture, testReadableStream_NewReadableStream) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  ReadableStreamMode mode;
++  CHECK(ReadableStreamGetMode(cx, stream, &mode));
++  CHECK(mode == ReadableStreamMode::Default);
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_NewReadableStream)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamGetReaderDefault) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  CHECK(reader);
++  CHECK(IsReadableStreamDefaultReader(reader));
++  bool locked;
++  CHECK(ReadableStreamIsLocked(cx, stream, &locked));
++  CHECK(locked);
++  bool closed;
++  CHECK(ReadableStreamReaderIsClosed(cx, reader, &closed));
++  CHECK(!closed);
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamGetReaderDefault)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamTee) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++
++  RootedObject leftStream(cx);
++  RootedObject rightStream(cx);
++  CHECK(ReadableStreamTee(cx, stream, &leftStream, &rightStream));
++  bool locked;
++  CHECK(ReadableStreamIsLocked(cx, stream, &locked));
++  CHECK(locked);
++  CHECK(leftStream);
++  CHECK(IsReadableStream(leftStream));
++  CHECK(rightStream);
++  CHECK(IsReadableStream(rightStream));
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamTee)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamEnqueue) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++
++  RootedObject chunk(cx, JS_NewPlainObject(cx));
++  CHECK(chunk);
++  RootedValue chunkVal(cx, ObjectValue(*chunk));
++  CHECK(ReadableStreamEnqueue(cx, stream, chunkVal));
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamEnqueue)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamDefaultReaderRead) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  CHECK(reader);
++
++  RootedObject request(cx, ReadableStreamDefaultReaderRead(cx, reader));
++  CHECK(request);
++  CHECK(IsPromiseObject(request));
++  CHECK(GetPromiseState(request) == PromiseState::Pending);
++
++  RootedObject chunk(cx, JS_NewPlainObject(cx));
++  CHECK(chunk);
++  RootedValue chunkVal(cx, ObjectValue(*chunk));
++  CHECK(ReadableStreamEnqueue(cx, stream, chunkVal));
++
++  CHECK(GetReadChunk(cx, request) == chunk);
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamDefaultReaderRead)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamDefaultReaderClose) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  CHECK(reader);
++
++  RootedObject request(cx, ReadableStreamDefaultReaderRead(cx, reader));
++  CHECK(request);
++  CHECK(IsPromiseObject(request));
++  CHECK(GetPromiseState(request) == PromiseState::Pending);
++
++  CHECK(ReadableStreamClose(cx, stream));
++
++  bool done;
++  RootedValue value(cx);
++  CHECK(GetPromiseState(request) == PromiseState::Fulfilled);
++  CHECK(GetIterResult(cx, request, &value, &done));
++  CHECK(value.isUndefined());
++  CHECK(done);
++
++  // The callbacks are only invoked for external streams.
++  CHECK(!StubExternalUnderlyingSource::instance.streamClosedCBCalled);
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamDefaultReaderClose)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamDefaultReaderError) {
++  StubExternalUnderlyingSource::instance.reset();
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  CHECK(reader);
++
++  RootedObject request(cx, ReadableStreamDefaultReaderRead(cx, reader));
++  CHECK(request);
++  CHECK(IsPromiseObject(request));
++  CHECK(GetPromiseState(request) == PromiseState::Pending);
++
++  bool locked;
++  CHECK(ReadableStreamIsLocked(cx, stream, &locked));
++  CHECK(locked);
++  bool readable;
++  CHECK(ReadableStreamIsReadable(cx, stream, &readable));
++  CHECK(readable);
++  RootedValue error(cx, Int32Value(42));
++  CHECK(ReadableStreamError(cx, stream, error));
++
++  CHECK(GetPromiseState(request) == PromiseState::Rejected);
++  RootedValue reason(cx, GetPromiseResult(request));
++  CHECK(reason.isInt32());
++  CHECK(reason.toInt32() == 42);
++
++  // The callbacks are only invoked for external streams.
++  CHECK(!StubExternalUnderlyingSource::instance.streamErroredCBCalled);
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamDefaultReaderError)
++
++static JSObject* NewExternalSourceStream(
++    JSContext* cx, ReadableStreamUnderlyingSource* source) {
++  RootedObject stream(cx, NewReadableExternalSourceStreamObject(cx, source));
++  if (stream) {
++    MOZ_RELEASE_ASSERT(IsReadableStream(stream));
++  }
++  return stream;
++}
++
++static JSObject* NewExternalSourceStream(JSContext* cx) {
++  return NewExternalSourceStream(cx, &StubExternalUnderlyingSource::instance);
++}
++
++BEGIN_FIXTURE_TEST(
++    StreamTestFixture,
++    testReadableStream_CreateReadableByteStreamWithExternalSource) {
++  StubExternalUnderlyingSource::instance.reset();
++
++  RootedObject stream(cx, NewExternalSourceStream(cx));
++  CHECK(stream);
++  ReadableStreamMode mode;
++  CHECK(ReadableStreamGetMode(cx, stream, &mode));
++  CHECK(mode == ReadableStreamMode::ExternalSource);
++  ReadableStreamUnderlyingSource* underlyingSource;
++  CHECK(
++      ReadableStreamGetExternalUnderlyingSource(cx, stream, &underlyingSource));
++  CHECK(underlyingSource == &StubExternalUnderlyingSource::instance);
++  bool locked;
++  CHECK(ReadableStreamIsLocked(cx, stream, &locked));
++  CHECK(locked);
++  CHECK(ReadableStreamReleaseExternalUnderlyingSource(cx, stream));
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_CreateReadableByteStreamWithExternalSource)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture, testReadableStream_ExternalSourceCancel) {
++  StubExternalUnderlyingSource::instance.reset();
++
++  RootedObject stream(cx, NewExternalSourceStream(cx));
++  CHECK(stream);
++  RootedValue reason(cx, Int32Value(42));
++  CHECK(ReadableStreamCancel(cx, stream, reason));
++  CHECK(StubExternalUnderlyingSource::instance.cancelStreamCBCalled);
++  CHECK(StubExternalUnderlyingSource::instance.cancelStreamReason == reason);
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ExternalSourceCancel)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ExternalSourceGetReader) {
++  StubExternalUnderlyingSource::instance.reset();
++
++  RootedObject stream(cx, NewExternalSourceStream(cx));
++  CHECK(stream);
++
++  RootedValue streamVal(cx, ObjectValue(*stream));
++  CHECK(JS_SetProperty(cx, global, "stream", streamVal));
++  RootedValue rval(cx);
++  EVAL("stream.getReader()", &rval);
++  CHECK(rval.isObject());
++  RootedObject reader(cx, &rval.toObject());
++  CHECK(IsReadableStreamDefaultReader(reader));
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ExternalSourceGetReader)
++
++enum class CompartmentMode {
++  Same,
++  Cross,
++};
++
++struct ReadFromExternalSourceFixture : public StreamTestFixture {
++  virtual ~ReadFromExternalSourceFixture() {}
++
++  // On success, streamGlobal is a global object (not a wrapper)
++  // and stream is in the same compartment as cx (it may be a CCW).
++  bool createExternalSourceStream(CompartmentMode compartmentMode,
++                                  MutableHandleObject streamGlobal,
++                                  MutableHandleObject stream) {
++    if (compartmentMode == CompartmentMode::Same) {
++      streamGlobal.set(global);
++      stream.set(NewExternalSourceStream(cx));
++      if (!stream) {
++        return false;
++      }
++    } else {
++      RootedObject savedGlobal(cx, global);
++      streamGlobal.set(createGlobal());
++      if (!streamGlobal) {
++        return false;
++      }
++      global = savedGlobal;
++
++      {
++        JSAutoRealm ar(cx, streamGlobal);
++        stream.set(NewExternalSourceStream(cx));
++        if (!stream) {
++          return false;
++        }
++      }
++      if (!JS_WrapObject(cx, stream)) {
++        return false;
++      }
++    }
++    return true;
++  }
++
++  bool readWithoutDataAvailable(CompartmentMode compartmentMode,
++                                const char* evalSrc, const char* evalSrc2,
++                                uint32_t writtenLength) {
++    StubExternalUnderlyingSource::instance.reset();
++    definePrint();
++
++    // Create the stream.
++    RootedObject streamGlobal(cx);
++    RootedObject stream(cx);  // can be a wrapper
++    CHECK(createExternalSourceStream(compartmentMode, &streamGlobal, &stream));
++    js::RunJobs(cx);
++
++    // GetExternalUnderlyingSource locks the stream.
++    ReadableStreamUnderlyingSource* underlyingSource;
++    CHECK(ReadableStreamGetExternalUnderlyingSource(cx, stream,
++                                                    &underlyingSource));
++    CHECK(underlyingSource == &StubExternalUnderlyingSource::instance);
++    bool locked;
++    CHECK(ReadableStreamIsLocked(cx, stream, &locked));
++    CHECK(locked);
++    CHECK(ReadableStreamReleaseExternalUnderlyingSource(cx, stream));
++
++    // Run caller-supplied JS code to read from the stream.
++    RootedValue streamVal(cx, ObjectValue(*stream));
++    CHECK(JS_SetProperty(cx, global, "stream", streamVal));
++    RootedValue rval(cx);
++    EVAL(evalSrc, &rval);
++    CHECK(StubExternalUnderlyingSource::instance.dataRequestCBCalled);
++    CHECK(
++        !StubExternalUnderlyingSource::instance.writeIntoRequestBufferCBCalled);
++    CHECK(rval.isObject());
++    RootedObject unwrappedPromise(cx,
++                                  js::CheckedUnwrapStatic(&rval.toObject()));
++    CHECK(unwrappedPromise);
++    CHECK(IsPromiseObject(unwrappedPromise));
++    CHECK(GetPromiseState(unwrappedPromise) == PromiseState::Pending);
++
++    // Stream in some data; this resolves the read() result promise.
++    size_t length = sizeof(testBufferData);
++    CHECK(ReadableStreamUpdateDataAvailableFromSource(cx, stream, length));
++    CHECK(
++        StubExternalUnderlyingSource::instance.writeIntoRequestBufferCBCalled);
++    CHECK(GetPromiseState(unwrappedPromise) == PromiseState::Fulfilled);
++    RootedObject chunk(cx);
++    {
++      JSAutoRealm ar(cx, unwrappedPromise);
++      RootedValue iterVal(cx);
++      bool done;
++      if (!GetIterResult(cx, unwrappedPromise, &iterVal, &done)) {
++        return false;
++      }
++      CHECK(!done);
++      chunk = &iterVal.toObject();
++    }
++    CHECK(JS_WrapObject(cx, &chunk));
++    CHECK(JS_IsUint8Array(chunk));
++
++    {
++      JS::AutoCheckCannotGC noGC(cx);
++      bool dummy;
++      void* buffer = JS_GetArrayBufferViewData(chunk, &dummy, noGC);
++      CHECK(!memcmp(buffer, testBufferData, writtenLength));
++    }
++
++    // Check the callbacks fired by calling read() again.
++    StubExternalUnderlyingSource::instance.dataRequestCBCalled = false;
++    StubExternalUnderlyingSource::instance.writeIntoRequestBufferCBCalled =
++        false;
++    EVAL(evalSrc2, &rval);
++    CHECK(StubExternalUnderlyingSource::instance.dataRequestCBCalled);
++    CHECK(
++        !StubExternalUnderlyingSource::instance.writeIntoRequestBufferCBCalled);
++
++    return true;
++  }
++
++  bool readWithDataAvailable(CompartmentMode compartmentMode,
++                             const char* evalSrc, uint32_t writtenLength) {
++    StubExternalUnderlyingSource::instance.reset();
++    definePrint();
++
++    // Create a stream.
++    RootedObject streamGlobal(cx);
++    RootedObject stream(cx);
++    CHECK(createExternalSourceStream(compartmentMode, &streamGlobal, &stream));
++
++    // Getting the underlying source locks the stream.
++    ReadableStreamUnderlyingSource* underlyingSource;
++    CHECK(ReadableStreamGetExternalUnderlyingSource(cx, stream,
++                                                    &underlyingSource));
++    CHECK(underlyingSource == &StubExternalUnderlyingSource::instance);
++    bool locked;
++    CHECK(ReadableStreamIsLocked(cx, stream, &locked));
++    CHECK(locked);
++    CHECK(ReadableStreamReleaseExternalUnderlyingSource(cx, stream));
++
++    // Make some data available.
++    size_t length = sizeof(testBufferData);
++    CHECK(ReadableStreamUpdateDataAvailableFromSource(cx, stream, length));
++
++    // Read from the stream.
++    RootedValue streamVal(cx, ObjectValue(*stream));
++    CHECK(JS_SetProperty(cx, global, "stream", streamVal));
++    RootedValue rval(cx);
++    EVAL(evalSrc, &rval);
++    CHECK(
++        StubExternalUnderlyingSource::instance.writeIntoRequestBufferCBCalled);
++    CHECK(rval.isObject());
++    RootedObject unwrappedPromise(cx,
++                                  js::CheckedUnwrapStatic(&rval.toObject()));
++    CHECK(unwrappedPromise);
++    CHECK(IsPromiseObject(unwrappedPromise));
++    CHECK(GetPromiseState(unwrappedPromise) == PromiseState::Fulfilled);
++    RootedObject chunk(cx);
++    {
++      JSAutoRealm ar(cx, unwrappedPromise);
++      RootedValue iterVal(cx);
++      bool done;
++      if (!GetIterResult(cx, unwrappedPromise, &iterVal, &done)) {
++        return false;
++      }
++      CHECK(!done);
++      chunk = &iterVal.toObject();
++    }
++    CHECK(JS_WrapObject(cx, &chunk));
++    CHECK(JS_IsUint8Array(chunk));
++
++    {
++      JS::AutoCheckCannotGC noGC(cx);
++      bool dummy;
++      void* buffer = JS_GetArrayBufferViewData(chunk, &dummy, noGC);
++      CHECK(!memcmp(buffer, testBufferData, writtenLength));
++    }
++
++    return true;
++  }
++};
++
++BEGIN_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithoutDataAvailable) {
++  return readWithoutDataAvailable(CompartmentMode::Same,
++                                  "r = stream.getReader(); r.read()",
++                                  "r.read()", sizeof(testBufferData));
++}
++END_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithoutDataAvailable)
++
++BEGIN_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithoutDataAvailable_CrossCompartment1) {
++  // Scenario 1: The stream and reader are both in the same compartment, but
++  // ReadableStreamUpdateDataAvailableFromSource is applied to a wrapper.
++  return readWithoutDataAvailable(CompartmentMode::Cross,
++                                  "r = stream.getReader(); r.read()",
++                                  "r.read()", sizeof(testBufferData));
++}
++END_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithoutDataAvailable_CrossCompartment1)
++
++BEGIN_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithoutDataAvailable_CrossCompartment2) {
++  // Scenario 2: The stream and reader are in the same compartment, but a
++  // `read` method from another compartment is used on the reader.
++  return readWithoutDataAvailable(
++      CompartmentMode::Cross,
++      "r = stream.getReader(); read = new "
++      "ReadableStream({start(){}}).getReader().read; read.call(r)",
++      "read.call(r)", sizeof(testBufferData));
++}
++END_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithoutDataAvailable_CrossCompartment2)
++
++BEGIN_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithoutDataAvailable_CrossCompartment3) {
++  // Scenario 3: The stream and reader are in different compartments.
++  return readWithoutDataAvailable(
++      CompartmentMode::Cross,
++      "r = ReadableStream.prototype.getReader.call(stream); r.read()",
++      "r.read()", sizeof(testBufferData));
++}
++END_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithoutDataAvailable_CrossCompartment3)
++
++BEGIN_FIXTURE_TEST(ReadFromExternalSourceFixture,
++                   testReadableStream_ExternalSourceCloseWithPendingRead) {
++  CHECK(readWithoutDataAvailable(CompartmentMode::Same,
++                                 "r = stream.getReader(); request0 = r.read(); "
++                                 "request1 = r.read(); request0",
++                                 "r.read()", sizeof(testBufferData)));
++
++  RootedValue val(cx);
++  CHECK(JS_GetProperty(cx, global, "request1", &val));
++  CHECK(val.isObject());
++  RootedObject request(cx, &val.toObject());
++  CHECK(IsPromiseObject(request));
++  CHECK(GetPromiseState(request) == PromiseState::Pending);
++
++  CHECK(JS_GetProperty(cx, global, "stream", &val));
++  RootedObject stream(cx, &val.toObject());
++  ReadableStreamClose(cx, stream);
++
++  val = GetPromiseResult(request);
++  CHECK(val.isObject());
++  RootedObject result(cx, &val.toObject());
++
++  JS_GetProperty(cx, result, "done", &val);
++  CHECK(val.isBoolean());
++  CHECK(val.toBoolean() == true);
++
++  JS_GetProperty(cx, result, "value", &val);
++  CHECK(val.isUndefined());
++  return true;
++}
++END_FIXTURE_TEST(ReadFromExternalSourceFixture,
++                 testReadableStream_ExternalSourceCloseWithPendingRead)
++
++BEGIN_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithDataAvailable) {
++  return readWithDataAvailable(CompartmentMode::Same,
++                               "r = stream.getReader(); r.read()",
++                               sizeof(testBufferData));
++}
++END_FIXTURE_TEST(ReadFromExternalSourceFixture,
++                 testReadableStream_ExternalSourceReadDefaultWithDataAvailable)
++
++BEGIN_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithDataAvailable_CrossCompartment1) {
++  // Scenario 1: The stream and reader are both in the same compartment, but
++  // ReadableStreamUpdateDataAvailableFromSource is applied to a wrapper.
++  return readWithDataAvailable(CompartmentMode::Cross,
++                               "r = stream.getReader(); r.read()",
++                               sizeof(testBufferData));
++}
++END_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithDataAvailable_CrossCompartment1)
++
++BEGIN_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithDataAvailable_CrossCompartment2) {
++  // Scenario 2: The stream and reader are in the same compartment, but a
++  // `read` method from another compartment is used on the reader.
++  return readWithDataAvailable(
++      CompartmentMode::Cross,
++      "r = stream.getReader(); read = new "
++      "ReadableStream({start(){}}).getReader().read; read.call(r)",
++      sizeof(testBufferData));
++}
++END_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithDataAvailable_CrossCompartment2)
++
++BEGIN_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithDataAvailable_CrossCompartment3) {
++  // Scenario 3: The stream and reader are in different compartments.
++  return readWithDataAvailable(
++      CompartmentMode::Cross,
++      "r = ReadableStream.prototype.getReader.call(stream); r.read()",
++      sizeof(testBufferData));
++}
++END_FIXTURE_TEST(
++    ReadFromExternalSourceFixture,
++    testReadableStream_ExternalSourceReadDefaultWithDataAvailable_CrossCompartment3)
++
++// Cross-global tests:
++BEGIN_FIXTURE_TEST(
++    StreamTestFixture,
++    testReadableStream_ReadableStreamOtherGlobalDefaultReaderRead) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    RootedObject reader(cx, ReadableStreamGetReader(
++                                cx, stream, ReadableStreamReaderMode::Default));
++    CHECK(reader);
++
++    RootedObject request(cx, ReadableStreamDefaultReaderRead(cx, reader));
++    CHECK(request);
++    CHECK(IsPromiseObject(request));
++    CHECK(!js::IsWrapper(request));
++    CHECK(GetPromiseState(request) == PromiseState::Pending);
++
++    RootedObject chunk(cx, JS_NewPlainObject(cx));
++    CHECK(chunk);
++    RootedValue chunkVal(cx, ObjectValue(*chunk));
++    CHECK(ReadableStreamEnqueue(cx, stream, chunkVal));
++
++    CHECK(GetReadChunk(cx, request) == chunk);
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamOtherGlobalDefaultReaderRead)
++
++BEGIN_FIXTURE_TEST(
++    StreamTestFixture,
++    testReadableStream_ReadableStreamGetExternalUnderlyingSource) {
++  StubExternalUnderlyingSource::instance.reset();
++
++  RootedObject stream(cx, NewExternalSourceStream(cx));
++  CHECK(stream);
++  ReadableStreamUnderlyingSource* source;
++  CHECK(ReadableStreamGetExternalUnderlyingSource(cx, stream, &source));
++  CHECK(source == &StubExternalUnderlyingSource::instance);
++  CHECK(ReadableStreamReleaseExternalUnderlyingSource(cx, stream));
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    ReadableStreamUnderlyingSource* source;
++    CHECK(ReadableStreamGetExternalUnderlyingSource(cx, stream, &source));
++    CHECK(source == &StubExternalUnderlyingSource::instance);
++    CHECK(ReadableStreamReleaseExternalUnderlyingSource(cx, stream));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamGetExternalUnderlyingSource)
++
++BEGIN_FIXTURE_TEST(
++    StreamTestFixture,
++    testReadableStream_ReadableStreamUpdateDataAvailableFromSource) {
++  RootedObject stream(cx, NewExternalSourceStream(cx));
++  CHECK(stream);
++  CHECK(ReadableStreamUpdateDataAvailableFromSource(cx, stream, 0));
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    CHECK(ReadableStreamUpdateDataAvailableFromSource(cx, stream, 1));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamUpdateDataAvailableFromSource)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture, testReadableStream_IsReadableStream) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  CHECK(IsReadableStream(stream));
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    CHECK(IsReadableStream(stream));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_IsReadableStream)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamGetMode) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  ReadableStreamMode mode;
++  CHECK(ReadableStreamGetMode(cx, stream, &mode));
++  CHECK(mode == ReadableStreamMode::Default);
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    CHECK(ReadableStreamGetMode(cx, stream, &mode));
++    CHECK(mode == ReadableStreamMode::Default);
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamGetMode)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamIsReadable) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  bool result;
++  CHECK(ReadableStreamIsReadable(cx, stream, &result));
++  CHECK(result);
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    CHECK(ReadableStreamIsReadable(cx, stream, &result));
++    CHECK(result);
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamIsReadable)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamIsLocked) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  bool result;
++  CHECK(ReadableStreamIsLocked(cx, stream, &result));
++  CHECK_EQUAL(result, false);
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    CHECK(ReadableStreamIsLocked(cx, stream, &result));
++    CHECK_EQUAL(result, false);
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamIsLocked)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamIsDisturbed) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  bool result;
++  CHECK(ReadableStreamIsDisturbed(cx, stream, &result));
++  CHECK_EQUAL(result, false);
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    CHECK(ReadableStreamIsDisturbed(cx, stream, &result));
++    CHECK_EQUAL(result, false);
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamIsDisturbed)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamCancel) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++
++  RootedValue reason(cx);
++  JSObject* callResult = ReadableStreamCancel(cx, stream, reason);
++  CHECK(callResult);
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    RootedValue reason(cx);
++    JSObject* callResult = ReadableStreamCancel(cx, stream, reason);
++    CHECK(callResult);
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamCancel)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamGetReader) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++
++  RootedObject reader(cx);
++  reader =
++      ReadableStreamGetReader(cx, stream, ReadableStreamReaderMode::Default);
++  CHECK(reader);
++  CHECK(IsReadableStreamDefaultReader(reader));
++  CHECK(ReadableStreamReaderReleaseLock(cx, reader));
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    JSObject* callResult =
++        ReadableStreamGetReader(cx, stream, ReadableStreamReaderMode::Default);
++    CHECK(callResult);
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamGetReader)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamTee_CrossCompartment) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++
++  RootedObject branch1Stream(cx);
++  RootedObject branch2Stream(cx);
++  CHECK(ReadableStreamTee(cx, stream, &branch1Stream, &branch2Stream));
++  CHECK(IsReadableStream(branch1Stream));
++  CHECK(IsReadableStream(branch2Stream));
++  stream = branch1Stream;
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    CHECK(ReadableStreamTee(cx, stream, &branch1Stream, &branch2Stream));
++    CHECK(IsReadableStream(branch1Stream));
++    CHECK(IsReadableStream(branch2Stream));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamTee_CrossCompartment)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamGetDesiredSize) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  bool hasValue;
++  double value;
++  CHECK(ReadableStreamGetDesiredSize(cx, stream, &hasValue, &value));
++  CHECK_EQUAL(hasValue, true);
++  CHECK_EQUAL(value, 1.0);
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    hasValue = false;
++    value = 0;
++    CHECK(ReadableStreamGetDesiredSize(cx, stream, &hasValue, &value));
++    CHECK_EQUAL(hasValue, true);
++    CHECK_EQUAL(value, 1.0);
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamGetDesiredSize)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamClose) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  CHECK(ReadableStreamClose(cx, stream));
++
++  stream = NewDefaultStream(cx);
++  CHECK(stream);
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    CHECK(ReadableStreamClose(cx, stream));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamClose)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamEnqueue_CrossCompartment) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedValue chunk(cx);
++  CHECK(ReadableStreamEnqueue(cx, stream, chunk));
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    RootedValue chunk(cx);
++    CHECK(ReadableStreamEnqueue(cx, stream, chunk));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamEnqueue_CrossCompartment)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamError) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedValue error(cx);
++  CHECK(ReadableStreamError(cx, stream, error));
++
++  stream = NewDefaultStream(cx);
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &stream));
++    RootedValue error(cx);
++    CHECK(ReadableStreamError(cx, stream, error));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_ReadableStreamError)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_IsReadableStreamReader) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  CHECK(reader);
++  CHECK(IsReadableStreamReader(reader));
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &reader));
++    CHECK(IsReadableStreamReader(reader));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture, testReadableStream_IsReadableStreamReader)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_IsReadableStreamDefaultReader) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  CHECK(IsReadableStreamDefaultReader(reader));
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &reader));
++    CHECK(IsReadableStreamDefaultReader(reader));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_IsReadableStreamDefaultReader)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamReaderIsClosed) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  bool result;
++  CHECK(ReadableStreamReaderIsClosed(cx, reader, &result));
++  CHECK_EQUAL(result, false);
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &reader));
++    bool result;
++    CHECK(ReadableStreamReaderIsClosed(cx, reader, &result));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamReaderIsClosed)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamReaderCancel) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  RootedValue reason(cx);
++  CHECK(ReadableStreamReaderCancel(cx, reader, reason));
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &reader));
++    RootedValue reason(cx);
++    CHECK(ReadableStreamReaderCancel(cx, reader, reason));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamReaderCancel)
++
++BEGIN_FIXTURE_TEST(StreamTestFixture,
++                   testReadableStream_ReadableStreamReaderReleaseLock) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  CHECK(reader);
++  CHECK(ReadableStreamReaderReleaseLock(cx, reader));
++
++  // Repeat the test cross-compartment. This creates a new reader, since
++  // releasing the lock above deactivated the first reader.
++  reader =
++      ReadableStreamGetReader(cx, stream, ReadableStreamReaderMode::Default);
++  CHECK(reader);
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &reader));
++    CHECK(ReadableStreamReaderReleaseLock(cx, reader));
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(StreamTestFixture,
++                 testReadableStream_ReadableStreamReaderReleaseLock)
++
++BEGIN_FIXTURE_TEST(
++    StreamTestFixture,
++    testReadableStream_ReadableStreamDefaultReaderRead_CrossCompartment) {
++  RootedObject stream(cx, NewDefaultStream(cx));
++  CHECK(stream);
++  RootedObject reader(cx, ReadableStreamGetReader(
++                              cx, stream, ReadableStreamReaderMode::Default));
++  JSObject* callResult = ReadableStreamDefaultReaderRead(cx, reader);
++  CHECK(callResult);
++
++  RootedObject otherGlobal(cx, createGlobal());
++  CHECK(otherGlobal);
++  {
++    JSAutoRealm ar(cx, otherGlobal);
++    CHECK(JS_WrapObject(cx, &reader));
++    JSObject* callResult = ReadableStreamDefaultReaderRead(cx, reader);
++    CHECK(callResult);
++  }
++
++  return true;
++}
++END_FIXTURE_TEST(
++    StreamTestFixture,
++    testReadableStream_ReadableStreamDefaultReaderRead_CrossCompartment)
+diff --git a/js/src/jsapi-tests/tests.cpp b/js/src/jsapi-tests/tests.cpp
+index d515791104b6..21a86ed43dd9 100644
+--- a/js/src/jsapi-tests/tests.cpp
++++ b/js/src/jsapi-tests/tests.cpp
+@@ -118,7 +118,9 @@ JSObject* JSAPIRuntimeTest::createGlobal(JSPrincipals* principals) {
+   /* Create the global object. */
+   JS::RootedObject newGlobal(cx);
+   JS::RealmOptions options;
+-  options.creationOptions().setSharedMemoryAndAtomicsEnabled(true);
++  options.creationOptions()
++      .setStreamsEnabled(true)
++      .setSharedMemoryAndAtomicsEnabled(true);
+   newGlobal = JS_NewGlobalObject(cx, getGlobalClass(), principals,
+                                  JS::FireOnNewGlobalHook, options);
+   if (!newGlobal) {
+diff --git a/js/src/moz.build b/js/src/moz.build
+index 121dfd9c76e9..a000e4a42dda 100644
+--- a/js/src/moz.build
++++ b/js/src/moz.build
+@@ -201,6 +201,7 @@ EXPORTS.js += [
+     "../public/SourceText.h",
+     "../public/StableStringChars.h",
+     "../public/Stack.h",
++    "../public/Stream.h",
+     "../public/StreamConsumer.h",
+     "../public/String.h",
+     "../public/StructuredClone.h",
+@@ -451,6 +452,34 @@ UNIFIED_SOURCES += [
+     "vm/Xdr.cpp",
+ ]
+ 
++if CONFIG["MOZ_JS_STREAMS"]:
++    UNIFIED_SOURCES += [
++        "builtin/streams/MiscellaneousOperations.cpp",
++        "builtin/streams/PipeToState.cpp",
++        "builtin/streams/PullIntoDescriptor.cpp",
++        "builtin/streams/QueueingStrategies.cpp",
++        "builtin/streams/QueueWithSizes.cpp",
++        "builtin/streams/ReadableByteStreamController.cpp",
++        "builtin/streams/ReadableByteStreamControllerOperations.cpp",
++        "builtin/streams/ReadableStream.cpp",
++        "builtin/streams/ReadableStreamBYOBReader.cpp",
++        "builtin/streams/ReadableStreamBYOBRequest.cpp",
++        "builtin/streams/ReadableStreamDefaultController.cpp",
++        "builtin/streams/ReadableStreamDefaultControllerOperations.cpp",
++        "builtin/streams/ReadableStreamDefaultReader.cpp",
++        "builtin/streams/ReadableStreamInternals.cpp",
++        "builtin/streams/ReadableStreamOperations.cpp",
++        "builtin/streams/ReadableStreamReader.cpp",
++        "builtin/streams/StreamAPI.cpp",
++        "builtin/streams/TeeState.cpp",
++        "builtin/streams/WritableStream.cpp",
++        "builtin/streams/WritableStreamDefaultController.cpp",
++        "builtin/streams/WritableStreamDefaultControllerOperations.cpp",
++        "builtin/streams/WritableStreamDefaultWriter.cpp",
++        "builtin/streams/WritableStreamOperations.cpp",
++        "builtin/streams/WritableStreamWriterOperations.cpp",
++    ]
++
+ # builtin/RegExp.cpp cannot be built in unified mode because it causes huge
+ #   win32 test slowdowns
+ # jsmath.cpp cannot be built in unified mode because it needs to re-#define the
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+index bb2b2e0a4328..bcaba8febee8 100644
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -847,6 +847,12 @@ bool shell::enableTestWasmAwaitTier2 = false;
+ bool shell::enableSourcePragmas = true;
+ bool shell::enableAsyncStacks = false;
+ bool shell::enableAsyncStackCaptureDebuggeeOnly = false;
++bool shell::enableStreams = false;
++bool shell::enableReadableByteStreams = false;
++bool shell::enableBYOBStreamReaders = false;
++bool shell::enableWritableStreams = false;
++bool shell::enableReadableStreamPipeTo = false;
++bool shell::enableWeakRefs = false;
+ bool shell::enableToSource = false;
+ #ifdef JS_GC_ZEAL
+ uint32_t shell::gZealBits = 0;
+@@ -4552,6 +4558,7 @@ static void SetStandardRealmOptions(JS::RealmOptions& options) {
+   options.creationOptions()
+       .setSharedMemoryAndAtomicsEnabled(enableSharedMemory)
+       .setCoopAndCoepEnabled(false)
++      .setStreamsEnabled(enableStreams)
+       .setToSourceEnabled(enableToSource);
+ }
+ 
+@@ -12944,6 +12951,20 @@ bool InitOptionParser(OptionParser& op) {
+       !op.addBoolOption('\0', "less-debug-code",
+                         "Emit less machine code for "
+                         "checking assertions under DEBUG.") ||
++      !op.addBoolOption('\0', "enable-streams",
++                        "Enable WHATWG Streams (default)") ||
++      !op.addBoolOption('\0', "no-streams", "Disable WHATWG Streams") ||
++      !op.addBoolOption('\0', "enable-readable-byte-streams",
++                        "Enable support for WHATWG ReadableStreams of type "
++                        "'bytes'") ||
++      !op.addBoolOption('\0', "enable-byob-stream-readers",
++                        "Enable support for getting BYOB readers for WHATWG "
++                        "ReadableStreams of type \"bytes\"") ||
++      !op.addBoolOption('\0', "enable-writable-streams",
++                        "Enable support for WHATWG WritableStreams") ||
++      !op.addBoolOption('\0', "enable-readablestream-pipeto",
++                        "Enable support for "
++                        "WHATWG ReadableStream.prototype.pipeTo") ||
+       !op.addBoolOption('\0', "disable-tosource", "Disable toSource/uneval") ||
+       !op.addBoolOption('\0', "disable-property-error-message-fix",
+                         "Disable fix for the error message when accessing "
+@@ -13737,6 +13758,11 @@ bool SetContextWasmOptions(JSContext* cx, const OptionParser& op) {
+   }
+ 
+   enableTestWasmAwaitTier2 = op.getBoolOption("test-wasm-await-tier2");
++  enableStreams = !op.getBoolOption("no-streams");
++  enableReadableByteStreams = op.getBoolOption("enable-readable-byte-streams");
++  enableBYOBStreamReaders = op.getBoolOption("enable-byob-stream-readers");
++  enableWritableStreams = op.getBoolOption("enable-writable-streams");
++  enableReadableStreamPipeTo = op.getBoolOption("enable-readablestream-pipeto");
+ 
+   JS::ContextOptionsRef(cx)
+       .setAsmJS(enableAsmJS)
+diff --git a/js/src/shell/jsshell.h b/js/src/shell/jsshell.h
+index 6c615a704acb..85174e25a9d1 100644
+--- a/js/src/shell/jsshell.h
++++ b/js/src/shell/jsshell.h
+@@ -117,6 +117,11 @@ extern bool enableTestWasmAwaitTier2;
+ extern bool enableSourcePragmas;
+ extern bool enableAsyncStacks;
+ extern bool enableAsyncStackCaptureDebuggeeOnly;
++extern bool enableStreams;
++extern bool enableReadableByteStreams;
++extern bool enableBYOBStreamReaders;
++extern bool enableWritableStreams;
++extern bool enableReadableStreamPipeTo;
+ extern bool enableWeakRefs;
+ extern bool enableToSource;
+ extern bool enablePropertyErrorMessageFix;
+diff --git a/js/src/tests/non262/ReadableStream/readable-stream-globals.js b/js/src/tests/non262/ReadableStream/readable-stream-globals.js
+new file mode 100644
+index 000000000000..bafd2214bec2
+--- /dev/null
++++ b/js/src/tests/non262/ReadableStream/readable-stream-globals.js
+@@ -0,0 +1,367 @@
++// |reftest| skip-if(!this.hasOwnProperty("ReadableStream"))
++
++if ("ignoreUnhandledRejections" in this) {
++  ignoreUnhandledRejections();
++}
++
++async function test() {
++    if (typeof newGlobal !== 'undefined') {
++        otherGlobal = newGlobal();
++    }
++
++    OtherReadableStream = otherGlobal.ReadableStream;
++
++    ReadableStreamReader = new ReadableStream().getReader().constructor;
++    OtherReadableStreamReader = new otherGlobal.ReadableStream().getReader().constructor;
++
++    let byteStreamsSupported = false;
++    try {
++        let controller;
++        let reader = new ReadableStream({
++            start(c) {
++                ByteStreamController = c.constructor;
++                controller = c;
++            },
++            type: "bytes"
++        }).getReader({ mode: "byob" })
++        ReadableStreamBYOBReader = reader.constructor;
++        reader.read(new Uint8Array(10));
++        BYOBRequest = controller.byobRequest.constructor;
++        reader = new otherGlobal.ReadableStream({
++            start(c) {
++                OtherByteStreamController = c.constructor;
++                controller = c;
++            },
++            type: "bytes"
++        }).getReader({ mode: "byob" });
++        OtherReadableStreamBYOBReader = reader.constructor;
++        reader.read(new Uint8Array(10));
++        OtherBYOBRequest = controller.byobRequest.constructor;
++
++        BYOBRequestGetter = Object.getOwnPropertyDescriptor(ByteStreamController.prototype,
++                                                            "byobRequest").get;
++        OtherBYOBRequestGetter = Object.getOwnPropertyDescriptor(OtherByteStreamController.prototype,
++                                                                 "byobRequest").get;
++
++        byteStreamsSupported = true;
++    } catch (e) {
++    }
++
++    let chunk = { name: "chunk" };
++    let enqueuedError = { name: "enqueuedError" };
++
++    let controller;
++    let stream;
++    let otherStream;
++    let otherController;
++    let reader;
++    let otherReader;
++
++    function getFreshInstances(type, otherType = type) {
++        stream = new ReadableStream({ start(c) { controller = c; }, type });
++
++        otherStream = new OtherReadableStream({ start(c) { otherController = c; }, type: otherType });
++    }
++
++    getFreshInstances();
++
++    Controller = controller.constructor;
++    OtherController = otherController.constructor;
++
++
++    otherReader = OtherReadableStream.prototype.getReader.call(stream);
++    assertEq(otherReader instanceof ReadableStreamReader, false);
++    assertEq(otherReader instanceof OtherReadableStreamReader, true);
++    assertEq(otherController instanceof Controller, false);
++
++    assertEq(stream.locked, true);
++    Object.defineProperty(stream, "locked",
++        Object.getOwnPropertyDescriptor(OtherReadableStream.prototype, "locked"));
++    assertEq(stream.locked, true);
++
++
++    request = otherReader.read();
++    assertEq(request instanceof otherGlobal.Promise, true);
++    controller.close();
++    assertEq(await request instanceof Object, true);
++
++    getFreshInstances();
++    otherReader = new OtherReadableStreamReader(stream);
++
++    getFreshInstances();
++    otherReader = new OtherReadableStreamReader(stream);
++    let cancelSucceeded = false;
++    let cancelPromise = ReadableStreamReader.prototype.cancel.call(otherReader);
++    assertEq(cancelPromise instanceof Promise, true);
++    assertEq(await cancelPromise, undefined);
++
++    getFreshInstances();
++    otherReader = new OtherReadableStreamReader(stream);
++    let closeSucceeded = false;
++    Object.defineProperty(otherReader, "closed",
++        Object.getOwnPropertyDescriptor(ReadableStreamReader.prototype, "closed"));
++    let closedPromise = otherReader.closed;
++    assertEq(closedPromise instanceof otherGlobal.Promise, true);
++    controller.close();
++    assertEq(await closedPromise, undefined);
++
++    getFreshInstances();
++
++    otherReader = OtherReadableStream.prototype.getReader.call(stream);
++    request = otherReader.read();
++    assertEq(request instanceof otherGlobal.Promise, true);
++    otherController.close.call(controller);
++    assertEq(await request instanceof otherGlobal.Object, true);
++
++    getFreshInstances();
++
++    assertEq(controller.desiredSize, 1);
++    Object.defineProperty(controller, "desiredSize",
++        Object.getOwnPropertyDescriptor(OtherController.prototype, "desiredSize"));
++    assertEq(controller.desiredSize, 1);
++
++
++    request = otherReader.read();
++
++    controller.error(enqueuedError);
++
++    expectException(() => controller.close(), TypeError);
++    expectException(() => otherController.close.call(controller), otherGlobal.TypeError);
++
++    otherReader.releaseLock();
++
++    reader = stream.getReader();
++    assertEq(await expectAsyncException(async () => reader.read(), enqueuedError.constructor),
++             enqueuedError);
++
++    otherReader.releaseLock.call(reader);
++    assertEq(reader.closed instanceof otherGlobal.Promise, true);
++
++    getFreshInstances();
++
++    reader = stream.getReader();
++    request = otherReader.read.call(reader);
++    assertEq(request instanceof otherGlobal.Promise, true);
++    controller.enqueue(chunk);
++    assertEq((await request).value, chunk);
++
++    reader.releaseLock();
++
++    getFreshInstances();
++
++    reader = stream.getReader();
++    request = otherReader.read.call(reader);
++    otherController.enqueue.call(controller, chunk);
++    otherController.enqueue.call(controller, new otherGlobal.Uint8Array(10));
++    controller.enqueue(new otherGlobal.Uint8Array(10));
++    request = otherReader.read.call(reader);
++
++    getFreshInstances();
++
++    stream = new ReadableStream({ start(c) { controller = c; } }, { size() {return 1} });
++    otherController.enqueue.call(controller, chunk);
++    otherController.enqueue.call(controller, new otherGlobal.Uint8Array(10));
++    controller.enqueue(new otherGlobal.Uint8Array(10));
++
++    getFreshInstances();
++
++    controller.close();
++    expectException(() => controller.enqueue(new otherGlobal.Uint8Array(10)), TypeError);
++    expectException(() => otherController.enqueue.call(controller, chunk), otherGlobal.TypeError);
++    expectException(() => otherController.enqueue.call(controller, new otherGlobal.Uint8Array(10)),
++                    otherGlobal.TypeError);
++
++    getFreshInstances();
++
++    let [branch1, branch2] = otherGlobal.ReadableStream.prototype.tee.call(stream);
++    assertEq(branch1 instanceof otherGlobal.ReadableStream, true);
++    assertEq(branch2 instanceof otherGlobal.ReadableStream, true);
++
++    controller.enqueue(chunk);
++    reader = branch1.getReader();
++    result = await reader.read();
++    reader.releaseLock();
++    let subPromiseCreated = false;
++    let speciesInvoked = false;
++    class SubPromise extends Promise {
++        constructor(executor) {
++            super(executor);
++            subPromiseCreated = true;
++        }
++    }
++    Object.defineProperty(Promise, Symbol.species, {get: function() {
++        speciesInvoked = true;
++        return SubPromise;
++    }
++    });
++
++    otherGlobal.eval(`
++    subPromiseCreated = false;
++    speciesInvoked = false;
++    class OtherSubPromise extends Promise {
++        constructor(executor) {
++            super(executor);
++            subPromiseCreated = true;
++        }
++    }
++    Object.defineProperty(Promise, Symbol.species, {get: function() {
++        speciesInvoked = true;
++        return OtherSubPromise;
++    }
++    });`);
++
++    controller.error(enqueuedError);
++    subPromiseCreated = false;
++    speciesInvoked = false;
++    otherGlobal.subPromiseCreated = false;
++    otherGlobal.speciesInvoked = false;
++    let cancelPromise1 = branch1.cancel({ name: "cancel 1" });
++    assertEq(cancelPromise1 instanceof otherGlobal.Promise, true);
++    assertEq(subPromiseCreated, false);
++    assertEq(speciesInvoked, false);
++    assertEq(otherGlobal.subPromiseCreated, false);
++    assertEq(otherGlobal.speciesInvoked, false);
++    subPromiseCreated = false;
++    speciesInvoked = false;
++    otherGlobal.subPromiseCreated = false;
++    otherGlobal.speciesInvoked = false;
++    let cancelPromise2 = branch2.cancel({ name: "cancel 2" });
++    assertEq(cancelPromise2 instanceof otherGlobal.Promise, true);
++    assertEq(subPromiseCreated, false);
++    assertEq(speciesInvoked, false);
++    assertEq(otherGlobal.subPromiseCreated, false);
++    assertEq(otherGlobal.speciesInvoked, false);
++    await 1;
++
++
++    getFreshInstances();
++
++    [branch1, branch2] = otherGlobal.ReadableStream.prototype.tee.call(stream);
++    assertEq(branch1 instanceof otherGlobal.ReadableStream, true);
++    assertEq(branch2 instanceof otherGlobal.ReadableStream, true);
++
++    controller.enqueue(chunk);
++    reader = branch1.getReader();
++    result = await reader.read();
++    reader.releaseLock();
++
++
++    assertEq(result.value, chunk);
++
++    controller.error(enqueuedError);
++    subPromiseCreated = false;
++    speciesInvoked = false;
++    otherGlobal.subPromiseCreated = false;
++    otherGlobal.speciesInvoked = false;
++    cancelPromise1 = ReadableStream.prototype.cancel.call(branch1, { name: "cancel 1" });
++    assertEq(cancelPromise1 instanceof Promise, true);
++    assertEq(subPromiseCreated, false);
++    assertEq(speciesInvoked, false);
++    assertEq(otherGlobal.subPromiseCreated, false);
++    assertEq(otherGlobal.speciesInvoked, false);
++    subPromiseCreated = false;
++    speciesInvoked = false;
++    otherGlobal.subPromiseCreated = false;
++    otherGlobal.speciesInvoked = false;
++    cancelPromise2 = ReadableStream.prototype.cancel.call(branch2, { name: "cancel 2" });
++    assertEq(cancelPromise2 instanceof Promise, true);
++    assertEq(subPromiseCreated, false);
++    assertEq(speciesInvoked, false);
++    assertEq(otherGlobal.subPromiseCreated, false);
++    assertEq(otherGlobal.speciesInvoked, false);
++
++    if (!byteStreamsSupported) {
++        return;
++    }
++
++    // if (typeof nukeCCW === 'function') {
++    //     getFreshInstances("bytes");
++    //     assertEq(otherController instanceof OtherByteStreamController, true);
++    //     reader = ReadableStream.prototype.getReader.call(otherStream);
++    //     otherGlobal.reader = reader;
++    //     otherGlobal.nukeCCW(otherGlobal.reader);
++    //     let chunk = new Uint8Array(10);
++    //     expectException(() => otherController.enqueue(chunk), otherGlobal.TypeError);
++    //     // otherController.error();
++    //     expectException(() => reader.read(), TypeError);
++    // }
++
++    function testBYOBRequest(controller, view) {
++        const request = new BYOBRequest(controller, view);
++        let storedView = request.view;
++        assertEq(storedView, view);
++        storedView = Object.getOwnPropertyDescriptor(OtherBYOBRequest.prototype, "view").get.call(request);
++        assertEq(storedView, view);
++        request.respond(10);
++        OtherBYOBRequest.prototype.respond.call(request, 10);
++        request.respondWithNewView(new view.constructor(10));
++        OtherBYOBRequest.prototype.respondWithNewView.call(request, new view.constructor(10));
++    }
++
++    expectException(() => new BYOBRequest(), TypeError);
++    getFreshInstances("bytes");
++    expectException(() => new BYOBRequest(controller, new Uint8Array(10)), TypeError);
++    expectException(() => new BYOBRequest(otherController, new Uint8Array(10)), TypeError);
++    expectException(() => new BYOBRequest(otherController, new Uint8Array(10)), TypeError);
++    expectException(() => new BYOBRequest(otherController, new otherGlobal.Uint8Array(10)), TypeError);
++
++    getFreshInstances("bytes");
++
++    reader = stream.getReader({ mode: "byob" });
++    request = OtherReadableStreamBYOBReader.prototype.read.call(reader, new Uint8Array(10));
++    assertEq(request instanceof otherGlobal.Promise, true);
++    controller.enqueue(new Uint8Array([1, 2, 3, 4]));
++    result = await request;
++
++    getFreshInstances("bytes");
++
++    reader = stream.getReader({ mode: "byob" });
++    request = OtherReadableStreamBYOBReader.prototype.read.call(reader, new Uint8Array(10));
++    assertEq(request instanceof otherGlobal.Promise, true);
++    try {
++        let byobRequest = OtherBYOBRequestGetter.call(controller);
++    } catch (e) {
++        print(e, '\n', e.stack);
++    }
++    controller.enqueue(new Uint8Array([1, 2, 3, 4]));
++    result = await request;
++
++    await 1;
++}
++
++function expectException(closure, errorType) {
++    let error;
++    try {
++        closure();
++    } catch (e) {
++        error = e;
++    }
++    assertEq(error !== undefined, true);
++    assertEq(error.constructor, errorType);
++    return error;
++}
++
++async function expectAsyncException(closure, errorType) {
++    let error;
++    try {
++        await closure();
++    } catch (e) {
++        error = e;
++    }
++    assertEq(error !== undefined, true);
++    assertEq(error.constructor, errorType);
++    return error;
++}
++
++async function runTest() {
++    try {
++        await test();
++    } catch (e) {
++        assertEq(false, true, `Unexpected exception ${e}\n${e.stack}`);
++    }
++    console.log("done");
++    if (typeof reportCompare === "function")
++        reportCompare(true, true);
++}
++
++runTest();
+diff --git a/js/src/vm/CommonPropertyNames.h b/js/src/vm/CommonPropertyNames.h
+index 81794dced35b..bce1ddfe35e3 100644
+--- a/js/src/vm/CommonPropertyNames.h
++++ b/js/src/vm/CommonPropertyNames.h
+@@ -55,12 +55,14 @@
+   MACRO_(AsyncGeneratorReturn, "AsyncGeneratorReturn")                         \
+   MACRO_(AsyncGeneratorThrow, "AsyncGeneratorThrow")                           \
+   MACRO2(at, "at")                                                             \
++  MACRO_(autoAllocateChunkSize, "autoAllocateChunkSize")                       \
+   MACRO_(await, "await")                                                       \
+   MACRO_(bound, "bound")                                                       \
+   MACRO_(boundWithSpace_, "bound ")                                            \
+   MACRO_(break_, "break")                                                      \
+   MACRO_(breakdown, "breakdown")                                               \
+   MACRO2(by, "by")                                                             \
++  MACRO_(byob, "byob")                                                         \
+   MACRO_(byteLength, "byteLength")                                             \
+   MACRO_(byteOffset, "byteOffset")                                             \
+   MACRO_(bytes, "bytes")                                                       \
+@@ -71,6 +73,7 @@
+   MACRO_(callee, "callee")                                                     \
+   MACRO_(callFunction, "callFunction")                                         \
+   MACRO_(captureStackTrace, "captureStackTrace")                               \
++  MACRO_(cancel, "cancel")                                                     \
+   MACRO_(case_, "case")                                                        \
+   MACRO_(caseFirst, "caseFirst")                                               \
+   MACRO_(catch_, "catch")                                                      \
+@@ -78,6 +81,7 @@
+   MACRO_(chunks, "chunks")                                                     \
+   MACRO_(class_, "class")                                                      \
+   MACRO_(cleanupSome, "cleanupSome")                                           \
++  MACRO_(close, "close")                                                       \
+   MACRO_(collation, "collation")                                               \
+   MACRO_(collections, "collections")                                           \
+   MACRO_(column, "column")                                                     \
+@@ -228,6 +232,7 @@
+   MACRO_(hash_constructor_, "#constructor")                                    \
+   MACRO_(hasIndices, "hasIndices")                                             \
+   MACRO_(hasOwn, "hasOwn")                                                     \
++  MACRO_(highWaterMark, "highWaterMark")                                       \
+   IF_EXPLICIT_RESOURCE_MANAGEMENT(MACRO_(hint, "hint"))                        \
+   MACRO_(hour, "hour")                                                         \
+   MACRO_(hour12, "hour12")                                                     \
+@@ -338,6 +343,7 @@
+   MACRO_(minutesDisplay, "minutesDisplay")                                     \
+   MACRO_(minutesStyle, "minutesStyle")                                         \
+   MACRO_(missingArguments, "missingArguments")                                 \
++  MACRO_(mode, "mode")                                                         \
+   MACRO_(module, "module")                                                     \
+   MACRO_(Module, "Module")                                                     \
+   MACRO_(month, "month")                                                       \
+@@ -407,8 +413,12 @@
+   MACRO_(pause, "pause")                                                       \
+   MACRO_(pending, "pending")                                                   \
+   MACRO_(percentSign, "percentSign")                                           \
++  MACRO_(pipeTo, "pipeTo")                                                     \
+   MACRO_(plainTime, "plainTime")                                               \
+   MACRO_(plusSign, "plusSign")                                                 \
++  MACRO_(preventAbort, "preventAbort")                                         \
++  MACRO_(preventCancel, "preventCancel")                                       \
++  MACRO_(preventClose, "preventClose")                                         \
+   MACRO_(preventExtensions, "preventExtensions")                               \
+   MACRO_(private_, "private")                                                  \
+   MACRO_(promise, "promise")                                                   \
+@@ -417,6 +427,7 @@
+   MACRO_(prototype, "prototype")                                               \
+   MACRO_(proxy, "proxy")                                                       \
+   MACRO_(public_, "public")                                                    \
++  MACRO_(pull, "pull")                                                         \
+   MACRO_(quarter, "quarter")                                                   \
+   MACRO_(range, "range")                                                       \
+   MACRO_(raw, "raw")                                                           \
+@@ -464,6 +475,7 @@
+   MACRO_(setFromHex, "setFromHex")                                             \
+   MACRO_(setPrototypeOf, "setPrototypeOf")                                     \
+   MACRO_(shared, "shared")                                                     \
++  MACRO_(signal, "signal")                                                     \
+   MACRO_(signDisplay, "signDisplay")                                           \
+   MACRO_(size, "size")                                                         \
+   MACRO_(sliceToImmutable, "sliceToImmutable")                                 \
+diff --git a/js/src/vm/GlobalObject.cpp b/js/src/vm/GlobalObject.cpp
+index 34f30e7495a7..2ba62411ffbf 100644
+--- a/js/src/vm/GlobalObject.cpp
++++ b/js/src/vm/GlobalObject.cpp
+@@ -33,6 +33,14 @@
+ #include "builtin/FinalizationRegistryObject.h"
+ #include "builtin/MapObject.h"
+ #include "builtin/ShadowRealm.h"
++#include "builtin/streams/QueueingStrategies.h"  // js::{ByteLength,Count}QueueingStrategy
++#include "builtin/streams/ReadableStream.h"             // js::ReadableStream
++#include "builtin/streams/ReadableStreamBYOBRequest.h"  // js::ReadableStreamBYOBRequest
++#include "builtin/streams/ReadableStreamController.h"  // js::Readable{StreamDefault,ByteStream}Controller
++#include "builtin/streams/ReadableStreamReader.h"  // js::ReadableStreamDefaultReader
++#include "builtin/streams/WritableStream.h"        // js::WritableStream
++#include "builtin/streams/WritableStreamDefaultController.h"  // js::WritableStreamDefaultController
++#include "builtin/streams/WritableStreamDefaultWriter.h"  // js::WritableStreamDefaultWriter
+ #include "builtin/Symbol.h"
+ #ifdef JS_HAS_INTL_API
+ #  include "builtin/temporal/Duration.h"
+@@ -219,6 +227,21 @@ bool GlobalObject::skipDeselectedConstructor(JSContext* cx, JSProtoKey key) {
+       return !JS::Prefs::experimental_temporal();
+ #endif
+ 
++#ifdef MOZ_JS_STREAMS
++    case JSProto_ReadableStream:
++    case JSProto_ReadableStreamDefaultReader:
++    case JSProto_ReadableStreamDefaultController:
++    case JSProto_ByteLengthQueuingStrategy:
++    case JSProto_CountQueuingStrategy:
++    case JSProto_ReadableStreamBYOBReader:
++    case JSProto_ReadableStreamBYOBRequest:
++    case JSProto_ReadableByteStreamController:
++    case JSProto_WritableStream:
++    case JSProto_WritableStreamDefaultController:
++    case JSProto_WritableStreamDefaultWriter:
++      return !cx->realm()->creationOptions().getStreamsEnabled();
++#endif
++
+     // Return true if the given constructor has been disabled at run-time.
+     case JSProto_Atomics:
+     case JSProto_SharedArrayBuffer:
+diff --git a/js/src/vm/List-inl.h b/js/src/vm/List-inl.h
+index 50f7c1caf24c..52b196995892 100644
+--- a/js/src/vm/List-inl.h
++++ b/js/src/vm/List-inl.h
+@@ -13,12 +13,15 @@
+ 
+ #include <stdint.h>  // uint32_t
+ 
+-#include "js/Value.h"         // JS::Value
++#include "js/RootingAPI.h"    // JS::Handle, JS::Rooted
++#include "js/Value.h"         // JS::Value, JS::ObjectValue
+ #include "vm/JSContext.h"     // JSContext
+ #include "vm/NativeObject.h"  // js::NativeObject
+ 
++#include "vm/Compartment-inl.h"   // JS::Compartment::wrap
+ #include "vm/JSObject-inl.h"      // js::NewObjectWithGivenProto
+ #include "vm/NativeObject-inl.h"  // js::NativeObject::*
++#include "vm/Realm-inl.h"         // js::AutoRealm
+ 
+ inline /* static */ js::ListObject* js::ListObject::create(JSContext* cx) {
+   return NewObjectWithGivenProto<ListObject>(cx, nullptr);
+@@ -36,6 +39,21 @@ inline bool js::ListObject::append(JSContext* cx, Value value) {
+   return true;
+ }
+ 
++inline bool js::ListObject::appendValueAndSize(JSContext* cx,
++                                               JS::Handle<JS::Value> value,
++                                               double size) {
++  uint32_t len = length();
++
++  if (!ensureElements(cx, len + 2)) {
++    return false;
++  }
++
++  ensureDenseInitializedLength(len, 2);
++  setDenseElement(len, value);
++  setDenseElement(len + 1, JS::DoubleValue(size));
++  return true;
++}
++
+ inline JS::Value js::ListObject::popFirst(JSContext* cx) {
+   uint32_t len = length();
+   MOZ_ASSERT(len > 0);
+@@ -51,9 +69,54 @@ inline JS::Value js::ListObject::popFirst(JSContext* cx) {
+   return entry;
+ }
+ 
++inline void js::ListObject::popFirstPair(JSContext* cx) {
++  uint32_t len = length();
++  MOZ_ASSERT(len > 0);
++  MOZ_ASSERT((len % 2) == 0);
++
++  if (!tryShiftDenseElements(2)) {
++    moveDenseElements(0, 2, len - 2);
++    setDenseInitializedLength(len - 2);
++    shrinkElements(cx, len - 2);
++  }
++
++  MOZ_ASSERT(length() == len - 2);
++}
++
+ template <class T>
+ inline T& js::ListObject::popFirstAs(JSContext* cx) {
+   return popFirst(cx).toObject().as<T>();
+ }
+ 
++namespace js {
++
++[[nodiscard]] inline bool StoreNewListInFixedSlot(JSContext* cx,
++                                                  JS::Handle<NativeObject*> obj,
++                                                  uint32_t slot) {
++  AutoRealm ar(cx, obj);
++  ListObject* list = ListObject::create(cx);
++  if (!list) {
++    return false;
++  }
++
++  obj->setFixedSlot(slot, JS::ObjectValue(*list));
++  return true;
++}
++
++[[nodiscard]] inline bool AppendToListInFixedSlot(
++    JSContext* cx, JS::Handle<NativeObject*> obj, uint32_t slot,
++    JS::Handle<JSObject*> toAppend) {
++  JS::Rooted<ListObject*> list(
++      cx, &obj->getFixedSlot(slot).toObject().as<ListObject>());
++
++  AutoRealm ar(cx, list);
++  JS::Rooted<JS::Value> val(cx, JS::ObjectValue(*toAppend));
++  if (!cx->compartment()->wrap(cx, &val)) {
++    return false;
++  }
++  return list->append(cx, val);
++}
++
++}  // namespace js
++
+ #endif  // vm_List_inl_h
+diff --git a/js/src/vm/List.h b/js/src/vm/List.h
+index cb8699d7030c..42c79dc406aa 100644
+--- a/js/src/vm/List.h
++++ b/js/src/vm/List.h
+@@ -51,6 +51,13 @@ class ListObject : public NativeObject {
+    */
+   [[nodiscard]] inline bool append(JSContext* cx, Value value);
+ 
++  /**
++   * Adds |value| and |size| elements to a list consisting of (value, size)
++   * pairs stored in successive elements.
++   */
++  [[nodiscard]] inline bool appendValueAndSize(JSContext* cx, HandleValue value,
++                                               double size);
++
+   /**
+    * Remove and return the first element of the list.
+    *
+@@ -58,6 +65,12 @@ class ListObject : public NativeObject {
+    */
+   inline JS::Value popFirst(JSContext* cx);
+ 
++  /**
++   * Remove the first two elements from a nonempty list of (value, size) pairs
++   * of elements.
++   */
++  inline void popFirstPair(JSContext* cx);
++
+   /**
+    * Remove and return the first element of the list.
+    *
+diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
+index d88b717bf652..74eb0d0daa9b 100644
+--- a/js/src/vm/NativeObject.h
++++ b/js/src/vm/NativeObject.h
+@@ -1485,6 +1485,8 @@ class NativeObject : public JSObject {
+   inline void ensureDenseInitializedLength(uint32_t index, uint32_t extra);
+ 
+   void setDenseElement(uint32_t index, const Value& val) {
++    // Note: Streams code can call this for the internal ListObject type with
++    // MagicValue(JS_WRITABLESTREAM_CLOSE_RECORD).
+     MOZ_ASSERT_IF(val.isMagic(), val.whyMagic() != JS_ELEMENTS_HOLE);
+     setDenseElementUnchecked(index, val);
+   }
+diff --git a/js/src/vm/Runtime.h b/js/src/vm/Runtime.h
+index d9614160b0e7..e7d9e55422e0 100644
+--- a/js/src/vm/Runtime.h
++++ b/js/src/vm/Runtime.h
+@@ -41,6 +41,7 @@
+ #include "js/shadow/Zone.h"
+ #include "js/ShadowRealmCallbacks.h"
+ #include "js/Stack.h"
++#include "js/Stream.h" // JS::AbortSignalIsAborted
+ #include "js/StreamConsumer.h"
+ #include "js/Symbol.h"
+ #include "js/UniquePtr.h"
+@@ -591,6 +592,30 @@ struct JSRuntime {
+   const JSClass* maybeWindowProxyClass() const { return windowProxyClass_; }
+   void setWindowProxyClass(const JSClass* clasp) { windowProxyClass_ = clasp; }
+ 
++ private:
++  js::WriteOnceData<const JSClass*> abortSignalClass_;
++  js::WriteOnceData<JS::AbortSignalIsAborted> abortSignalIsAborted_;
++
++ public:
++  void initPipeToHandling(const JSClass* abortSignalClass,
++                          JS::AbortSignalIsAborted isAborted) {
++    MOZ_ASSERT(abortSignalClass != nullptr,
++               "doesn't make sense for an embedder to provide a null class "
++               "when specifying pipeTo handling");
++    MOZ_ASSERT(isAborted != nullptr, "must pass a valid function pointer");
++
++    abortSignalClass_ = abortSignalClass;
++    abortSignalIsAborted_ = isAborted;
++  }
++
++  const JSClass* maybeAbortSignalClass() const { return abortSignalClass_; }
++
++  bool abortSignalIsAborted(JSObject* obj) {
++    MOZ_ASSERT(abortSignalIsAborted_ != nullptr,
++               "must call initPipeToHandling first");
++    return abortSignalIsAborted_(obj);
++  }
++
+  private:
+   // List of non-ephemeron weak containers to sweep during
+   // beginSweepingSweepGroup.
+diff --git a/js/xpconnect/src/XPCJSRuntime.cpp b/js/xpconnect/src/XPCJSRuntime.cpp
+index 80e04d9a87f2..43986f7c556a 100644
+--- a/js/xpconnect/src/XPCJSRuntime.cpp
++++ b/js/xpconnect/src/XPCJSRuntime.cpp
+@@ -52,6 +52,7 @@
+ #include "js/MemoryMetrics.h"
+ #include "js/Object.h"  // JS::GetClass
+ #include "js/RealmIterators.h"
++#include "js/Stream.h"  // JS::AbortSignalIsAborted, JS::InitPipeToHandling
+ #include "js/SliceBudget.h"
+ #include "js/UbiNode.h"
+ #include "js/UbiNodeUtils.h"
+diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
+index 0986e53121fd..605557973900 100644
+--- a/modules/libpref/init/StaticPrefList.yaml
++++ b/modules/libpref/init/StaticPrefList.yaml
+@@ -9171,6 +9171,22 @@
+   mirror: always  # LoadStartupJSPrefs
+   do_not_use_directly: true
+ 
++# Streams API. This only applies to JS Streams
++- name: javascript.options.streams
++  type: RelaxedAtomicBool
++  value: true
++  mirror: always
++
++# Writable Streams API.  (The pref above must also be set to expose this.)
++#
++# Writable streams are still EXTRAORDINARILY BETA and it is well-known that
++# things are likely pretty broken if you poke much at all, so if you flip this
++# preference, don't report bugs against it just yet.
++- name: javascript.options.writable_streams
++  type: RelaxedAtomicBool
++  value: false
++  mirror: always
++
+ - name: javascript.options.main_thread_stack_quota_cap
+   type: uint32_t
+ #if defined(MOZ_ASAN)
