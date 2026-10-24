@@ -37,3 +37,13 @@ The test-source tree is always the tree the queue builds, never the bare tag.
 - **Pin bump.** A PR that changes `NIGHTMONKEY_PIN` gets the `gate` label and
   must show the gate green before merge. An engine change that should reach
   NightMonkey is followed by a NightMonkey PR bumping its queue-commit pin.
+
+## Worktree hygiene
+
+- Work in your own worktree. When you finish a PR (merged or closed) or a
+  review, remove the worktree you created for it (`git worktree remove`).
+  Confirm it is clean and the branch is pushed first, and push unpushed work to
+  a branch rather than losing it.
+- Delete only your own worktrees and build output, never another session's.
+  Build directories run to tens of GB per worktree; ask an owner before pruning
+  theirs.
