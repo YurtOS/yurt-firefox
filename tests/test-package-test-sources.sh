@@ -30,6 +30,7 @@ have_gnu_tar() {
 # The bundles' files, written out by hand (not derived from the packager).
 EXPECT_TESTSRC='js/src/jit-test/README
 js/src/jit-test/jit_test.py
+js/src/jit-test/lib/chain.js
 js/src/jit-test/lib/gen/wasm-gc-limits-gen.js
 js/src/jit-test/lib/match.js
 js/src/jit-test/lib/math.js
@@ -51,12 +52,16 @@ js/src/tests/lib/structuredlog.py
 js/src/tests/lib/tempfile.py
 js/src/tests/lib/tests.py
 js/src/tests/non262/Math/shell.js
+js/src/tests/non262/chain/b.js
+js/src/tests/non262/chain/c.js
 js/src/tests/non262/reflect-parse/Match.js
 js/src/tests/non262/shell.js'
 EXPECT_JSTESTS='js/src/tests/jstests.list
 js/src/tests/non262/Math/abs.js
 js/src/tests/non262/Math/shell.js
 js/src/tests/non262/Math/skipme.js
+js/src/tests/non262/chain/b.js
+js/src/tests/non262/chain/c.js
 js/src/tests/non262/reflect-parse/Match.js
 js/src/tests/non262/shell.js
 js/src/tests/shell.js
@@ -181,6 +186,13 @@ testsrc_has_listed_paths_only() {
   assert_eq 0 "$RC" "$OUT"
   assert_eq "$EXPECT_TESTSRC" "$(files_in "$OUTDIR/$TESTSRC.tar.zst")"
   [ ! -e "$OUTDIR/$JSTESTS.tar.zst" ] || { echo "jstests written without --jstests" >&2; return 1; }
+  # Modes come from the index: 100755 -> 0755, everything else 0644.
+  zstd -dc "$OUTDIR/$TESTSRC.tar.zst" | python3 -c '
+import sys, tarfile
+for m in tarfile.open(fileobj=sys.stdin.buffer, mode="r|"):
+    want = 0o755 if m.isdir() or m.name == "js/src/jit-test/jit_test.py" else 0o644
+    assert m.mode == want, (m.name, oct(m.mode))
+'
   (cd "$OUTDIR" && sha256 <"$TESTSRC.tar.zst" | cut -d' ' -f1) >"$BASE/want.$$"
   assert_eq "$(cat "$BASE/want.$$")  $TESTSRC.tar.zst" "$(cat "$OUTDIR/$TESTSRC.tar.zst.sha256")"
 }
@@ -240,6 +252,8 @@ deterministic() {
   assert_eq 0 "$RC" "$OUT"
   local first=$OUTDIR
   OUTDIR=$BASE/second.$$
+  # A later second, so a staged file's mtime differs unless --mtime pins it.
+  sleep 1
   touch "$TS_TREE/js/src/jsapi.h" "$TS_TREE/js/src/tests/shell.js"
   make_decoy "$BASE/decoy.$$"
   RC=0
@@ -250,6 +264,46 @@ deterministic() {
   cmp "$first/$TESTSRC.tar.zst" "$OUTDIR/$TESTSRC.tar.zst"
   cmp "$first/$JSTESTS.tar.zst" "$OUTDIR/$JSTESTS.tar.zst"
   cmp "$first/$TESTSRC.tar.zst.sha256" "$OUTDIR/$TESTSRC.tar.zst.sha256"
+}
+
+# clean_digests: package a fresh fixture; print both archives' sha256 lines.
+clean_digests() {
+  setup
+  run_pkg_jstests
+  assert_eq 0 "$RC" "$OUT"
+  cat "$OUTDIR/$TESTSRC.tar.zst.sha256" "$OUTDIR/$JSTESTS.tar.zst.sha256"
+}
+
+# Repository attributes and filters cannot change the archived bytes: the
+# bundle is the index's blobs, byte for byte.
+ignores_untracked_gitattributes() {
+  local want
+  want=$(clean_digests)
+  setup
+  printf '*.js text eol=crlf
+*.py text eol=crlf
+' >"$TS_TREE/js/src/jit-test/.gitattributes"
+  printf '* text eol=crlf
+' >"$TS_TREE/js/src/tests/.gitattributes"
+  run_pkg_jstests
+  assert_eq 0 "$RC" "$OUT"
+  assert_eq "$want" "$(cat "$OUTDIR/$TESTSRC.tar.zst.sha256" "$OUTDIR/$JSTESTS.tar.zst.sha256")"
+}
+
+ignores_smudge_filter() {
+  local want
+  want=$(clean_digests)
+  setup
+  git -C "$TS_TREE" config filter.tamper.smudge "sed s/prologue/tampered/"
+  git -C "$TS_TREE" config core.eol crlf
+  git -C "$TS_TREE" config core.autocrlf true
+  printf '* filter=tamper text
+' >"$TS_TREE/.git/info/attributes"
+  run_pkg_jstests
+  assert_eq 0 "$RC" "$OUT"
+  assert_eq "$want" "$(cat "$OUTDIR/$TESTSRC.tar.zst.sha256" "$OUTDIR/$JSTESTS.tar.zst.sha256")"
+  extract "$OUTDIR/$TESTSRC.tar.zst"
+  assert_eq "// prologue" "$(cat "$X/js/src/jit-test/lib/prologue.js")"
 }
 
 # The extracted testsrc bundle starts jit_test.py with the producer tree gone;
@@ -278,10 +332,14 @@ runs_jit_test_through_stub_shell() {
   local out
   out=$(cd "$BASE" && python3 "$X/js/src/jit-test/jit_test.py" "$STUB" basic/uses-non262.js 2>&1)
   case $out in *"TEST-PASS | basic/uses-non262.js"*) ;; *) echo "no pass: $out" >&2; return 1 ;; esac
-  rm "$X/js/src/tests/non262/reflect-parse/Match.js"
-  if (cd "$BASE" && python3 "$X/js/src/jit-test/jit_test.py" "$STUB" basic/uses-non262.js >/dev/null 2>&1); then
-    echo "jit test passed with a missing runtime load" >&2; return 1
-  fi
+  local f
+  for f in reflect-parse/Match.js chain/c.js; do
+    mv "$X/js/src/tests/non262/$f" "$X/js/src/tests/non262/$f.away"
+    if (cd "$BASE" && python3 "$X/js/src/jit-test/jit_test.py" "$STUB" basic/uses-non262.js >/dev/null 2>&1); then
+      echo "jit test passed without non262/$f" >&2; return 1
+    fi
+    mv "$X/js/src/tests/non262/$f.away" "$X/js/src/tests/non262/$f"
+  done
 }
 
 # testsrc + jstests extracted together run the jstests harness with
@@ -316,7 +374,15 @@ refuses_edit_hidden_by_assume_unchanged() {
   git -C "$TS_TREE" update-index --assume-unchanged js/src/jit-test/lib/prologue.js
   echo '// local edit' >>"$TS_TREE/js/src/jit-test/lib/prologue.js"
   run_pkg
-  expect_refusal js/src/jit-test/lib/prologue.js
+  expect_refusal "skip-worktree hide edits: js/src/jit-test/lib/prologue.js"
+}
+
+refuses_edit_hidden_by_skip_worktree() {
+  setup
+  git -C "$TS_TREE" update-index --skip-worktree js/src/jit-test/lib/prologue.js
+  echo '// local edit' >>"$TS_TREE/js/src/jit-test/lib/prologue.js"
+  run_pkg
+  expect_refusal "skip-worktree hide edits: js/src/jit-test/lib/prologue.js"
 }
 
 refuses_tree_mismatch() {
@@ -372,12 +438,12 @@ fails_on_bad_runtime_load() {
   printf 'loadRelativeToScript("../../tests/non262/Gone.js");\n' >"$TS_TREE/js/src/jit-test/lib/gone.js"
   commit_tree "dangling load"
   run_pkg
-  expect_refusal js/src/jit-test/lib/gone.js
+  expect_refusal "js/src/jit-test/lib/gone.js: loadRelativeToScript('../../tests/non262/Gone.js'): js/src/tests/non262/Gone.js is not tracked"
   setup
   printf 'loadRelativeToScript("../../../../other/b.txt");\n' >"$TS_TREE/js/src/jit-test/lib/escape.js"
   commit_tree "escaping load"
   run_pkg
-  expect_refusal js/src/jit-test/lib/escape.js
+  expect_refusal "js/src/jit-test/lib/escape.js: loadRelativeToScript('../../../../other/b.txt') leaves js/src"
 }
 
 fails_on_tracked_symlink() {
@@ -385,7 +451,7 @@ fails_on_tracked_symlink() {
   ln -s ../jsapi.h "$TS_TREE/js/src/jit-test/jsapi-link.h"
   commit_tree "symlink"
   run_pkg
-  expect_refusal js/src/jit-test/jsapi-link.h
+  expect_refusal "js/src/jit-test/jsapi-link.h: tracked symlink"
 }
 
 refuses_version_not_upstream() {
@@ -476,7 +542,10 @@ run_test "runs a jit test through a stub shell" runs_jit_test_through_stub_shell
 run_test "jstests runner starts with --xul-info" jstests_runner_starts_with_xul_info
 run_test "refuses an unstaged edit" refuses_unstaged_edit
 run_test "refuses an edit hidden by assume-unchanged" refuses_edit_hidden_by_assume_unchanged
+run_test "refuses an edit hidden by skip-worktree" refuses_edit_hidden_by_skip_worktree
 run_test "refuses a tree mismatch" refuses_tree_mismatch
+run_test "ignores untracked .gitattributes" ignores_untracked_gitattributes
+run_test "ignores a smudge filter" ignores_smudge_filter
 run_test "objdir allowed and absent" objdir_allowed_and_absent
 run_test "fails on a missing required file" fails_on_missing_required_file
 run_test "fails on a bad runtime load" fails_on_bad_runtime_load

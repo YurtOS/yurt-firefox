@@ -25,6 +25,9 @@
 #   runs each test with the shell.js chain (-f .../shell.js ... -f test).
 # - jit-test/lib/{non262,math,match}.js load ../../tests/non262/... with
 #   loadRelativeToScript, as upstream: runtime dependencies outside jit-test/.
+# jit-test/lib/chain.js loads tests/non262/chain/b.js, which loads c.js next to
+# it: a second-level dependency outside jit-test/.
+# jit_test.py is executable (100755) in the index; everything else is 100644.
 # non262/Math/skipme.js contains STUB-FAIL and is skipped only through
 # tests/jstests.list, so a bundle without jstests.list fails a jstests run.
 
@@ -100,13 +103,15 @@ if __name__ == "__main__":
   ts_write $j/lib/non262.js 'loadRelativeToScript("../../tests/non262/shell.js");' || return 1
   ts_write $j/lib/math.js 'loadRelativeToScript("../../tests/non262/Math/shell.js");' || return 1
   ts_write $j/lib/match.js 'loadRelativeToScript("../../tests/non262/reflect-parse/Match.js");' || return 1
+  ts_write $j/lib/chain.js 'loadRelativeToScript("../../tests/non262/chain/b.js");' || return 1
   ts_write $j/lib/wasm-binary.js '// wasm binary helpers' || return 1
   ts_write $j/lib/gen/wasm-gc-limits-gen.js 'loadRelativeToScript("../wasm-binary.js");' || return 1
   ts_write $j/modules/module1.js 'export default 1;' || return 1
   ts_write $j/tests/basic/simple.js '// simple' || return 1
   ts_write $j/tests/basic/uses-non262.js 'load(libdir + "non262.js");
 load(libdir + "math.js");
-load(libdir + "match.js");' || return 1
+load(libdir + "match.js");
+load(libdir + "chain.js");' || return 1
 
   ts_write $t/README.txt 'jstests README' || return 1
   ts_write $t/browser.js '// browser only' || return 1
@@ -317,12 +322,15 @@ def load_reftests(location, requested_paths, xul_tester):
   ts_write $t/non262/Math/abs.js '// Math.abs test' || return 1
   ts_write $t/non262/Math/skipme.js '// STUB-FAIL: input data, skipped by jstests.list' || return 1
   ts_write $t/non262/reflect-parse/Match.js '// Match helpers' || return 1
+  ts_write $t/non262/chain/b.js 'loadRelativeToScript("c.js");' || return 1
+  ts_write $t/non262/chain/c.js '// second-level load target' || return 1
   ts_write $t/test262/shell.js '// test262 shell.js' || return 1
   ts_write $t/test262/built-ins/Array/length.js '// test262 test' || return 1
   ts_write $t/shell/os.js '// shell os test' || return 1
   ts_write $t/test/run.js '// STUB-FAIL: script tests, skipped by jstests.list' || return 1
   ts_write $t/test/jstests.list 'script run.js' || return 1
 
+  chmod +x "$TS_TREE/$j/jit_test.py" || return 1
   git -C "$TS_TREE" init -q || return 1
   git -C "$TS_TREE" add -A || return 1
   git -C "$TS_TREE" commit -q -m "fixture firefox workdir" || return 1

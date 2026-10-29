@@ -265,6 +265,8 @@ reproducible() {
   assert_eq 0 "$RC" "$OUT"
   local first=$OUTDIR
   OUTDIR=$BASE/second.$$
+  # A later second, so a staged file's mtime differs unless --mtime pins it.
+  sleep 1
   touch "$FX_DIST/include-private/vm/Opcodes.h" "$FX_SRC/js/src/jsapi.h"
   make_decoy "$BASE/decoy.$$"
   RC=0
