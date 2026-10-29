@@ -411,10 +411,13 @@ guard_clears_every_name() {
     PATH="$T/envshim:$PATH" bash -c '. "$1" && pq_git --version' _ "$lib" >/dev/null
   )
   grep -q '^PATH=' "$T/env.out"
+  # GIT_NO_REPLACE_OBJECTS is cleared, then pinned to 1 (checked below).
   for name in $names; do
+    [ "$name" != GIT_NO_REPLACE_OBJECTS ] || continue
     if grep -q "^$name=" "$T/env.out"; then echo "$name reaches git: $(grep "^$name=" "$T/env.out")"; return 1; fi
   done
-  for name in GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1; do
+  for name in GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 \
+    GIT_NO_REPLACE_OBJECTS=1; do
     grep -qx "$name" "$T/env.out" || { echo "$name not set for git"; return 1; }
   done
 }

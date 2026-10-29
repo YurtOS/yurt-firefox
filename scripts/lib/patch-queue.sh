@@ -44,8 +44,9 @@ pq_git_env() {
     unset "$v" 2>/dev/null
     [ -z "${!v+set}" ] || { echo "pq: $v is readonly and cannot be unset; refusing to run git" >&2; return 1; }
   done
-  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
-  export GIT_NO_REPLACE_OBJECTS=1
+  # One export, so a readonly name among them fails the function.
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 \
+    GIT_NO_REPLACE_OBJECTS=1
 }
 
 # pq_require_git: fail unless git is 2.32 or later. Older git ignores
