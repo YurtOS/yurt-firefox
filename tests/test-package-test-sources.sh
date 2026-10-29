@@ -408,7 +408,7 @@ refuses_existing_output() {
 refuses_non_toplevel_tree() {
   setup
   run_pkg --tree "$TS_TREE/js" --out "$OUTDIR" --version 147.0.4 --revision 1
-  assert_eq 1 "$RC" "$OUT"
+  expect_refusal "not the top level"
 }
 
 usage_errors() {
