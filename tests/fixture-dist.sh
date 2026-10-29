@@ -13,7 +13,8 @@
 #                                    real files, as the 0009 writer and mach
 #                                    leave them; dist/host/ is not packaged
 #   build-manifest.json              build-engine.sh's shape, two toolchain
-#                                    artifacts
+#                                    artifacts (one with an extra key, which
+#                                    the package manifest must drop)
 #   tc/clang, tc/sysroot             the producer toolchain directories named
 #                                    in js-build-config.json
 #   home, mozbuild                   producer $HOME and MOZBUILD_STATE_PATH
@@ -120,7 +121,7 @@ m = {
     "mozconfig_sha256": "3" * 64,
     "toolchain_artifacts": [
         {"name": "clang.tar.zst", "url": "https://example.invalid/clang/clang.tar.zst",
-         "sha256": "a" * 64},
+         "sha256": "a" * 64, "size": 12345},
         {"name": "sysroot-wasm32-wasi.tar.zst",
          "url": "https://example.invalid/sysroot/sysroot-wasm32-wasi.tar.zst", "sha256": "b" * 64},
     ],

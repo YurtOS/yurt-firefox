@@ -302,6 +302,9 @@ assert m["toolchain"] == [{k: a[k] for k in ("name", "url", "sha256")}
                           for a in bm["toolchain_artifacts"]], m["toolchain"]
 for a in m["toolchain"]:
     assert set(a) == {"name", "url", "sha256"}, a
+assert any(set(a) - {"name", "url", "sha256"} for a in bm["toolchain_artifacts"]), \
+    "fixture has no extra toolchain key: the filter is not exercised"
+assert "toolchain_artifacts" not in m, "unfiltered toolchain_artifacts copied"
 assert "test_sources" in m
 PY
   local p
@@ -390,6 +393,171 @@ PY
   case $out in *js-build-config.json*) ;; *) echo "config not named: $out" >&2; return 1 ;; esac
 }
 
+# A parent directory symlink (dist/lib, include/js) resolving outside the
+# producer tree is caught, not only a symlinked file.
+fails_on_dir_symlink_outside() {
+  setup
+  mkdir -p "$FX_ROOT/elsewhere/lib"
+  cp -L "$FX_DIST"/lib/*.a "$FX_ROOT/elsewhere/lib/"
+  rm -r "${FX_DIST:?}/lib"
+  ln -s "$FX_ROOT/elsewhere/lib" "$FX_DIST/lib"
+  run_pkg
+  expect_violation lib/libjs_static.a
+  setup
+  mkdir -p "$FX_ROOT/elsewhere/js"
+  echo '#define V 1' >"$FX_ROOT/elsewhere/js/Value.h"
+  rm -r "$FX_DIST/include/js"
+  ln -s "$FX_ROOT/elsewhere/js" "$FX_DIST/include/js"
+  run_pkg
+  expect_violation include/js
+}
+
+# edit_config <python statements on c>: rewrite the dist's js-build-config.json
+# (json.dump defaults, so non-ASCII is \u-escaped as the 0009 writer leaves it).
+edit_config() {
+  python3 - "$FX_DIST/include-private/js-build-config.json" "$1" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+exec(sys.argv[2])
+json.dump(c, open(sys.argv[1], "w"), indent=2, sort_keys=True)
+PY
+}
+
+# A producer root that is a broad system directory cannot be scanned for;
+# refuse it instead of silently not scanning.
+refuses_broad_producer_root() {
+  local root
+  for root in /usr /opt /usr/local /; do
+    setup
+    S=$root edit_config 'import os; s = os.environ["S"]
+c["cc"] = "%s/bin/clang --sysroot=%s -std=gnu17" % ("'"$FX_CLANG"'", s)'
+    run_pkg
+    expect_violation include-private/js-build-config.json
+    case $OUT in *broad*) ;; *) echo "no broad-root message for $root: $OUT" >&2; return 1 ;; esac
+  done
+  setup
+  edit_config 'c["topobjdir"] = "/usr"'
+  run_pkg
+  expect_violation include-private/js-build-config.json
+}
+
+# A non-ASCII producer path is found though json.dump writes it \u-escaped.
+fails_on_non_ascii_leak_in_json() {
+  setup
+  local s
+  s="$FX_ROOT/tc/"$'\xc3\xa9'"-sysroot"
+  S=$s edit_config 'import os; s = os.environ["S"]
+c["cc"] = "clang --sysroot=%s -std=gnu17" % s
+c["cxx"] = "clang++ --sysroot %s -std=gnu++20" % s
+c["cxx_base_flags"] = ["--sysroot", s]
+c["os_ldflags"].append("-L%s/lib" % s)'
+  run_pkg
+  expect_violation include-private/js-build-config.json
+  # The library alone, on a tree whose JSON carries the escaped form.
+  mkdir -p "$BASE/esc.$$"
+  python3 -c 'import json, sys; json.dump({"x": sys.argv[1] + "/y"}, open(sys.argv[2], "w"))' \
+    "$s" "$BASE/esc.$$/MANIFEST.json"
+  grep -q 'u00e9' "$BASE/esc.$$/MANIFEST.json"
+  printf '%s\n' "$s" >"$BASE/esc-prefix.$$"
+  local rc=0 out
+  out=$(contract pc_check_tree "$BASE/esc.$$" "$BASE/esc-prefix.$$" 2>&1) || rc=$?
+  assert_eq 1 "$rc" "$out"
+  case $out in *"MANIFEST.json: contains producer path"*) ;; *) echo "escaped leak not found: $out" >&2; return 1 ;; esac
+}
+
+# Path-valued config fields CMake joins onto SPIDERMONKEY_DIST must stay inside.
+fails_on_escaping_config_path() {
+  local edit
+  for edit in 'c["include_dirs"].append("../../etc")' 'c["libraries"].append("lib/../../x.a")' \
+    'c["force_includes"].append("../x.h")' 'c["include_dirs"].append("/etc")'; do
+    setup
+    edit_config "$edit"
+    run_pkg
+    expect_violation include-private/js-build-config.json
+    case $OUT in *include_dirs* | *libraries* | *force_includes*) ;; *)
+      echo "field not named for $edit: $OUT" >&2; return 1 ;; esac
+  done
+}
+
+# make_archive <out.tar.zst> <kind>: a hand-made archive with one bad member.
+make_archive() {
+  python3 - "$1.tar" "$2" <<'PY'
+import io, sys, tarfile
+out, kind = sys.argv[1:]
+with tarfile.open(out, "w", format=tarfile.GNU_FORMAT) as t:
+    d = tarfile.TarInfo("spidermonkey"); d.type = tarfile.DIRTYPE; t.addfile(d)
+    f = tarfile.TarInfo("spidermonkey/ok.h"); f.size = 1; t.addfile(f, io.BytesIO(b"x"))
+    m = tarfile.TarInfo({"abs": "/etc/evil", "dotdot": "spidermonkey/../evil",
+                         "other": "other/evil", "symlink": "spidermonkey/link",
+                         "hardlink": "spidermonkey/hard"}[kind])
+    if kind == "symlink":
+        m.type, m.linkname = tarfile.SYMTYPE, "/etc/passwd"
+    elif kind == "hardlink":
+        m.type, m.linkname = tarfile.LNKTYPE, "spidermonkey/ok.h"
+    t.addfile(m, io.BytesIO(b"") if m.isreg() else None)
+PY
+  zstd -q -f "$1.tar" -o "$1"
+}
+
+contract_rejects_bad_archive_members() {
+  local kind rc out
+  for kind in abs dotdot other symlink hardlink; do
+    make_archive "$BASE/bad-$kind.$$.tar.zst" "$kind"
+    rc=0
+    out=$(contract pc_check_archive "$BASE/bad-$kind.$$.tar.zst" 2>&1) || rc=$?
+    assert_eq 1 "$rc" "$kind: $out"
+    case $kind:$out in
+      abs:*"/etc/evil: outside spidermonkey/"* | dotdot:*"spidermonkey/../evil: outside spidermonkey/"* | \
+        other:*"other/evil: outside spidermonkey/"* | \
+        symlink:*"spidermonkey/link: not a regular file or directory"* | \
+        hardlink:*"spidermonkey/hard: not a regular file or directory"*) ;;
+      *) echo "$kind: unexpected message: $out" >&2; return 1 ;;
+    esac
+  done
+}
+
+# Members are in --sort=name order: each directory's entries byte-sorted,
+# depth first, so the order does not depend on the filesystem's readdir.
+archive_members_sorted() {
+  setup
+  run_pkg
+  assert_eq 0 "$RC" "$OUT"
+  zstd -dc "$OUTDIR/$NAME.tar.zst" | python3 -c '
+import sys, tarfile
+names = [m.name.rstrip("/") for m in tarfile.open(fileobj=sys.stdin.buffer, mode="r|")]
+tree = {}
+for n in names:
+    parent, _, base = n.rpartition("/")
+    tree.setdefault(parent, []).append(base)
+want = []
+def walk(d):
+    for b in sorted(tree.get(d, []), key=lambda s: s.encode()):
+        p = d + "/" + b if d else b
+        want.append(p)
+        walk(p)
+walk("")
+assert names == want, "\n".join(names)
+assert len(names) > 10, names
+'
+}
+
+# Without GNU tar or zstd the suite SKIPs locally but is FATAL under CI.
+missing_tools_fatal_on_ci() {
+  local d=$BASE/notools.$$ t rc out
+  mkdir -p "$d"
+  for t in bash dirname mktemp rm grep; do ln -s "$(command -v "$t")" "$d/$t"; done
+  rc=0
+  out=$(env -i PATH="$d" HOME="$BASE" "$d/bash" "$ROOT/tests/test-package-engine.sh" 2>&1) || rc=$?
+  assert_eq 0 "$rc" "local: $out"
+  case $out in *SKIP*) ;; *) echo "no SKIP locally: $out" >&2; return 1 ;; esac
+  for t in CI=true GITHUB_ACTIONS=true; do
+    rc=0
+    out=$(env -i PATH="$d" HOME="$BASE" "$t" "$d/bash" "$ROOT/tests/test-package-engine.sh" 2>&1) || rc=$?
+    assert_eq 1 "$rc" "$t: $out"
+    case $out in *FATAL*) ;; *) echo "no FATAL under $t: $out" >&2; return 1 ;; esac
+  done
+}
+
 if ! have_gnu_tar || ! command -v zstd >/dev/null 2>&1; then
   echo "SKIP test-package-engine.sh: GNU tar (tar or gtar) and zstd are required and were not found; no package case ran"
   exit 0
@@ -419,4 +587,11 @@ run_test "refuses version not in UPSTREAM" refuses_version_not_upstream
 run_test "refuses existing output" refuses_existing_output
 run_test "usage errors" usage_errors
 run_test "contract rechecks extracted tree" contract_rechecks_extracted_tree
+run_test "fails on directory symlink outside" fails_on_dir_symlink_outside
+run_test "refuses broad producer root" refuses_broad_producer_root
+run_test "fails on non-ASCII leak in JSON" fails_on_non_ascii_leak_in_json
+run_test "fails on escaping config path" fails_on_escaping_config_path
+run_test "contract rejects bad archive members" contract_rejects_bad_archive_members
+run_test "archive members sorted" archive_members_sorted
+run_test "missing tools fatal on CI" missing_tools_fatal_on_ci
 finish
