@@ -139,13 +139,20 @@ trap 'rm -rf "$work"' EXIT
 
 # Select the bundle files from the index and stage their raw blobs.
 pq_git -C "$tree" ls-files -s -z -- js/src >"$work/index" || die "git ls-files failed"
-# python3 runs `git cat-file --batch` itself: this shell's environment is
-# already hermetic for git (pq_git_env above), and a raw blob read applies no
-# attributes, filters or eol conversion.
-python3 -I - "$tree" "$work/index" "$work/testsrc" "$work/jstests" "$jstests" <<'PY' || exit 1
-import os, posixpath, re, subprocess, sys
+# python3 runs `git cat-file --batch` itself, as plain git: it relies on this
+# shell's environment being hermetic for git (pq_git_env above: no user or
+# system config, no repository-selection variables, GIT_NO_REPLACE_OBJECTS=1)
+# and on git >= 2.32, which the pq_git calls above already enforced. A raw
+# blob read applies no attributes, filters or eol conversion, and every blob
+# is re-hashed against its index oid (object format from the repository), so
+# a swapped object fails closed. Blobs are read when needed, not cached.
+object_format=$(pq_git -C "$tree" rev-parse --show-object-format) || die "cannot read the object format of $tree"
+python3 -I - "$tree" "$work/index" "$work/testsrc" "$work/jstests" "$jstests" "$object_format" <<'PY' || exit 1
+import hashlib, os, posixpath, re, subprocess, sys
 
-tree, index_path, testsrc_dir, jstests_dir, want_jstests = sys.argv[1:]
+tree, index_path, testsrc_dir, jstests_dir, want_jstests, object_format = sys.argv[1:]
+if object_format not in ("sha1", "sha256"):
+    sys.exit("package-test-sources: unsupported object format %s" % object_format)
 modes, oids = {}, {}
 with open(index_path, "rb") as f:
     for entry in f.read().split(b"\0"):
@@ -156,25 +163,27 @@ with open(index_path, "rb") as f:
             modes[p], oids[p] = mode, oid
 errors = []
 
-git = subprocess.Popen(["git", "-C", tree, "cat-file", "--batch"],
+git = subprocess.Popen(["git", "--no-replace-objects", "-C", tree, "cat-file", "--batch"],
                        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-blobs = {}
 
 
 def blob(p):
-    """The raw bytes of path p's index blob."""
-    if p not in blobs:
-        git.stdin.write(oids[p].encode() + b"\n")
-        git.stdin.flush()
-        header = git.stdout.readline().split()
-        if len(header) != 3 or header[0].decode() != oids[p] or header[1] != b"blob":
-            sys.exit("package-test-sources: %s: cannot read blob %s" % (p, oids[p]))
-        size = int(header[2])
-        data = git.stdout.read(size)
-        if len(data) != size or git.stdout.read(1) != b"\n":
-            sys.exit("package-test-sources: %s: short read of blob %s" % (p, oids[p]))
-        blobs[p] = data
-    return blobs[p]
+    """The raw bytes of path p's index blob, verified against its oid."""
+    git.stdin.write(oids[p].encode() + b"\n")
+    git.stdin.flush()
+    header = git.stdout.readline().split()
+    if len(header) != 3 or header[0].decode() != oids[p] or header[1] != b"blob":
+        sys.exit("package-test-sources: %s: cannot read blob %s" % (p, oids[p]))
+    size = int(header[2])
+    data = git.stdout.read(size)
+    if len(data) != size or git.stdout.read(1) != b"\n":
+        sys.exit("package-test-sources: %s: short read of blob %s" % (p, oids[p]))
+    h = hashlib.new(object_format)
+    h.update(b"blob %d\0" % size)
+    h.update(data)
+    if h.hexdigest() != oids[p]:
+        sys.exit("package-test-sources: %s: blob does not hash to %s (got %s)" % (p, oids[p], h.hexdigest()))
+    return data
 
 
 def fail(rel, why):
