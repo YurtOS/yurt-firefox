@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package a queue-built SpiderMonkey dist/ as a relocatable engine archive.
 #   package-engine.sh --dist DIR --manifest build-manifest.json --out DIR
-#                     --version V --revision N
+#                     --version V --revision N [--test-sources DIR]
 # writes <out>/spidermonkey_V-N-wasm32-wasi.tar.zst, its .sha256 (sha256sum
 # format) and MANIFEST.json (the copy inside the archive). V must be the
 # Firefox version of UPSTREAM's tag (FIREFOX_147_0_4_RELEASE -> 147.0.4) and of
@@ -26,7 +26,13 @@
 #    "<sha256>  <relpath>" lines of the package sorted by path, MANIFEST.json
 #    excluded),
 #    package_version (V-N), toolchain (name, url, sha256 of each recorded
-#    toolchain artifact) and test_sources (null; Task Y2 fills it).
+#    toolchain artifact) and test_sources: with --test-sources DIR (the --out
+#    directory of scripts/package-test-sources.sh), {"testsrc": {name,
+#    sha256}, "jstests": {name, sha256} or null} for
+#    spidermonkey_V-N-{testsrc,jstests}.tar.zst. Each present bundle needs its
+#    archive and a one-line "<sha256>  <name>" .sha256 naming it, whose digest
+#    the archive must match; testsrc is required, jstests optional. Without
+#    the flag test_sources is null.
 # 4. Contract (scripts/lib/package-contract.sh) on the package tree, Opcodes.h
 #    byte-identical to the dist's, then a deterministic archive (GNU tar
 #    --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner, zstd -T1)
@@ -51,17 +57,18 @@ ROOT=${PQ_ROOT:-$SELF}
 
 usage() {
   [ $# -eq 0 ] || echo "package-engine: $*" >&2
-  echo "usage: package-engine.sh --dist DIR --manifest build-manifest.json --out DIR --version V --revision N" >&2
+  echo "usage: package-engine.sh --dist DIR --manifest build-manifest.json --out DIR --version V --revision N [--test-sources DIR]" >&2
   exit 2
 }
 die() { echo "package-engine: $*" >&2; exit 1; }
 
-dist= manifest= out= version= revision=
+dist= manifest= out= version= revision= test_sources=
 while [ $# -gt 0 ]; do
   case $1 in
-    --dist | --manifest | --out | --version | --revision)
+    --dist | --manifest | --out | --version | --revision | --test-sources)
       [ $# -ge 2 ] || usage "$1 needs a value"
       case $1 in
+        --test-sources) test_sources=$2 ;;
         --dist) dist=$2 ;;
         --manifest) manifest=$2 ;;
         --out) out=$2 ;;
@@ -78,6 +85,7 @@ done
 [[ $revision =~ ^[1-9][0-9]*$ ]] || usage "bad revision: $revision"
 [ -d "$dist" ] || usage "no such directory: $dist"
 [ -f "$manifest" ] || usage "no such file: $manifest"
+[ -z "$test_sources" ] || [ -d "$test_sources" ] || usage "no such directory: $test_sources"
 
 export LC_ALL=C
 umask 022
@@ -88,6 +96,7 @@ dist=$(cd "$dist" && pwd -P)
 manifest=$(cd "$(dirname "$manifest")" && pwd -P)/$(basename "$manifest")
 mkdir -p "$out"
 out=$(cd "$out" && pwd -P)
+[ -z "$test_sources" ] || test_sources=$(cd "$test_sources" && pwd -P)
 
 name=spidermonkey_$version-$revision-wasm32-wasi
 archive=$out/$name.tar.zst
@@ -95,24 +104,14 @@ for f in "$archive" "$archive.sha256" "$out/MANIFEST.json"; do
   if [ -e "$f" ] || [ -L "$f" ]; then die "$f exists; move it away first"; fi
 done
 
-if tar --version 2>/dev/null | grep -q 'GNU tar'; then
-  TAR=tar
-elif command -v gtar >/dev/null 2>&1 && gtar --version 2>/dev/null | grep -q 'GNU tar'; then
-  TAR=gtar
-else
-  die "GNU tar is required (tar or gtar)"
-fi
+TAR=$(pc_gnu_tar) || exit 1
 command -v zstd >/dev/null 2>&1 || die "zstd is required"
 
 config=$dist/include-private/js-build-config.json
 [ -f "$config" ] || die "include-private/js-build-config.json: missing from $dist"
 
 pq_read_pin "$ROOT/UPSTREAM" || exit 1
-case $PQ_TAG in
-  FIREFOX_*_RELEASE) firefox_version=${PQ_TAG#FIREFOX_}; firefox_version=${firefox_version%_RELEASE}
-    firefox_version=${firefox_version//_/.} ;;
-  *) die "UPSTREAM tag $PQ_TAG is not FIREFOX_<version>_RELEASE" ;;
-esac
+firefox_version=$(pc_firefox_version "$PQ_TAG") || exit 1
 [ "$version" = "$firefox_version" ] ||
   die "--version $version is not UPSTREAM's Firefox version $firefox_version"
 queue_commit=$(pq_git -C "$ROOT" rev-parse --verify 'HEAD^{commit}') || die "cannot read HEAD of $ROOT"
@@ -124,10 +123,11 @@ pc_prefixes "$config" >"$work/prefixes" || exit 1
 
 echo "package-engine: materialize $dist"
 python3 -I - "$dist" "$stage" "$manifest" "$PQ_TAG" "$firefox_version" "$queue_commit" \
-  "$version-$revision" "$PC_LIBS" <<'PY' || exit 1
-import hashlib, json, os, shlex, shutil, stat, sys
+  "$version-$revision" "$PC_LIBS" "$test_sources" <<'PY' || exit 1
+import hashlib, json, os, re, shlex, shutil, stat, sys
 
-dist, stage, manifest_path, tag, ff_version, queue_commit, package_version, libs = sys.argv[1:]
+(dist, stage, manifest_path, tag, ff_version, queue_commit, package_version, libs,
+ ts_dir) = sys.argv[1:]
 errors = []
 
 
@@ -241,6 +241,38 @@ for a in bm.get("toolchain_artifacts") or []:
     toolchain.append(entry)
 if len(toolchain) != 2:
     fail("build-manifest.json", "expected 2 toolchain artifacts (clang, sysroot), found %d" % len(toolchain))
+
+
+def bundle(kind, required):
+    """{name, sha256} of spidermonkey_<V-N>-<kind>.tar.zst in ts_dir, checked
+    against its .sha256; None when optional and absent."""
+    name = "spidermonkey_%s-%s.tar.zst" % (package_version, kind)
+    archive, sums = os.path.join(ts_dir, name), os.path.join(ts_dir, name + ".sha256")
+    if not required and not os.path.lexists(archive) and not os.path.lexists(sums):
+        return None
+    if not os.path.isfile(sums):
+        return fail(name + ".sha256", "missing from %s" % ts_dir)
+    with open(sums, "rb") as f:
+        text = f.read().decode("utf-8", "replace")
+    m = re.fullmatch(r"([0-9a-f]{64})  (\S+)\n?", text)
+    if not m:
+        return fail(name + ".sha256", "not one \"<sha256>  <name>\" line")
+    if m.group(2) != name:
+        return fail(name + ".sha256", "names %s, want %s" % (m.group(2), name))
+    if not os.path.isfile(archive):
+        return fail(name, "missing from %s" % ts_dir)
+    h = hashlib.sha256()
+    with open(archive, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    if h.hexdigest() != m.group(1):
+        return fail(name, "sha256 %s differs from %s.sha256" % (h.hexdigest(), name))
+    return {"name": name, "sha256": m.group(1)}
+
+
+test_sources = None
+if ts_dir:
+    test_sources = {"testsrc": bundle("testsrc", True), "jstests": bundle("jstests", False)}
 if errors:
     print("\n".join(errors), file=sys.stderr)
     sys.exit(1)
@@ -261,7 +293,7 @@ m.update({
     "dist_files": {"count": len(lines), "sha256": hashlib.sha256(listing).hexdigest()},
     "package_version": package_version,
     "toolchain": toolchain,
-    "test_sources": None,
+    "test_sources": test_sources,
 })
 with open(os.path.join(stage, "MANIFEST.json"), "w") as f:
     json.dump(m, f, indent=2, sort_keys=True, ensure_ascii=False)
@@ -276,11 +308,9 @@ pc_check_opcodes "$stage" "$dist" || rc=1
 [ "$rc" -eq 0 ] || die "contract violated; no archive written"
 
 echo "package-engine: archive $name.tar.zst"
-(cd "$work/stage" && "$TAR" --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-  --format=gnu -cf - spidermonkey) | zstd -q -T1 -10 -c >"$work/$name.tar.zst" || die "archiving failed"
-pc_check_archive "$work/$name.tar.zst" || die "archive member check failed"
-digest=$(if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi <"$work/$name.tar.zst")
-printf '%s  %s\n' "${digest%% *}" "$name.tar.zst" >"$work/$name.tar.zst.sha256"
+pc_archive "$TAR" "$work/stage" "$work/$name.tar.zst" spidermonkey || die "archiving failed"
+pc_check_archive "$work/$name.tar.zst" spidermonkey || die "archive member check failed"
+pc_sha256_line "$work/$name.tar.zst" >"$work/$name.tar.zst.sha256" || die "cannot hash $name.tar.zst"
 cp "$stage/MANIFEST.json" "$work/MANIFEST.json"
 mv "$work/$name.tar.zst" "$archive"
 mv "$work/$name.tar.zst.sha256" "$archive.sha256"
