@@ -80,8 +80,13 @@ for where, p in found:
     for q in (p, os.path.realpath(p) if os.path.exists(p) else p):
         q = q.rstrip("/")
         if q in broad:
+            fix = ("set %s to a directory that is not a system root" % where
+                   if where in ("$HOME", "MOZBUILD_STATE_PATH") else
+                   "build with that tree outside /, /usr, /usr/local and /opt (for the "
+                   "toolchain: set MOZBUILD_STATE_PATH and HOME to a non-broad directory "
+                   "so mach bootstrap installs clang and the sysroot there)")
             bad.append("%s is the broad system directory %r; a producer root there "
-                       "cannot be scanned for leaks" % (where, q or "/"))
+                       "cannot be scanned for leaks; %s" % (where, q or "/", fix))
         else:
             out.add(q)
 if bad:
@@ -218,14 +223,23 @@ for key in ("ar", "topsrcdir", "topobjdir"):
     if cfg.get(key) != "":
         bad.append("%s is %r, want \"\"" % (key, cfg.get(key)))
 # CMake joins these onto SPIDERMONKEY_DIST (force_includes onto its
-# include-private/): each must be a relative path that stays inside.
+# include-private/): each must be a relative path that stays inside. CMake
+# splits include_dirs/libraries as lists (';') and force_includes through
+# SHELL: (whitespace, quotes, backslash), and expands '$' and backticks can
+# reach a shell, so such characters are refused before the '..' check.
+unsafe = set(';"\'\\$`') | set(" \t\n\r\v\f")
 for key in ("include_dirs", "libraries", "force_includes"):
     v = cfg.get(key)
     if not isinstance(v, list):
         bad.append("%s is %r, want a list of relative paths" % (key, v))
         continue
     for p in v:
-        if not isinstance(p, str) or not p or p.startswith("/") or ".." in p.split("/"):
+        if not isinstance(p, str) or not p:
+            bad.append("%s: %r is not a path" % (key, p))
+        elif unsafe & set(p):
+            bad.append("%s: %r contains a list separator, whitespace or shell/CMake "
+                       "metacharacter" % (key, p))
+        elif p.startswith("/") or ".." in p.split("/"):
             bad.append("%s: %r escapes the package" % (key, p))
 for b in bad:
     print("package-contract: %s: %s" % (rel, b), file=sys.stderr)
