@@ -467,11 +467,15 @@ c["os_ldflags"].append("-L%s/lib" % s)'
   case $out in *"MANIFEST.json: contains producer path"*) ;; *) echo "escaped leak not found: $out" >&2; return 1 ;; esac
 }
 
-# Path-valued config fields CMake joins onto SPIDERMONKEY_DIST must stay inside.
+# Path-valued config fields CMake joins onto SPIDERMONKEY_DIST must stay inside,
+# also after CMake list splitting (;) and SHELL: tokenizing (whitespace).
 fails_on_escaping_config_path() {
   local edit
   for edit in 'c["include_dirs"].append("../../etc")' 'c["libraries"].append("lib/../../x.a")' \
-    'c["force_includes"].append("../x.h")' 'c["include_dirs"].append("/etc")'; do
+    'c["force_includes"].append("../x.h")' 'c["include_dirs"].append("/etc")' \
+    'c["include_dirs"].append("include;../outside")' \
+    'c["force_includes"].append("gcc_hidden.h -include /etc/outside.h")' \
+    'c["libraries"].append("lib/a.a\tlib/b.a")' 'c["include_dirs"].append("inc$(x)")'; do
     setup
     edit_config "$edit"
     run_pkg
