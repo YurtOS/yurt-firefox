@@ -307,7 +307,7 @@ for a in m["toolchain"]:
 assert any(set(a) - {"name", "url", "sha256"} for a in bm["toolchain_artifacts"]), \
     "fixture has no extra toolchain key: the filter is not exercised"
 assert "toolchain_artifacts" not in m, "unfiltered toolchain_artifacts copied"
-assert "test_sources" in m
+assert m["test_sources"] is None, m["test_sources"]  # no --test-sources
 PY
   local p
   for p in "$FX_ROOT" "$FX_SRC" "$FX_OBJ" "$FX_CLANG" "$FX_SYSROOT" "$FX_HOME" "$FX_MOZBUILD"; do
@@ -564,6 +564,74 @@ missing_tools_fatal_on_ci() {
   done
 }
 
+# fake_bundles <dir> [jstests]: bundle archives and .sha256 files laid out as
+# scripts/package-test-sources.sh writes them (content is irrelevant here).
+fake_bundles() {
+  local n f
+  mkdir -p "$1"
+  for n in testsrc ${2:+jstests}; do
+    f=spidermonkey_147.0.4-1-$n.tar.zst
+    printf '%s bundle\n' "$n" >"$1/$f"
+    printf '%s  %s\n' "$(sha256 <"$1/$f" | cut -d' ' -f1)" "$f" >"$1/$f.sha256"
+  done
+}
+
+# run_pkg_ts <bundle-dir>: package with --test-sources.
+run_pkg_ts() {
+  run_pkg --dist "$FX_DIST" --manifest "$FX_MANIFEST" --out "$OUTDIR" --version 147.0.4 --revision 1 \
+    --test-sources "$1"
+}
+
+# test_sources_is <bundle-dir> <with-jstests 0|1>: MANIFEST.json (outside and
+# inside the archive) records each bundle's name and sha256.
+test_sources_is() {
+  extract
+  python3 - "$OUTDIR/MANIFEST.json" "$X/spidermonkey/MANIFEST.json" "$1" "$2" <<'PY'
+import hashlib, json, os, sys
+out, inner, d, with_js = sys.argv[1:]
+def entry(kind):
+    name = "spidermonkey_147.0.4-1-%s.tar.zst" % kind
+    return {"name": name, "sha256": hashlib.sha256(open(os.path.join(d, name), "rb").read()).hexdigest()}
+want = {"testsrc": entry("testsrc"), "jstests": entry("jstests") if with_js == "1" else None}
+for p in (out, inner):
+    got = json.load(open(p))["test_sources"]
+    assert got == want, (p, got, want)
+PY
+}
+
+records_test_sources() {
+  setup
+  fake_bundles "$BASE/ts1.$$" jstests
+  run_pkg_ts "$BASE/ts1.$$"
+  assert_eq 0 "$RC" "$OUT"
+  test_sources_is "$BASE/ts1.$$" 1
+  setup
+  fake_bundles "$BASE/ts2.$$"
+  run_pkg_ts "$BASE/ts2.$$"
+  assert_eq 0 "$RC" "$OUT"
+  test_sources_is "$BASE/ts2.$$" 0
+}
+
+# Each bad bundle directory is refused (exit 1, names the file), no archive.
+refuses_bad_test_sources() {
+  local d f=spidermonkey_147.0.4-1-testsrc.tar.zst j=spidermonkey_147.0.4-1-jstests.tar.zst
+  setup; d=$BASE/bad1.$$; mkdir -p "$d"
+  run_pkg_ts "$d"; expect_violation "$f.sha256"
+  setup; d=$BASE/bad2.$$; fake_bundles "$d"; echo tampered >>"$d/$f"
+  run_pkg_ts "$d"; expect_violation "$f"
+  setup; d=$BASE/bad3.$$; fake_bundles "$d"; echo "not-a-digest  $f" >"$d/$f.sha256"
+  run_pkg_ts "$d"; expect_violation "$f.sha256"
+  setup; d=$BASE/bad4.$$; fake_bundles "$d"
+  printf '%s  spidermonkey_147.0.4-2-testsrc.tar.zst\n' "$(cut -d' ' -f1 <"$d/$f.sha256")" >"$d/$f.sha256"
+  run_pkg_ts "$d"; expect_violation "$f.sha256"
+  setup; d=$BASE/bad5.$$; fake_bundles "$d"; rm "$d/$f"
+  run_pkg_ts "$d"; expect_violation "$f"
+  setup; d=$BASE/bad6.$$; fake_bundles "$d" jstests; echo tampered >>"$d/$j"
+  run_pkg_ts "$d"; expect_violation "$j"
+  setup
+  run_pkg_ts "$BASE/none.$$"; assert_eq 2 "$RC" "missing directory: $OUT"
+}
+
 if ! have_gnu_tar || ! command -v zstd >/dev/null 2>&1; then
   if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
     echo "FATAL test-package-engine.sh: GNU tar (tar or gtar) and zstd are required on CI and were not found" >&2
@@ -597,6 +665,8 @@ run_test "refuses version not in UPSTREAM" refuses_version_not_upstream
 run_test "refuses existing output" refuses_existing_output
 run_test "usage errors" usage_errors
 run_test "contract rechecks extracted tree" contract_rechecks_extracted_tree
+run_test "records test_sources" records_test_sources
+run_test "refuses bad test sources" refuses_bad_test_sources
 run_test "fails on directory symlink outside" fails_on_dir_symlink_outside
 run_test "refuses broad producer root" refuses_broad_producer_root
 run_test "fails on non-ASCII leak in JSON" fails_on_non_ascii_leak_in_json
