@@ -306,6 +306,40 @@ ignores_smudge_filter() {
   assert_eq "// prologue" "$(cat "$X/js/src/jit-test/lib/prologue.js")"
 }
 
+# A local replace ref cannot substitute a blob: the archive is the index's
+# objects, as a clean run gives.
+ignores_replace_refs() {
+  local want evil
+  want=$(clean_digests)
+  setup
+  evil=$(printf '// evil\n' | git -C "$TS_TREE" hash-object -w --stdin)
+  git -C "$TS_TREE" replace "$(git -C "$TS_TREE" rev-parse :js/src/jit-test/lib/prologue.js)" "$evil"
+  git -C "$TS_TREE" config core.useReplaceRefs true
+  [ "$(git -C "$TS_TREE" cat-file blob :js/src/jit-test/lib/prologue.js)" = "// evil" ]
+  run_pkg_jstests
+  assert_eq 0 "$RC" "$OUT"
+  assert_eq "$want" "$(cat "$OUTDIR/$TESTSRC.tar.zst.sha256" "$OUTDIR/$JSTESTS.tar.zst.sha256")"
+}
+
+# A loose object whose content does not hash to its name (git cat-file does
+# not verify it) is refused by the blob re-hash, naming the file.
+fails_on_corrupt_object() {
+  setup
+  local oid
+  oid=$(git -C "$TS_TREE" rev-parse :js/src/jit-test/lib/prologue.js)
+  python3 - "$TS_TREE/.git/objects/${oid:0:2}/${oid:2}" <<'PY'
+import os, sys, zlib
+path = sys.argv[1]
+data = b"// swapped\n"
+os.chmod(path, 0o644)
+with open(path, "wb") as f:
+    f.write(zlib.compress(b"blob %d\0" % len(data) + data))
+PY
+  [ "$(git -C "$TS_TREE" cat-file blob "$oid")" = "// swapped" ]
+  run_pkg
+  expect_refusal "js/src/jit-test/lib/prologue.js: blob does not hash to $oid"
+}
+
 # The extracted testsrc bundle starts jit_test.py with the producer tree gone;
 # without jsapi.h it does not.
 harness_starts_from_bundle() {
@@ -546,6 +580,8 @@ run_test "refuses an edit hidden by skip-worktree" refuses_edit_hidden_by_skip_w
 run_test "refuses a tree mismatch" refuses_tree_mismatch
 run_test "ignores untracked .gitattributes" ignores_untracked_gitattributes
 run_test "ignores a smudge filter" ignores_smudge_filter
+run_test "ignores replace refs" ignores_replace_refs
+run_test "fails on a corrupt object" fails_on_corrupt_object
 run_test "objdir allowed and absent" objdir_allowed_and_absent
 run_test "fails on a missing required file" fails_on_missing_required_file
 run_test "fails on a bad runtime load" fails_on_bad_runtime_load
