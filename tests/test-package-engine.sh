@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Tests for scripts/package-engine.sh and scripts/lib/package-contract.sh on a
 # fixture dist (tests/fixture-dist.sh); no Firefox build. The packager needs GNU
-# tar (`tar` or `gtar`) and zstd; without them every case is reported as SKIP.
+# tar (`tar` or `gtar`) and zstd; without them the suite prints SKIP and exits 0
+# on a developer machine, but is FATAL (exit 1) when CI or GITHUB_ACTIONS is set,
+# so a CI image without them cannot pass the fixtures lane vacuously.
 set -euo pipefail
 
 unset PQ_YURT_REPO PQ_YURT_REF PQ_DOM_COUNT PQ_LISTS_DIR PQ_DIFF_REPO GITHUB_WORKSPACE NM_REPO
@@ -559,6 +561,10 @@ missing_tools_fatal_on_ci() {
 }
 
 if ! have_gnu_tar || ! command -v zstd >/dev/null 2>&1; then
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "FATAL test-package-engine.sh: GNU tar (tar or gtar) and zstd are required on CI and were not found" >&2
+    exit 1
+  fi
   echo "SKIP test-package-engine.sh: GNU tar (tar or gtar) and zstd are required and were not found; no package case ran"
   exit 0
 fi

@@ -13,13 +13,15 @@
 # MANIFEST.json; nothing else of the dist (host/, idl/, ...) is taken.
 #
 # 1. Materialize: every entry is copied by following its symlink (absolute or
-#    relative). A dangling symlink, or one resolving outside the dist,
-#    topsrcdir and topobjdir, fails here naming the link.
+#    relative). A dangling symlink, or any entry whose realpath (through a
+#    symlinked file or parent directory) is outside the dist, topsrcdir and
+#    topobjdir, fails here naming the entry.
 # 2. Rewrite include-private/js-build-config.json: argv0 of cc and cxx becomes
 #    bare `clang` and `clang++`; `--sysroot X`, `--sysroot=X` and `-isysroot X`
 #    are dropped from cc, cxx and cxx_base_flags; ar, topsrcdir and topobjdir
 #    become "". Every other field is kept verbatim.
-# 3. MANIFEST.json: the build manifest's fields plus firefox_version,
+# 3. MANIFEST.json: the build manifest's fields (toolchain_artifacts replaced
+#    by the filtered toolchain below) plus firefox_version,
 #    queue_commit (this repository's HEAD), dist_files (count and sha256 of the
 #    "<sha256>  <relpath>" lines of the package sorted by path, MANIFEST.json
 #    excluded),
@@ -28,7 +30,9 @@
 # 4. Contract (scripts/lib/package-contract.sh) on the package tree, Opcodes.h
 #    byte-identical to the dist's, then a deterministic archive (GNU tar
 #    --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner, zstd -T1)
-#    whose member list is checked again.
+#    whose member list is checked again. The archive bytes are reproducible for
+#    a given GNU tar and zstd version; zstd level 10 output may differ between
+#    zstd releases, so compare digests made with the same zstd.
 #
 # Hermetic like pq_git: paths are resolved up front (no reliance on the cwd),
 # LC_ALL, umask, TAR_OPTIONS and ZSTD_* are fixed, git runs through pq_git and
@@ -144,14 +148,15 @@ def inside(p):
 
 
 def copy(src, rel, dst, active):
-    """Copy src (dist entry `rel`) to dst, following symlinks."""
-    if os.path.islink(src):
-        target = os.path.realpath(src)
-        if not os.path.exists(target):
-            return fail(rel, "dangling symlink -> %s" % os.readlink(src))
-        if not inside(target):
-            return fail(rel, "symlink resolves outside the dist, topsrcdir and topobjdir: %s" % target)
-        src = target
+    """Copy src (dist entry `rel`) to dst, following symlinks. The realpath of
+    every entry is checked, so a symlinked parent directory (dist/lib ->
+    elsewhere) cannot carry its files past the containment check."""
+    target = os.path.realpath(src)
+    if not os.path.exists(target):
+        return fail(rel, "dangling symlink -> %s" % (os.readlink(src) if os.path.islink(src) else target))
+    if not inside(target):
+        return fail(rel, "resolves outside the dist, topsrcdir and topobjdir: %s" % target)
+    src = target
     st = os.stat(src)
     if stat.S_ISDIR(st.st_mode):
         real = os.path.realpath(src)
@@ -221,7 +226,7 @@ for key in ("ar", "topsrcdir", "topobjdir"):
 cfg_path = os.path.join(stage, "include-private", "js-build-config.json")
 os.chmod(cfg_path, 0o644)
 with open(cfg_path, "w") as f:
-    json.dump(cfg, f, indent=2, sort_keys=True)
+    json.dump(cfg, f, indent=2, sort_keys=True, ensure_ascii=False)
 
 # Manifest.
 with open(manifest_path) as f:
@@ -249,6 +254,7 @@ for rel in files:
         lines.append("%s  %s\n" % (hashlib.sha256(f.read()).hexdigest(), rel.decode()))
 listing = "".join(lines).encode()
 m = dict(bm)
+m.pop("toolchain_artifacts", None)  # replaced by the filtered "toolchain"
 m.update({
     "firefox_version": ff_version,
     "queue_commit": queue_commit,
@@ -258,7 +264,7 @@ m.update({
     "test_sources": None,
 })
 with open(os.path.join(stage, "MANIFEST.json"), "w") as f:
-    json.dump(m, f, indent=2, sort_keys=True)
+    json.dump(m, f, indent=2, sort_keys=True, ensure_ascii=False)
     f.write("\n")
 os.chmod(os.path.join(stage, "MANIFEST.json"), 0o644)
 PY

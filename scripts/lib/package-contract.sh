@@ -21,11 +21,14 @@
 PC_LIBS="libjs_static libjsrust libjsshell libpure_virtual"
 
 # pc_prefixes <js-build-config.json>: print the producer prefixes, one per
-# line, sorted and unique. Empty values, relative paths and top-level system
-# directories ("/", "/usr", "/usr/local", "/opt") are skipped, so a bare
-# `clang` on PATH or an unset MOZBUILD_STATE_PATH never yields a pattern that
-# matches everything. A prefix that exists is also printed in its realpath
+# line, sorted and unique. A prefix that exists is also printed in its realpath
 # form. The clang directory is argv0's directory, minus a trailing /bin.
+# Skipped, because there is no directory to scan for: an empty value (unset
+# HOME or MOZBUILD_STATE_PATH, an absent topsrcdir) and a bare argv0 (`clang`
+# found on PATH). Refused (exit 1, naming the field): a relative path, and a
+# root that is a broad system directory ("/", "/usr", "/usr/local", "/opt"):
+# scanning for it would flag every header, and ignoring it would leave that
+# producer root unscanned, so such a build cannot be packaged.
 pc_prefixes() {
   python3 -I - "$1" "${HOME:-}" "${MOZBUILD_STATE_PATH:-}" <<'PY'
 import json, os, shlex, sys
@@ -46,33 +49,45 @@ def tokens(v):
     return []
 
 
-found = [cfg.get("topsrcdir"), cfg.get("topobjdir"), home, state]
+# (where, value) pairs; `where` names the source in error messages.
+found = [("topsrcdir", cfg.get("topsrcdir")), ("topobjdir", cfg.get("topobjdir")),
+         ("$HOME", home), ("MOZBUILD_STATE_PATH", state)]
 for key in ("cc", "cxx"):
     t = tokens(cfg.get(key))
-    if t and os.path.isabs(t[0]):
+    if t and os.path.dirname(t[0]):  # a bare `clang` names no directory
         d = os.path.dirname(t[0])
         if os.path.basename(d) == "bin":
             d = os.path.dirname(d)
-        found.append(d)
+        found.append(("%s clang directory" % key, d))
 for key in ("cc", "cxx", "cxx_base_flags"):
     t = tokens(cfg.get(key))
     for i, tok in enumerate(t):
         if tok in ("--sysroot", "-isysroot") and i + 1 < len(t):
-            found.append(t[i + 1])
+            found.append(("%s sysroot" % key, t[i + 1]))
         elif tok.startswith("--sysroot="):
-            found.append(tok[len("--sysroot="):])
+            found.append(("%s sysroot" % key, tok[len("--sysroot="):]))
         elif tok.startswith("-isysroot") and len(tok) > len("-isysroot"):
-            found.append(tok[len("-isysroot"):])
+            found.append(("%s sysroot" % key, tok[len("-isysroot"):]))
 
-skip = {"", "/", "/usr", "/usr/local", "/opt"}
-out = set()
-for p in found:
+broad = {"", "/usr", "/usr/local", "/opt"}  # after rstrip("/"), "/" is ""
+out, bad = set(), []
+for where, p in found:
+    if p is None or p == "":
+        continue
     if not isinstance(p, str) or not os.path.isabs(p):
+        bad.append("%s is %r, not an absolute path" % (where, p))
         continue
     for q in (p, os.path.realpath(p) if os.path.exists(p) else p):
         q = q.rstrip("/")
-        if q not in skip:
+        if q in broad:
+            bad.append("%s is the broad system directory %r; a producer root there "
+                       "cannot be scanned for leaks" % (where, q or "/"))
+        else:
             out.add(q)
+if bad:
+    for b in sorted(set(bad)):
+        print("package-contract: include-private/js-build-config.json: " + b, file=sys.stderr)
+    sys.exit(1)
 for p in sorted(out):
     print(p)
 PY
@@ -85,9 +100,24 @@ PY
 pc_check_tree() {
   local rc=0
   python3 -I - "$1" "$2" "$PC_LIBS" <<'PY' || rc=1
-import os, stat, sys
+import json, os, stat, sys
 
 tree, prefix_file, libs = sys.argv[1:]
+
+
+def json_strings(v):
+    """Every string (keys included) in a decoded JSON value."""
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, list):
+        for x in v:
+            yield from json_strings(x)
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield k
+            yield from json_strings(x)
+
+
 with open(prefix_file, "rb") as f:
     prefixes = [l.rstrip(b"\r\n") for l in f]
 prefixes = [p for p in prefixes if p.strip()]
@@ -127,8 +157,17 @@ for dirpath, dirnames, filenames in os.walk(tree):
         elif rel not in exempt:
             with open(p, "rb") as f:
                 data = f.read()
+            # JSON may carry a prefix \u-escaped (json.dump's ensure_ascii),
+            # so .json files are also scanned in their decoded strings.
+            texts = [data]
+            if name.endswith(".json"):
+                try:
+                    texts += [s.encode("utf-8", "surrogateescape")
+                              for s in json_strings(json.loads(data.decode("utf-8")))]
+                except ValueError:
+                    fail(rel, "not valid JSON")
             for prefix in prefixes:
-                if prefix in data:
+                if any(prefix in t for t in texts):
                     fail(rel, "contains producer path %s" % prefix.decode("utf-8", "replace"))
                     break
 for line in bad:
@@ -143,8 +182,9 @@ PY
 
 # pc_check_config <js-build-config.json>: the package's config: argv0 of cc
 # and cxx is exactly `clang` and `clang++`, no sysroot option (`--sysroot X`,
-# `--sysroot=X`, `-isysroot X`) in cc, cxx or cxx_base_flags, and ar,
-# topsrcdir and topobjdir are "". Needs no producer knowledge.
+# `--sysroot=X`, `-isysroot X`) in cc, cxx or cxx_base_flags, ar, topsrcdir
+# and topobjdir are "", and include_dirs, libraries and force_includes are
+# relative paths with no `..` component. Needs no producer knowledge.
 pc_check_config() {
   python3 -I - "$1" <<'PY'
 import json, shlex, sys
@@ -177,6 +217,16 @@ for key in ("cc", "cxx", "cxx_base_flags"):
 for key in ("ar", "topsrcdir", "topobjdir"):
     if cfg.get(key) != "":
         bad.append("%s is %r, want \"\"" % (key, cfg.get(key)))
+# CMake joins these onto SPIDERMONKEY_DIST (force_includes onto its
+# include-private/): each must be a relative path that stays inside.
+for key in ("include_dirs", "libraries", "force_includes"):
+    v = cfg.get(key)
+    if not isinstance(v, list):
+        bad.append("%s is %r, want a list of relative paths" % (key, v))
+        continue
+    for p in v:
+        if not isinstance(p, str) or not p or p.startswith("/") or ".." in p.split("/"):
+            bad.append("%s: %r escapes the package" % (key, p))
 for b in bad:
     print("package-contract: %s: %s" % (rel, b), file=sys.stderr)
 sys.exit(1 if bad else 0)
