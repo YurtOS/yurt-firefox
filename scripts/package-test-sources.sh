@@ -38,9 +38,13 @@
 # Only the tracked tree is packaged, and it must be the pinned one: the index
 # tree (git write-tree) must equal UPSTREAM's tree=, no tracked file may differ
 # from the index (git diff), and no index entry may hide edits
-# (assume-unchanged, skip-worktree). Files are taken from the index with
-# checkout-index, so untracked build output (the objdir, __pycache__) is
-# allowed and never archived. Tracked symlinks in the bundle are refused.
+# (assume-unchanged, skip-worktree). Files are the index's blobs, raw (git
+# cat-file --batch): no checkout, so no .gitattributes (tracked or untracked),
+# eol/autocrlf setting or smudge filter can change a byte; modes come from the
+# index (100755 -> 0755, 100644 -> 0644). The loadRelativeToScript scan reads
+# the same blobs. Untracked build output (the objdir, __pycache__) is allowed
+# and never archived. Tracked symlinks and submodules in the bundle are
+# refused.
 #
 # Archives are deterministic (scripts/lib/package-contract.sh pc_archive) and
 # their members are checked (pc_check_archive). Hermetic like pq_git: paths are
@@ -133,19 +137,44 @@ tree_hash=$(pq_tree "$tree") || die "git write-tree failed in $tree"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Select the bundle files from the index.
+# Select the bundle files from the index and stage their raw blobs.
 pq_git -C "$tree" ls-files -s -z -- js/src >"$work/index" || die "git ls-files failed"
-python3 -I - "$tree" "$work/index" "$work/testsrc.list" "$work/jstests.list" "$jstests" <<'PY' || exit 1
-import os, posixpath, re, sys
+# python3 runs `git cat-file --batch` itself: this shell's environment is
+# already hermetic for git (pq_git_env above), and a raw blob read applies no
+# attributes, filters or eol conversion.
+python3 -I - "$tree" "$work/index" "$work/testsrc" "$work/jstests" "$jstests" <<'PY' || exit 1
+import os, posixpath, re, subprocess, sys
 
-tree, index_path, testsrc_out, jstests_out, want_jstests = sys.argv[1:]
-modes = {}
+tree, index_path, testsrc_dir, jstests_dir, want_jstests = sys.argv[1:]
+modes, oids = {}, {}
 with open(index_path, "rb") as f:
     for entry in f.read().split(b"\0"):
         if entry:
             meta, path = entry.split(b"\t", 1)
-            modes[path.decode("utf-8", "surrogateescape")] = meta.split()[0].decode()
+            mode, oid, _stage = meta.decode().split()
+            p = path.decode("utf-8", "surrogateescape")
+            modes[p], oids[p] = mode, oid
 errors = []
+
+git = subprocess.Popen(["git", "-C", tree, "cat-file", "--batch"],
+                       stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+blobs = {}
+
+
+def blob(p):
+    """The raw bytes of path p's index blob."""
+    if p not in blobs:
+        git.stdin.write(oids[p].encode() + b"\n")
+        git.stdin.flush()
+        header = git.stdout.readline().split()
+        if len(header) != 3 or header[0].decode() != oids[p] or header[1] != b"blob":
+            sys.exit("package-test-sources: %s: cannot read blob %s" % (p, oids[p]))
+        size = int(header[2])
+        data = git.stdout.read(size)
+        if len(data) != size or git.stdout.read(1) != b"\n":
+            sys.exit("package-test-sources: %s: short read of blob %s" % (p, oids[p]))
+        blobs[p] = data
+    return blobs[p]
 
 
 def fail(rel, why):
@@ -173,9 +202,9 @@ while pending:
     if loader in seen:
         continue
     seen.add(loader)
-    # The worktree equals the index here (git diff was clean).
-    with open(os.path.join(tree, loader), "rb") as f:
-        src = f.read().decode("utf-8", "replace")
+    if modes[loader] not in ("100644", "100755"):
+        continue  # refused below; a symlink's blob is its target path
+    src = blob(loader).decode("utf-8", "replace")
     for m in load_re.finditer(src):
         target = posixpath.normpath(posixpath.join(posixpath.dirname(loader), m.group(2)))
         if not target.startswith("js/src/"):
@@ -211,22 +240,21 @@ for p in sorted(testsrc | jstests):
 if errors:
     print("\n".join(errors), file=sys.stderr)
     sys.exit(1)
-for out, files in ((testsrc_out, testsrc), (jstests_out, jstests)):
-    with open(out, "wb") as f:
-        for p in sorted(files):
-            f.write(p.encode("utf-8", "surrogateescape") + b"\0")
+for top, files in ((testsrc_dir, testsrc), (jstests_dir, jstests)):
+    os.makedirs(top)
+    for p in sorted(files):
+        dst = os.path.join(top, p)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as f:
+            f.write(blob(p))
+        os.chmod(dst, 0o755 if modes[p] == "100755" else 0o644)
+git.stdin.close()
+if git.wait() != 0:
+    sys.exit("package-test-sources: git cat-file failed in %s" % tree)
 PY
 
-# stage <name> <list>: check the listed index entries out into $work/<name>.
-stage() {
-  mkdir -p "$work/$1"
-  pq_git -C "$tree" checkout-index -z --stdin --prefix="$work/$1/" <"$2" ||
-    die "git checkout-index failed for the $1 bundle"
-}
-stage testsrc "$work/testsrc.list"
 entries_jstests=js
 if [ "$jstests" -eq 1 ]; then
-  stage jstests "$work/jstests.list"
   objdir=$(sed -n 's/^[[:space:]]*mk_add_options[[:space:]]\{1,\}MOZ_OBJDIR=\([^[:space:]]*\)[[:space:]]*$/\1/p' \
     "$ROOT/mozconfig" | tail -n 1)
   case $objdir in
@@ -267,8 +295,8 @@ PY
   entries_jstests="js xul-info.txt"
 fi
 
-# Normalize modes (checkout-index honours the umask and the index's x bit);
-# nothing but regular files and directories may be staged.
+# Directories 0755 (files already carry the index's mode); nothing but regular
+# files and directories may be staged.
 python3 -I - "$work/testsrc" "$work/jstests" <<'PY' || exit 1
 import os, stat, sys
 
@@ -282,9 +310,7 @@ for top in sys.argv[1:]:
             st = os.lstat(p)
             if stat.S_ISDIR(st.st_mode):
                 os.chmod(p, 0o755)
-            elif stat.S_ISREG(st.st_mode):
-                os.chmod(p, 0o755 if st.st_mode & 0o111 else 0o644)
-            else:
+            elif not stat.S_ISREG(st.st_mode):
                 sys.exit("package-test-sources: %s: not a regular file or directory"
                          % os.path.relpath(p, top))
 PY
