@@ -128,16 +128,18 @@ t_permissions() {
     block=$(body "$WF/$f" | awk '/^permissions:/{f=1; next} f && /^[^[:space:]]/{exit} f && NF{print}')
     assert_eq "  contents: read" "$block" "$f top-level permissions block"
     if [ "$f" = gate.yml ]; then
-      # One exception: gate.yml's tier job reads the PR's labels and files.
+      # One exception: gate.yml's tier job reads the PR's labels and files,
+      # and the last nightly run.
       assert_eq 1 "$(body "$WF/$f" | grep -cE '^[[:space:]]+permissions:')" "gate.yml job-level permissions blocks"
       block=$(body "$WF/$f" | awk '/^    permissions:/{f=1; next} f && !/^      /{exit} f{print}' | sed 's/^[[:space:]]*//')
       assert_eq "contents: read
-pull-requests: read" "$block" "gate.yml tier job permissions"
+pull-requests: read
+actions: read" "$block" "gate.yml tier job permissions"
     else
       ! body "$WF/$f" | grep -Eq '^[[:space:]]+permissions:' || { echo "$f has job-level permissions" >&2; return 1; }
     fi
     ! body "$WF/$f" | grep -q 'secrets\.' || { echo "$f uses secrets" >&2; return 1; }
-    ! body "$WF/$f" | grep -Eq 'pull_request_target|workflow_run' || { echo "$f runs on pull_request_target or workflow_run" >&2; return 1; }
+    ! body "$WF/$f" | grep -Eqw 'pull_request_target|workflow_run' || { echo "$f runs on pull_request_target or workflow_run" >&2; return 1; }
   done
 }
 
@@ -340,6 +342,94 @@ t_gate_tier() {
     ENGINE_INPUTS="$inputs" GITHUB_OUTPUT="$d/out" GITHUB_STEP_SUMMARY="$d/summary" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || { echo "an API error picks a tier" >&2; rm -rf "$d"; return 1; }
   assert_eq "" "$(cat "$d/out")" "no tier on an API error"
+  rm -rf "$d"
+}
+
+# The base is the newest completed run on main that was a nightly or a
+# dispatch (a green dispatch clears a carried red; a pull request's run, or a
+# dispatch on another branch, is not a base). When no engine input changed
+# since it (the same head, or a compare against its head that lists no
+# ENGINE_INPUTS path), the nightly does not rebuild: after a green base it
+# skips (mode=none), after a red one the tier step fails in seconds, writing
+# no mode and linking the red run it carries forward. Any other conclusion
+# (cancelled, skipped) and any doubt runs it: no base, an API error, a compare
+# that is not a fast-forward or may be truncated (300 files). A dispatch never
+# asks. The stub gh answers the runs listing from RUNS (newest first,
+# `event,branch,sha,conclusion,url;...`), applying the URL's event=, branch=
+# and per_page= as the API does, then the step's own --jq. want=fail: the
+# step fails.
+t_gate_nightly_skip() {
+  local f="$WF/gate.yml" d inputs c ev runs cmp fail want rc head=1111111111111111111111111111111111111111
+  local old=2222222222222222222222222222222222222222
+  inputs=$(body "$f" | sed -n "s/^  ENGINE_INPUTS: '\(.*\)'$/\1/p")
+  [ -n "$inputs" ] || { echo "gate.yml lacks ENGINE_INPUTS" >&2; return 1; }
+  d=$(mktemp -d)
+  mkdir -p "$d/bin"
+  cat >"$d/bin/gh" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+case "\$*" in
+  *"/compare/$old...$head"*) [ -z "\${COMPARE_FAIL:-}" ] || exit 1; printf "%b" "\$COMPARE"; exit ;;
+  *"actions/workflows/gate.yml/runs?"*"status=completed"*) [ -z "\${RUNS_FAIL:-}" ] || exit 1 ;;
+  *) exit 1 ;;
+esac
+url=\$2 q=
+while [ \$# -gt 0 ]; do [ "\$1" = --jq ] && q=\$2; shift; done
+param() { sed -n "s/.*[?&]\$1=\\([^&]*\\).*/\\1/p" <<<"\$url"; }
+tr ';' '\\n' <<<"\$RUNS" | jq -Rn --arg ev "\$(param event)" --arg br "\$(param branch)" --arg n "\$(param per_page)" '
+  [inputs | select(. != "") | split(",")
+   | {event: .[0], head_branch: .[1], head_sha: .[2], conclusion: .[3], html_url: .[4]}
+   | select((\$ev == "" or .event == \$ev) and (\$br == "" or .head_branch == \$br))]
+  | {workflow_runs: .[:(if \$n == "" then 30 else (\$n | tonumber) end)]}' | jq -r "\$q"
+STUB
+  chmod +x "$d/bin/gh"
+  for c in \
+    "schedule||||full" \
+    "schedule|schedule,main,$head,success,https://h.test/1|||none" \
+    "schedule|schedule,main,$head,failure,https://h.test/1|||fail" \
+    "schedule|schedule,main,$head,cancelled,https://h.test/1|||full" \
+    "schedule|schedule,main,$head,skipped,https://h.test/1|||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n2\nREADME.md\nscripts/check-queue.sh\n||none" \
+    "schedule|schedule,main,$old,cancelled,https://h.test/1|ahead\n0\n||full" \
+    "schedule|schedule,main,$old,failure,https://h.test/1|ahead\n1\nREADME.md\n||fail" \
+    "schedule|schedule,main,$old,failure,https://h.test/1|ahead\n1\npatches/0001-x.patch\n||full" \
+    "schedule|schedule,main,$old,failure,https://h.test/1|diverged\n1\nREADME.md\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n2\nREADME.md\npatches/0001-x.patch\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n1\nNIGHTMONKEY_PIN\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n1\n.github/workflows/gate.yml\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|diverged\n1\nREADME.md\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n300\nREADME.md\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n1\nREADME.md\n|COMPARE_FAIL|full" \
+    "schedule|schedule,main,$head,success,https://h.test/1||RUNS_FAIL|full" \
+    "schedule|schedule,main,main,success,https://h.test/1|||full" \
+    "workflow_dispatch|schedule,main,$head,success,https://h.test/1|||full" \
+    "schedule|workflow_dispatch,main,$head,success,https://h.test/1;schedule,main,$head,failure,https://h.test/2|||none" \
+    "schedule|workflow_dispatch,main,$old,success,https://h.test/1;schedule,main,$old,failure,https://h.test/2|ahead\n1\nREADME.md\n||none" \
+    "schedule|workflow_dispatch,main,$head,failure,https://h.test/1;schedule,main,$head,success,https://h.test/2|||fail" \
+    "schedule|workflow_dispatch,feat/x,$head,success,https://h.test/2;schedule,main,$head,failure,https://h.test/1|||fail" \
+    "schedule|pull_request,main,$head,success,https://h.test/2;schedule,main,$head,failure,https://h.test/1|||fail" \
+    "schedule|workflow_dispatch,feat/x,$head,success,https://h.test/2|||full"; do
+    IFS='|' read -r ev runs cmp fail want <<<"$c"
+    : >"$d/out"
+    : >"$d/summary"
+    rc=0
+    exec_step "$f" "$TIER_STEP" "$d" PATH="$d/bin:$PATH" GITHUB_EVENT_NAME="$ev" GITHUB_REPOSITORY=o/r \
+      GITHUB_SHA="$head" RUNS="$runs" COMPARE="$cmp" ${fail:+"$fail=1"} ENGINE_INPUTS="$inputs" SHARDS=4 \
+      JIT_SUBSET=warp/ GITHUB_OUTPUT="$d/out" GITHUB_STEP_SUMMARY="$d/summary" >"$d/log" 2>&1 || rc=$?
+    if [ "$want" = fail ]; then
+      [ "$rc" -ne 0 ] || { echo "a red nightly with unchanged inputs was not carried forward: $c" >&2; rm -rf "$d"; return 1; }
+      assert_eq "" "$(cat "$d/out")" "no tier when carrying a red nightly: $c"
+      grep -q 'https://h.test/1' "$d/summary" && grep -q 'https://h.test/1' "$d/log" ||
+        { echo "the carried red run is not linked in the summary and the log: $c" >&2; rm -rf "$d"; return 1; }
+      continue
+    fi
+    [ "$rc" -eq 0 ] || { echo "tier step failed for $c: $(cat "$d/log")" >&2; rm -rf "$d"; return 1; }
+    assert_eq "mode=$want" "$(cat "$d/out")" "tier for $c"
+    if [ "$want" = none ]; then
+      grep -q 'https://h.test/1' "$d/summary" ||
+        { echo "a skipped nightly does not name the run it skips against: $(cat "$d/summary")" >&2; rm -rf "$d"; return 1; }
+    fi
+  done
   rm -rf "$d"
 }
 
@@ -578,6 +668,7 @@ run_test "engine.yml, queue.yml: a Markdown-only pull request skips them" t_docs
 run_test "gate.yml: triggers, tiers, linked test tree, caches" t_gate
 run_test "gate.yml: the subset and each shard reach the harness and failures fail" t_gate_lanes
 run_test "gate.yml: the tier comes from the labels and the changed files" t_gate_tier
+run_test "gate.yml: a nightly with no engine input changed since the last one skips" t_gate_nightly_skip
 run_test "gate.yml: the pin step rejects bad pins" t_gate_pin
 run_test "gate.yml: an unrelated label does not cancel the gate" t_gate_concurrency
 run_test "gate.yml: shard inputs survive a rerun of failed shards" t_gate_shard_inputs
