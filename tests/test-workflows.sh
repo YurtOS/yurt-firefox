@@ -128,11 +128,13 @@ t_permissions() {
     block=$(body "$WF/$f" | awk '/^permissions:/{f=1; next} f && /^[^[:space:]]/{exit} f && NF{print}')
     assert_eq "  contents: read" "$block" "$f top-level permissions block"
     if [ "$f" = gate.yml ]; then
-      # One exception: gate.yml's tier job reads the PR's labels and files.
+      # One exception: gate.yml's tier job reads the PR's labels and files,
+      # and the last nightly run.
       assert_eq 1 "$(body "$WF/$f" | grep -cE '^[[:space:]]+permissions:')" "gate.yml job-level permissions blocks"
       block=$(body "$WF/$f" | awk '/^    permissions:/{f=1; next} f && !/^      /{exit} f{print}' | sed 's/^[[:space:]]*//')
       assert_eq "contents: read
-pull-requests: read" "$block" "gate.yml tier job permissions"
+pull-requests: read
+actions: read" "$block" "gate.yml tier job permissions"
     else
       ! body "$WF/$f" | grep -Eq '^[[:space:]]+permissions:' || { echo "$f has job-level permissions" >&2; return 1; }
     fi
@@ -340,6 +342,54 @@ t_gate_tier() {
     ENGINE_INPUTS="$inputs" GITHUB_OUTPUT="$d/out" GITHUB_STEP_SUMMARY="$d/summary" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || { echo "an API error picks a tier" >&2; rm -rf "$d"; return 1; }
   assert_eq "" "$(cat "$d/out")" "no tier on an API error"
+  rm -rf "$d"
+}
+
+# The nightly skips when no engine input changed since the last completed
+# nightly (any conclusion): the same head, or a compare against its head that
+# lists no ENGINE_INPUTS path. Any doubt runs it: no earlier nightly, an API
+# error, a compare that is not a fast-forward or may be truncated (300 files).
+# A dispatch never asks. Stub gh prints what its --jq would.
+t_gate_nightly_skip() {
+  local f="$WF/gate.yml" d inputs c ev runs cmp want head=1111111111111111111111111111111111111111
+  local old=2222222222222222222222222222222222222222
+  inputs=$(body "$f" | sed -n "s/^  ENGINE_INPUTS: '\(.*\)'$/\1/p")
+  [ -n "$inputs" ] || { echo "gate.yml lacks ENGINE_INPUTS" >&2; return 1; }
+  d=$(mktemp -d)
+  mkdir -p "$d/bin"
+  printf '%s\n' '#!/bin/sh' 'case "$*" in' \
+    '  *"actions/workflows/gate.yml/runs?event=schedule&status=completed&per_page=1"*) [ -z "${RUNS_FAIL:-}" ] || exit 1; printf "%b" "$RUNS" ;;' \
+    '  *"/compare/'"$old"'...'"$head"'"*) [ -z "${COMPARE_FAIL:-}" ] || exit 1; printf "%b" "$COMPARE" ;;' \
+    '  *) exit 1 ;;' 'esac' >"$d/bin/gh"
+  chmod +x "$d/bin/gh"
+  for c in \
+    "schedule||||full" \
+    "schedule|$head success https://h.test/1\n|||none" \
+    "schedule|$head failure https://h.test/1\n|||none" \
+    "schedule|$old success https://h.test/1\n|ahead\n2\nREADME.md\nscripts/check-queue.sh\n||none" \
+    "schedule|$old cancelled https://h.test/1\n|ahead\n0\n||none" \
+    "schedule|$old success https://h.test/1\n|ahead\n2\nREADME.md\npatches/0001-x.patch\n||full" \
+    "schedule|$old success https://h.test/1\n|ahead\n1\nNIGHTMONKEY_PIN\n||full" \
+    "schedule|$old success https://h.test/1\n|ahead\n1\n.github/workflows/gate.yml\n||full" \
+    "schedule|$old success https://h.test/1\n|diverged\n1\nREADME.md\n||full" \
+    "schedule|$old success https://h.test/1\n|ahead\n300\nREADME.md\n||full" \
+    "schedule|$old success https://h.test/1\n|ahead\n1\nREADME.md\n|COMPARE_FAIL|full" \
+    "schedule|$head success https://h.test/1\n||RUNS_FAIL|full" \
+    "schedule|main success https://h.test/1\n|||full" \
+    "workflow_dispatch|$head success https://h.test/1\n|||full"; do
+    IFS='|' read -r ev runs cmp fail want <<<"$c"
+    : >"$d/out"
+    : >"$d/summary"
+    exec_step "$f" "$TIER_STEP" "$d" PATH="$d/bin:$PATH" GITHUB_EVENT_NAME="$ev" GITHUB_REPOSITORY=o/r \
+      GITHUB_SHA="$head" RUNS="$runs" COMPARE="$cmp" ${fail:+"$fail=1"} ENGINE_INPUTS="$inputs" SHARDS=4 \
+      JIT_SUBSET=warp/ GITHUB_OUTPUT="$d/out" GITHUB_STEP_SUMMARY="$d/summary" >/dev/null 2>&1 ||
+      { echo "tier step failed for $c" >&2; rm -rf "$d"; return 1; }
+    assert_eq "mode=$want" "$(cat "$d/out")" "tier for $c"
+    if [ "$want" = none ]; then
+      grep -q 'https://h.test/1' "$d/summary" ||
+        { echo "a skipped nightly does not name the run it skips against: $(cat "$d/summary")" >&2; rm -rf "$d"; return 1; }
+    fi
+  done
   rm -rf "$d"
 }
 
@@ -578,6 +628,7 @@ run_test "engine.yml, queue.yml: a Markdown-only pull request skips them" t_docs
 run_test "gate.yml: triggers, tiers, linked test tree, caches" t_gate
 run_test "gate.yml: the subset and each shard reach the harness and failures fail" t_gate_lanes
 run_test "gate.yml: the tier comes from the labels and the changed files" t_gate_tier
+run_test "gate.yml: a nightly with no engine input changed since the last one skips" t_gate_nightly_skip
 run_test "gate.yml: the pin step rejects bad pins" t_gate_pin
 run_test "gate.yml: an unrelated label does not cancel the gate" t_gate_concurrency
 run_test "gate.yml: shard inputs survive a rerun of failed shards" t_gate_shard_inputs
