@@ -686,6 +686,25 @@ t_run_scripts_lint() {
   printf 'jobs:\n  j:\n    steps:\n      - name: good\n        run: |\n          [[ -n "$A" && -n "$B" ]] || { echo "a && b || c" >&2; exit 1; }\n          if [ -z "$A" ] || [ -z "$B" ]; then exit 1; fi\n' >"$d/good.yml"
   if lint_runs "$d/bad1.yml" 2>/dev/null; then echo "multi-line SC2015 shape accepted" >&2; rm -rf "$d"; return 1; fi
   if lint_runs "$d/bad2.yml" 2>/dev/null; then echo "one-line SC2015 shape accepted" >&2; rm -rf "$d"; return 1; fi
+  # && ending one line, || on the next: only found by joining continuations.
+  printf 'jobs:
+  j:
+    steps:
+      - name: bad
+        run: |
+          [ -n "$A" ] &&
+            [ -n "$B" ] || exit 1
+' >"$d/bad3.yml"
+  if lint_runs "$d/bad3.yml" 2>/dev/null; then echo "SC2015 shape across a continuation accepted" >&2; rm -rf "$d"; return 1; fi
+  # An info-level shellcheck finding (SC2086, unquoted expansion) fails too.
+  if command -v shellcheck >/dev/null 2>&1; then
+    printf 'jobs:
+  j:
+    steps:
+      - run: echo $A
+' >"$d/info.yml"
+    if lint_runs "$d/info.yml" 2>/dev/null; then echo "an info-level shellcheck finding was accepted" >&2; rm -rf "$d"; return 1; fi
+  fi
   lint_runs "$d/good.yml" || { echo "a clean script was rejected" >&2; rm -rf "$d"; return 1; }
   rm -rf "$d"
 }
