@@ -1,7 +1,15 @@
 name: queue
 
 on:
+  # A Markdown-only pull request skips this workflow (yurt-sandbox#367):
+  # nothing a .md file holds reaches the build, except data/ics/README.md,
+  # which is copied into the engine tree, so data/ is put back. Pushes to
+  # main and dispatches have no filter. tests/test-workflows.sh checks it.
   pull_request:
+    paths:
+      - '**'
+      - '!**/*.md'
+      - 'data/**'
   push:
     branches:
       - main
