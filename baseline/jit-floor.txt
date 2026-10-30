@@ -1,0 +1,9 @@
+# jit-test floors for scripts/accept-engine.sh: each lane's "night: jit: N
+# passing execution results verified" count (passed minus skipped, printed by
+# NightMonkey's scripts/check-test-log.py) must be >= its floor. A queue PR
+# that legitimately changes the counts updates this file. The counts depend on
+# both the Firefox version of the test-source bundle (which tests exist) and
+# NIGHTMONKEY_PIN (which of them NightMonkey runs and excludes), so a Firefox
+# version bump or a pin bump may move them too.
+aot_verified=12307
+interpreter_verified=12494

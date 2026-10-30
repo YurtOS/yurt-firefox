@@ -21,7 +21,7 @@ run_fixtures() {
   local t failed=0
   for t in test-fixture.sh test-apply.sh test-export.sh test-classify.sh test-check-queue.sh \
     test-verify-migration.sh test-build-engine.sh test-workflows.sh test-package-engine.sh \
-    test-package-test-sources.sh; do
+    test-package-test-sources.sh test-accept-engine.sh; do
     echo "== $t"
     if [ "$t" = test-check-queue.sh ]; then
       bash "$SELF/tests/$t" --fixtures || failed=1
