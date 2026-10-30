@@ -30,7 +30,7 @@ trap 'rm -rf "$BASE"' EXIT
 # Every stub appends one line to $D/calls. Stub behaviour is set with
 # environment variables: STUB_CONFIGURE_RC, STUB_BUILD_RC, STUB_NO_SHELL,
 # STUB_SNAP_RC, and per lane (AOT, INTERPRETER) STUB_<L>_RC, STUB_<L>_COUNT
-# (default 20000), STUB_<L>_LINE=none|twice.
+# (default 20000), STUB_<L>_LINE=none|twice|nolog (nolog: no log written).
 setup() {
   D=$(mktemp -d "$BASE/case.XXXXXX")
   mkdir -p "$D/pkg/spidermonkey/include-private" "$D/testsrc/js/src/jit-test" "$D/tc/bin" "$D/sysroot" \
@@ -67,6 +67,7 @@ L=$(echo "$2" | tr '[:lower:]' '[:upper:]')
 eval "rc=\${STUB_${L}_RC:-0} count=\${STUB_${L}_COUNT:-20000} line=\${STUB_${L}_LINE:-once}"
 logs=${RUNNER_TEMP:?}/nightmonkey-logs
 mkdir -p "$logs"
+[ "$line" != nolog ] || exit "$rc"
 {
   echo "TEST-PASS | basic/simple.js | Success"
   case $line in
@@ -179,8 +180,8 @@ verified_line_required() {
   setup
   mkdir -p "$D/runner/nightmonkey-logs"
   echo "night: jit: 99999 passing execution results verified" >"$D/runner/nightmonkey-logs/jit-aot.log"
-  run_accept STUB_AOT_LINE=none
-  expect_fail 1 "FAIL at jit aot: no 'night: jit: N passing execution results verified' line"
+  run_accept STUB_AOT_LINE=nolog
+  expect_fail 1 "FAIL at jit aot: no lane log $D/runner/nightmonkey-logs/jit-aot.log"
 }
 
 snapshot_failure_fails() {
