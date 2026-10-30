@@ -317,7 +317,9 @@ t_gate_tier() {
     'pull_request|ci:full\n|docs/x.md\n|full' \
     'pull_request|gate\n|README.md\n|full' \
     'pull_request|ready\n|patches/0001-x.patch\n|subset' \
-    'pull_request||NIGHTMONKEY_PIN\n|subset' \
+    'pull_request||NIGHTMONKEY_PIN\n|full' \
+    'pull_request|ready\n|README.md\nNIGHTMONKEY_PIN\n|full' \
+    'pull_request||docs/NIGHTMONKEY_PIN.md\n|none' \
     'pull_request||README.md\nmozconfig\n|subset' \
     'pull_request||scripts/lib/patch-queue.sh\n|subset' \
     'pull_request||.github/workflows/gate.yml\n|subset' \
@@ -453,27 +455,61 @@ print(re.sub(r"\$\{\{(.*?)\}\}", lambda m: show(ev(m.group(1))), template))
 PY
 }
 
-# The gate's concurrency group: a push or any label on a PR replaces the run
-# in flight (the tier job then reads the labels afresh). Nightly and dispatch
-# runs on main share one group and are never cancelled.
+# The gate's concurrency group: a push, a `ci:full` or a `gate` label on a PR
+# replaces the run in flight. A run started by any other label gets a group
+# of its own (its run id), so it cancels nothing, and the tier job's `if:`
+# skips it (every other job needs the tier). Nightly and dispatch runs on main
+# share one group and are never cancelled.
 t_gate_concurrency() {
-  local f="$WF/gate.yml" group cancel a b c d e
+  local f="$WF/gate.yml" group cancel cond a b b2 c c2 d e ev
   group=$(concurrency_value "$f" group)
   cancel=$(concurrency_value "$f" cancel-in-progress)
   [ -n "$group" ] && [ -n "$cancel" ] || { echo "gate.yml lacks concurrency group / cancel-in-progress" >&2; return 1; }
   a=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":101,"event":{"action":"synchronize"}}')
   b=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":102,"event":{"action":"labeled","label":{"name":"ci:full"}}}')
+  b2=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":107,"event":{"action":"labeled","label":{"name":"gate"}}}')
   c=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":103,"event":{"action":"labeled","label":{"name":"ready"}}}')
+  c2=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":104,"event":{"action":"labeled","label":{"name":"docs"}}}')
   d=$(gh_eval "$group" '{"event_name":"schedule","ref":"refs/heads/main","run_id":105,"event":{}}')
   e=$(gh_eval "$group" '{"event_name":"workflow_dispatch","ref":"refs/heads/main","run_id":106,"event":{}}')
   [ -n "$a" ] && [ -n "$c" ] && [ -n "$d" ] || { echo "group did not evaluate" >&2; return 1; }
   assert_eq "$a" "$b" "synchronize and a ci:full label share the PR's group"
-  assert_eq "$a" "$c" "any label run replaces the PR's run"
+  assert_eq "$a" "$b2" "synchronize and a gate label share the PR's group"
+  [ "$c" != "$a" ] || { echo "an unrelated label joins the PR's group ($c) and would cancel its run" >&2; return 1; }
+  [ "$c" != "$c2" ] || { echo "unrelated-label runs share a group ($c)" >&2; return 1; }
   assert_eq "$d" "$e" "nightly and dispatch on main share a group"
   [ "$d" != "$a" ] || { echo "main runs share the PR's group" >&2; return 1; }
   assert_eq true "$(gh_eval "$cancel" '{"event_name":"pull_request"}')" "PR runs cancel in progress"
   assert_eq false "$(gh_eval "$cancel" '{"event_name":"schedule"}')" "nightly runs are not cancelled"
   assert_eq false "$(gh_eval "$cancel" '{"event_name":"workflow_dispatch"}')" "dispatch runs are not cancelled"
+  # The tier job runs on everything but an unrelated-label run.
+  cond=$(body "$f" | awk '/^  tier:$/{f=1; next} f && /^  [^ ]/{exit} f && /^    if: /{sub(/^    if: /, ""); print; exit}')
+  [ -n "$cond" ] || { echo "the tier job has no if:" >&2; return 1; }
+  for ev in '{"event_name":"pull_request","event":{"action":"synchronize"}}:true' \
+            '{"event_name":"pull_request","event":{"action":"opened"}}:true' \
+            '{"event_name":"pull_request","event":{"action":"labeled","label":{"name":"ci:full"}}}:true' \
+            '{"event_name":"pull_request","event":{"action":"labeled","label":{"name":"gate"}}}:true' \
+            '{"event_name":"pull_request","event":{"action":"labeled","label":{"name":"ready"}}}:false' \
+            '{"event_name":"schedule","event":{}}:true'; do
+    assert_eq "${ev##*:}" "$(gh_eval "\${{ $cond }}" "${ev%:*}")" "tier job runs for ${ev%:*}"
+  done
+  # Every other job needs the tier, so skipping it skips them.
+  assert_eq "needs: tier
+needs: [tier, build]" "$(body "$f" | grep -E '^    needs:' | sed 's/^[[:space:]]*//')" "jobs need the tier"
+}
+
+# "Re-run failed jobs" reruns a failed shard but not the build job that
+# uploaded its inputs: the artifact's name must not depend on the attempt,
+# and a rerun build replaces it.
+t_gate_shard_inputs() {
+  local f="$WF/gate.yml" up down
+  up=$(step "$f" "Upload the shard inputs" | sed -n 's/^[[:space:]]*name: //p')
+  down=$(step "$f" "Download the shard inputs" | sed -n 's/^[[:space:]]*name: //p')
+  [ -n "$up" ] || { echo "no shard-inputs upload name" >&2; return 1; }
+  assert_eq "$up" "$down" "the shards download the build job's artifact"
+  case $up in *run_attempt*) echo "the shard-inputs name depends on the attempt: $up" >&2; return 1 ;; esac
+  [ "$(step "$f" "Upload the shard inputs" | grep -cxE '[[:space:]]+overwrite: true')" = 1 ] ||
+    { echo "the shard-inputs upload does not overwrite" >&2; return 1; }
 }
 
 # The pin is validated where it is read: executed with good and bad pins.
@@ -519,6 +555,7 @@ run_test "gate.yml: triggers, tiers, linked test tree, caches" t_gate
 run_test "gate.yml: the subset and each shard reach the harness and failures fail" t_gate_lanes
 run_test "gate.yml: the tier comes from the labels and the changed files" t_gate_tier
 run_test "gate.yml: the pin step rejects bad pins" t_gate_pin
-run_test "gate.yml: PR runs replace each other, main runs queue" t_gate_concurrency
+run_test "gate.yml: an unrelated label does not cancel the gate" t_gate_concurrency
+run_test "gate.yml: shard inputs survive a rerun of failed shards" t_gate_shard_inputs
 run_test "gate.yml: logs carry the pin and the build manifest" t_gate_provenance
 finish
