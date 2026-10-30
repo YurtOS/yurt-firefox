@@ -17,8 +17,15 @@
 #   build        cmake -S <nm> -B <nm>/build
 #                  -DSPIDERMONKEY_DIST=<package>/spidermonkey
 #                  -DNIGHT_TOOLCHAIN_ROOT=<toolchain> -DNIGHT_SYSROOT=<sysroot>
-#                cmake --build <nm>/build; then bin/nightmonkey, bin/js and
-#                bin/inproc-shell.sh must exist. <nm>/build is NightMonkey's
+#                  -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF
+#                cmake --build <nm>/build; then bin/nightmonkey, bin/js,
+#                bin/js-inproc, bin/wasm-jit-runner and bin/inproc-shell.sh
+#                must exist. The in-process options are forced because a
+#                reused build dir's CMakeCache.txt would otherwise keep them
+#                (NIGHT_INPROCESS=OFF leaves old lane binaries in place); with
+#                them forced, cmake's dependency tracking rebuilds what the
+#                package changes, so binary times are not checked.
+#                <nm>/build is NightMonkey's
 #                fixed build dir (ci-suite.sh runs <nm>/build); an existing one
 #                (a restored cargo cache) is reconfigured with these values.
 #   snapshot     <nm>/scripts/snapshot-roundtrip.sh <nm>/build, run directly
@@ -28,7 +35,8 @@
 #                the checks because it takes seconds and the lanes an hour.
 #   jit aot, jit interpreter
 #                <nm>/scripts/ci-suite.sh jit <lane> with
-#                NIGHT_FIREFOX_TESTS=<testsrc>; it must exit 0 and its log
+#                NIGHT_FIREFOX_TESTS=<testsrc> and a fresh NIGHT_CACHE_DIR; it
+#                must exit 0 and its log (text: NUL bytes are refused)
 #                $RUNNER_TEMP/nightmonkey-logs/jit-<lane>.log must hold exactly
 #                one "night: jit: N passing execution results verified" line
 #                (NightMonkey's scripts/check-test-log.py; N is passed minus
@@ -57,6 +65,19 @@ usage() {
 prereq() { echo "accept-engine: $*" >&2; exit 2; }
 fail() { echo "accept-engine: FAIL at $1: $2" >&2; exit 1; }
 step() { echo "accept-engine: $*"; }
+
+# Inherited NIGHT_* and SPIDERMONKEY_* variables are cleared: at the pin,
+# NightMonkey's inproc-shell.sh takes the shell and runner from
+# NIGHT_WASM_SHELL and NIGHT_RUNNER (so a lane would qualify another engine),
+# and NIGHT_CACHE_DIR, NIGHT_INPROCESS_OFF, NIGHT_OPTIONS, NIGHT_PAD_SEED and
+# NIGHT_TEST_DUMP change what runs. This script then sets the ones it means:
+# NIGHT_FIREFOX_TESTS and a fresh NIGHT_CACHE_DIR for the lanes (ci-suite.sh
+# sets the per-lane NIGHT_INPROCESS_OFF/NIGHT_INPROC_STRICT/NIGHT_OPTIONS).
+# WASMTIME and WASMTIME_FLAGS pass through to the snapshot step on purpose.
+for v in $(env | sed -n -E 's/^((NIGHT|SPIDERMONKEY)_[A-Za-z0-9_]*)=.*/\1/p'); do
+  unset "$v" 2>/dev/null || true
+  [ -z "${!v+set}" ] || prereq "$v is readonly and cannot be cleared"
+done
 
 package= testsrc= toolchain= sysroot= nm= clean=0
 while [ $# -gt 0 ]; do
@@ -130,9 +151,19 @@ if [ "$clean" -eq 1 ]; then
   fi
 fi
 
+# RUNNER_TEMP is made absolute (the lanes run inside the NightMonkey
+# checkout). Without one, a temporary directory is used; it is removed after
+# a passing run and kept, with its path printed, after a failing one.
 if [ -z "${RUNNER_TEMP:-}" ]; then
   RUNNER_TEMP=$(mktemp -d)
-  trap 'rm -rf "$RUNNER_TEMP"' EXIT
+  keep_or_remove() {
+    local st=$?
+    if [ "$st" -eq 0 ]; then rm -rf "$RUNNER_TEMP"; else echo "accept-engine: logs kept in $RUNNER_TEMP" >&2; fi
+  }
+  trap keep_or_remove EXIT
+else
+  mkdir -p "$RUNNER_TEMP"
+  RUNNER_TEMP=$(cd "$RUNNER_TEMP" && pwd -P)
 fi
 export RUNNER_TEMP
 logs=$RUNNER_TEMP/nightmonkey-logs
@@ -141,17 +172,27 @@ mkdir -p "$logs"
 build=$nm/build
 step "build: NightMonkey in $build against $package/spidermonkey"
 (cd "$nm" && cmake -S "$nm" -B "$build" -DSPIDERMONKEY_DIST="$package/spidermonkey" \
-  -DNIGHT_TOOLCHAIN_ROOT="$toolchain" -DNIGHT_SYSROOT="$sysroot") ||
+  -DNIGHT_TOOLCHAIN_ROOT="$toolchain" -DNIGHT_SYSROOT="$sysroot" \
+  -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF) ||
   fail build "cmake configure failed"
 (cd "$nm" && cmake --build "$build") || fail build "cmake --build failed"
-for f in nightmonkey js inproc-shell.sh; do
+for f in nightmonkey js js-inproc wasm-jit-runner inproc-shell.sh; do
   [ -x "$build/bin/$f" ] || fail build "missing $build/bin/$f"
 done
 
 step "snapshot: scripts/snapshot-roundtrip.sh $build"
 rc=0
 (cd "$nm" && scripts/snapshot-roundtrip.sh "$build") || rc=$?
-[ "$rc" -eq 0 ] || fail snapshot "scripts/snapshot-roundtrip.sh exited $rc"
+case $rc in
+  0) ;;
+  2) fail snapshot "scripts/snapshot-roundtrip.sh exited 2: missing prerequisite (wasmtime? set WASMTIME, see its usage)" ;;
+  *) fail snapshot "scripts/snapshot-roundtrip.sh exited $rc" ;;
+esac
+
+# A fresh module cache for the lanes (inproc-shell.sh's NIGHT_CACHE_DIR).
+cache=$RUNNER_TEMP/nightmonkey-wjr-cache
+rm -rf "$cache"
+mkdir -p "$cache"
 
 summary=
 for lane in aot interpreter; do
@@ -160,10 +201,14 @@ for lane in aot interpreter; do
   rm -f "$log"
   step "jit $lane: scripts/ci-suite.sh jit $lane (NIGHT_FIREFOX_TESTS=$testsrc)"
   rc=0
-  (cd "$nm" && NIGHT_FIREFOX_TESTS=$testsrc scripts/ci-suite.sh jit "$lane") || rc=$?
+  (cd "$nm" && NIGHT_FIREFOX_TESTS=$testsrc NIGHT_CACHE_DIR=$cache scripts/ci-suite.sh jit "$lane") || rc=$?
   [ "$rc" -eq 0 ] || fail "jit $lane" "scripts/ci-suite.sh jit $lane exited $rc"
   [ -f "$log" ] || fail "jit $lane" "no lane log $log"
-  matches=$(grep -E '^night: jit: [0-9]+ passing execution results verified$' "$log" || true)
+  # A log is text: a NUL byte makes grep treat it as binary (BSD grep then
+  # prints "Binary file ... matches"), so it is refused outright.
+  [ "$(tr -d '\000' <"$log" | wc -c | tr -d ' ')" = "$(wc -c <"$log" | tr -d ' ')" ] ||
+    fail "jit $lane" "$log contains NUL bytes"
+  matches=$(grep -a -E '^night: jit: [0-9]+ passing execution results verified$' "$log" || true)
   count=0
   [ -z "$matches" ] || count=$(printf '%s\n' "$matches" | grep -c .)
   case $count in
@@ -172,6 +217,7 @@ for lane in aot interpreter; do
     *) fail "jit $lane" "$count 'night: jit: N passing execution results verified' lines in $log; want one" ;;
   esac
   verified=$(printf '%s\n' "$matches" | sed 's/^night: jit: \([0-9]*\) .*/\1/')
+  case $verified in '' | *[!0-9]*) fail "jit $lane" "verified count '$verified' is not a number" ;; esac
   # Integer compare without overflow worries: strip leading zeros, compare
   # length, then lexically.
   v=$(echo "$verified" | sed 's/^0*//') f=$(echo "$floor" | sed 's/^0*//')
