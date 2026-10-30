@@ -30,7 +30,9 @@
 # or drop them: repository selection (every name git 2.32 and later list in
 # `git rev-parse --local-env-vars`, GIT_INTERNAL_SUPER_PREFIX being 2.32-2.40
 # only), config, and the variables that change attributes, new repositories
-# or diff output.
+# or diff output. Replace refs are then switched off (GIT_NO_REPLACE_OBJECTS=1):
+# a local refs/replace/<oid> would make git read other bytes under an object's
+# own name, so trees, blobs and commits would no longer be what they hash to.
 pq_git_env() {
   local v
   for v in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
@@ -42,7 +44,9 @@ pq_git_env() {
     unset "$v" 2>/dev/null
     [ -z "${!v+set}" ] || { echo "pq: $v is readonly and cannot be unset; refusing to run git" >&2; return 1; }
   done
-  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
+  # One export, so a readonly name among them fails the function.
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 \
+    GIT_NO_REPLACE_OBJECTS=1
 }
 
 # pq_require_git: fail unless git is 2.32 or later. Older git ignores

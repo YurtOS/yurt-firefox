@@ -255,22 +255,27 @@ pc_check_opcodes() {
   cmp -s "$1/$rel" "$2/$rel" || { echo "package-contract: $rel: differs from the dist's" >&2; return 1; }
 }
 
-# pc_check_archive <archive.tar.zst>: every member is `spidermonkey` or under
-# `spidermonkey/`, has no `..` component, and is a regular file or directory
-# (no symlink, hard link or device). Read as a stream; nothing is extracted.
+# pc_check_archive <archive.tar.zst> [root...]: every member is one of the
+# roots (default: spidermonkey) or under one of them, has no `..` component,
+# and is a regular file or directory (no symlink, hard link or device). Read
+# as a stream; nothing is extracted.
 pc_check_archive() (
   set -o pipefail
   command -v zstd >/dev/null 2>&1 || { echo "package-contract: zstd not found" >&2; return 1; }
-  zstd -q -dc -- "$1" | python3 -I -c '
+  archive=$1
+  shift
+  [ $# -gt 0 ] || set -- spidermonkey
+  zstd -q -dc -- "$archive" | python3 -I -c '
 import sys, tarfile
+roots = sys.argv[2:]
 bad = []
 n = 0
 with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as t:
     for m in t:
         n += 1
         parts = m.name.split("/")
-        if m.name.startswith("/") or ".." in parts or parts[0] != "spidermonkey":
-            bad.append("%s: outside spidermonkey/" % m.name)
+        if m.name.startswith("/") or ".." in parts or parts[0] not in roots:
+            bad.append("%s: outside %s" % (m.name, ", ".join(r + "/" for r in roots)))
         elif not (m.isfile() or m.isdir()):
             bad.append("%s: not a regular file or directory" % m.name)
 if n == 0:
@@ -278,5 +283,49 @@ if n == 0:
 for b in bad:
     print("package-contract: " + b, file=sys.stderr)
 sys.exit(1 if bad else 0)
-' "$1"
+' "$archive" "$@"
 )
+
+# pc_gnu_tar: print the GNU tar command (`tar`, else `gtar`), or fail. The
+# archive flags below are GNU tar's; bsdtar has no --sort.
+pc_gnu_tar() {
+  if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+    echo tar
+  elif command -v gtar >/dev/null 2>&1 && gtar --version 2>/dev/null | grep -q 'GNU tar'; then
+    echo gtar
+  else
+    echo "package-contract: GNU tar is required (tar or gtar)" >&2
+    return 1
+  fi
+}
+
+# pc_archive <tar> <dir> <out.tar.zst> <entry...>: a deterministic archive of
+# the entries of <dir> (names relative to it): GNU tar --sort=name --mtime=@0
+# --owner=0 --group=0 --numeric-owner --format=gnu, zstd -T1 -10. The bytes
+# are reproducible for a given GNU tar and zstd version (level 10 output may
+# differ between zstd releases). The caller unsets TAR_OPTIONS and ZSTD_*.
+pc_archive() (
+  set -o pipefail
+  t=$1 dir=$2 out=$3
+  shift 3
+  cd "$dir" && "$t" --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --format=gnu \
+    -cf - -- "$@" | zstd -q -T1 -10 -c >"$out"
+)
+
+# pc_sha256_line <file>: print "<sha256>  <basename>" (sha256sum's format).
+pc_sha256_line() {
+  local d
+  d=$(if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi <"$1") || return 1
+  printf '%s  %s\n' "${d%% *}" "$(basename "$1")"
+}
+
+# pc_firefox_version <tag>: FIREFOX_147_0_4_RELEASE -> 147.0.4, or fail.
+pc_firefox_version() {
+  case $1 in
+    FIREFOX_*_RELEASE) ;;
+    *) echo "package-contract: UPSTREAM tag $1 is not FIREFOX_<version>_RELEASE" >&2; return 1 ;;
+  esac
+  local v=${1#FIREFOX_}
+  v=${v%_RELEASE}
+  echo "${v//_/.}"
+}
