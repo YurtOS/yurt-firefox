@@ -544,6 +544,29 @@ t_gate_provenance() {
   rm -rf "$d"
 }
 
+# on_block <file> <event>: the lines of the workflow's `on.<event>` block, the
+# event line itself excluded.
+on_block() { body "$1" | awk -v e="  $2:" 'f && /^  [^ ]/{exit} f{print} $0 == e{f=1}'; }
+
+# A Markdown-only pull request skips engine.yml and queue.yml (only the
+# jit-test gate's tier job, which already skips, runs; yurt-sandbox#367). The
+# filter is `paths:`, not `paths-ignore:`, so `data/**` can be put back:
+# data/ics/README.md is copied into the engine tree (build-engine.sh,
+# check-queue.sh) and is an engine input. Pushes to main and dispatches
+# carry no filter and run everything.
+t_docs_only() {
+  local f want got
+  want=$(printf '%s\n' "paths:" "- '**'" "- '!**/*.md'" "- 'data/**'")
+  for f in engine.yml queue.yml; do
+    got=$(on_block "$WF/$f" pull_request | sed 's/^[[:space:]]*//')
+    [ "$got" = "$want" ] ||
+      { printf '%s: pull_request filter is not the Markdown-only one:\n%s\n' "$f" "$got" >&2; return 1; }
+    ! on_block "$WF/$f" push | grep -q 'paths' || { echo "$f: push has a path filter" >&2; return 1; }
+    ! body "$WF/$f" | grep -q 'paths-ignore' || { echo "$f: uses paths-ignore" >&2; return 1; }
+  done
+  ! on_block "$WF/engine.yml" workflow_dispatch | grep -q 'paths' || { echo "engine.yml: workflow_dispatch has a path filter" >&2; return 1; }
+}
+
 run_test "workflows exist" t_exist
 run_test "workflows pass actionlint" t_actionlint
 run_test "every uses: is pinned by 40-hex SHA" t_pinned
@@ -551,6 +574,7 @@ run_test "read-only permissions, no secrets" t_permissions
 run_test "checkouts do not persist credentials" t_credentials
 run_test "engine.yml: smoke, wasmtime digest, triggers" t_engine
 run_test "queue.yml: fixtures, real check, drift" t_queue
+run_test "engine.yml, queue.yml: a Markdown-only pull request skips them" t_docs_only
 run_test "gate.yml: triggers, tiers, linked test tree, caches" t_gate
 run_test "gate.yml: the subset and each shard reach the harness and failures fail" t_gate_lanes
 run_test "gate.yml: the tier comes from the labels and the changed files" t_gate_tier
