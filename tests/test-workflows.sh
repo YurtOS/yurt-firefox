@@ -17,6 +17,9 @@ body() { grep -Ev '^[[:space:]]*#' "$1"; }
 
 # has_line <file> <text>: some body line, leading blanks stripped, is exactly <text>.
 has_line() { body "$1" | sed 's/^[[:space:]]*//' | grep -qxF -- "$2"; }
+# has_line_all: has_line reading all its input (grep -c, not -q), so the
+# producer never dies of SIGPIPE under pipefail when the match comes early.
+has_line_all() { [ "$(body "$1" | sed 's/^[[:space:]]*//' | grep -cxF -- "$2")" -ge 1 ]; }
 
 # step <file> <name>: the body of the step named <name>, up to the next step.
 step() { body "$1" | awk -v n="- name: $2" '{t=$0; sub(/^[[:space:]]+/, "", t)} f && t ~ /^- name:/{exit} t == n{f=1} f{print}'; }
@@ -214,8 +217,8 @@ t_gate() {
   body "$f" | grep -Eq 'types: \[opened, synchronize, reopened, labeled\]' || { echo "gate.yml pull_request lacks the label types" >&2; return 1; }
   # The tier comes from the tier job's API reads, never from the event's labels
   ! body "$f" | grep -q 'github.event.pull_request.labels' || { echo "gate.yml reads labels from the event" >&2; return 1; }
-  has_line "$f" "if: needs.tier.outputs.mode != 'none'" || { echo "the build job is not gated on the tier" >&2; return 1; }
-  has_line "$f" "if: needs.tier.outputs.mode == 'full'" || { echo "the shard jobs are not gated on the full tier" >&2; return 1; }
+  has_line_all "$f" "if: needs.tier.outputs.mode != 'none'" || { echo "the build job is not gated on the tier" >&2; return 1; }
+  has_line_all "$f" "if: needs.tier.outputs.mode == 'full'" || { echo "the shard jobs are not gated on the full tier" >&2; return 1; }
   body "$f" | grep -q 'steps.pin.outputs.sha' || { echo "gate.yml checkout does not use the pin" >&2; return 1; }
   body "$f" | grep -q 'repository: YurtOS/nightmonkey' || { echo "gate.yml does not check out YurtOS/nightmonkey" >&2; return 1; }
   has_line "$f" 'test ! -e nightmonkey/firefox' || { echo "gate.yml does not check the link target is free" >&2; return 1; }
@@ -241,8 +244,8 @@ t_gate() {
   # so gated PRs do not fill the repository's cache quota
   ! body "$f" | grep -Eq 'actions/cache@' || { echo "gate.yml uses actions/cache (restore and save)" >&2; return 1; }
   assert_eq 1 "$(body "$f" | grep -cE 'actions/cache/save@')" "gate.yml cache saves"
-  step "$f" "Save the SpiderMonkey ccache" | grep -qxF '          path: ~/.ccache' || { echo "gate.yml saves something besides the ccache" >&2; return 1; }
-  has_line "$f" "if: \${{ !cancelled() && github.ref == 'refs/heads/main' }}" || { echo "the ccache save is not main-only" >&2; return 1; }
+  [ "$(step "$f" "Save the SpiderMonkey ccache" | grep -cxF '          path: ~/.ccache')" = 1 ] || { echo "gate.yml saves something besides the ccache" >&2; return 1; }
+  has_line_all "$f" "if: \${{ !cancelled() && github.ref == 'refs/heads/main' }}" || { echo "the ccache save is not main-only" >&2; return 1; }
   has_line "$f" "save-if: \${{ github.ref == 'refs/heads/main' }}" || { echo "rust-cache saves on PRs" >&2; return 1; }
   # the gate uses wasmtime only as NightMonkey's crate; no CLI download
   ! body "$f" | grep -q 'bytecodealliance/wasmtime/releases' || { echo "gate.yml downloads an unused wasmtime CLI" >&2; return 1; }
@@ -256,11 +259,11 @@ t_gate() {
 # harness or build fails the step.
 t_gate_lanes() {
   local f="$WF/gate.yml" d shard rc s
-  has_line "$f" 'shard: [1, 2, 3, 4]' || { echo "gate.yml shards are not [1, 2, 3, 4]" >&2; return 1; }
-  has_line "$f" 'SHARDS: 4' || { echo "SHARDS is not 4 (the matrix)" >&2; return 1; }
+  has_line_all "$f" 'shard: [1, 2, 3, 4]' || { echo "gate.yml shards are not [1, 2, 3, 4]" >&2; return 1; }
+  has_line_all "$f" 'SHARDS: 4' || { echo "SHARDS is not 4 (the matrix)" >&2; return 1; }
   ! body "$f" | grep -Eq '^[[:space:]]+(exclude|include):' || { echo "gate.yml matrix has exclude/include" >&2; return 1; }
   for s in "$SUBSET_STEP" "$SHARD_STEP"; do
-    step "$f" "$s" | grep -qE '^[[:space:]]+working-directory: nightmonkey$' ||
+    [ "$(step "$f" "$s" | grep -cE '^[[:space:]]+working-directory: nightmonkey$')" = 1 ] ||
       { echo "step '$s' does not run in nightmonkey/" >&2; return 1; }
   done
   d=$(mktemp -d)
