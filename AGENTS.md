@@ -29,18 +29,18 @@ verify, export and build it. It replaces the `YurtOS/firefox` fork. Only the
 the SHA in `NIGHTMONKEY_PIN`, links the engine tree in as NightMonkey's
 `firefox/`, builds NightMonkey against it and runs the two jit-test lanes (aot,
 interpreter). Every jit-test, split over four shard jobs, runs nightly, on
-manual dispatch, and on PRs labeled `ci:full` (or `gate`). A PR without the
-label that changes an engine input (`ENGINE_INPUTS` in gate.yml: `patches/`,
-`data/`, `mozconfig`, `UPSTREAM`, `NIGHTMONKEY_PIN`, the build script and
-library, gate.yml) runs a small subset (`JIT_SUBSET`) in both lanes; any other
-PR skips the gate. The test-source tree is always the tree the queue builds,
+manual dispatch, on PRs labeled `ci:full` (or `gate`) and on PRs that change
+`NIGHTMONKEY_PIN`. Any other PR that changes an engine input (`ENGINE_INPUTS`
+in gate.yml: `patches/`, `data/`, `mozconfig`, `UPSTREAM`, the build script
+and library, gate.yml) runs a small subset (`JIT_SUBSET`) in both lanes; the
+rest skip the gate. The test-source tree is always the tree the queue builds,
 never the bare tag.
 
 - **Layout-change rule.** A queue patch that changes opcodes or layout fails
   the pinned gate by design. Merge the NightMonkey change first, then open the
   queue PR that bumps `NIGHTMONKEY_PIN` alongside the patch.
-- **Pin bump.** A PR that changes `NIGHTMONKEY_PIN` gets the `ci:full` label and
-  must show the gate green before merge. An engine change that should reach
+- **Pin bump.** A PR that changes `NIGHTMONKEY_PIN` runs the full gate without
+  a label (the tier job promotes it) and must show it green before merge. An engine change that should reach
   NightMonkey is followed by a NightMonkey PR bumping its queue-commit pin.
 
 ## Worktree hygiene

@@ -17,7 +17,9 @@ name: gate
 # Two tiers (YurtOS/yurt-sandbox#367), picked by the `tier` job:
 #   full: every jit-test in both lanes, split over SHARDS `jit-test shard N`
 #     jobs that take the `build` job's shell and test sources. Nightly,
-#     manual dispatch, and a pull request labelled `ci:full` (or `gate`).
+#     manual dispatch, a pull request labelled `ci:full` (or `gate`), and a
+#     pull request that changes NIGHTMONKEY_PIN (a pin bump must show the
+#     whole gate green before merge).
 #   subset: the JIT_SUBSET path filters in both lanes, in the `build` job.
 #     A pull request without the label that changes an engine input
 #     (ENGINE_INPUTS: the queue, the pins, the build script, this file).
@@ -28,8 +30,14 @@ name: gate
 # lower tier and cancel the `labeled` run (yurt-playground#276). The files
 # are the pull request's against its base, so a later docs-only push to a
 # queue PR still runs the subset. Adding the label starts a run (the
-# `labeled` type); any label does, which cancels the run in progress and
-# runs the same tier again. An API error fails the run, never picks a tier.
+# `labeled` type). An API error fails the run, never picks a tier.
+#
+# Any other label starts a run too (the event cannot filter on the label).
+# That run gets a concurrency group of its own (its run id), so it does not
+# cancel the gate in flight, and the tier job's `if:` skips it, which skips
+# every job (they all need the tier). Its skipped checks can show as the
+# latest for the head over an earlier red one; no check here is required, so
+# nothing is bypassed, but read the run list, not only the checks summary.
 #
 # Needs a NightMonkey with `scripts/ci-suite.sh <suite> <lane> -- <args>`
 # (YurtOS/nightmonkey#14) at NIGHTMONKEY_PIN, which also builds against an
@@ -45,10 +53,11 @@ on:
 permissions:
   contents: read
 
-# A push or a label replaces the PR's run in flight. Nightly and dispatch
-# runs on main share one group and queue rather than cancel.
+# A push or a `ci:full`/`gate` label replaces the PR's run in flight; a run
+# started by any other label gets a group of its own (see the top). Nightly
+# and dispatch runs on main share one group and queue rather than cancel.
 concurrency:
-  group: gate-${{ github.ref }}
+  group: gate-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'ci:full' && github.event.label.name != 'gate' && github.run_id || 'run' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
@@ -75,6 +84,8 @@ env:
 
 jobs:
   tier:
+    # Not on a run started by an unrelated label (see the top).
+    if: github.event.action != 'labeled' || github.event.label.name == 'ci:full' || github.event.label.name == 'gate'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -96,7 +107,9 @@ jobs:
             labels=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')
             if ! grep -qxE 'ci:full|gate' <<< "$labels"; then
               files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')
-              if grep -qE "$ENGINE_INPUTS" <<< "$files"; then mode=subset; else mode=none; fi
+              if grep -qx 'NIGHTMONKEY_PIN' <<< "$files"; then mode=full
+              elif grep -qE "$ENGINE_INPUTS" <<< "$files"; then mode=subset
+              else mode=none; fi
             fi
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
@@ -279,11 +292,15 @@ jobs:
         if: env.MODE == 'full'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: gate-shard-inputs-${{ github.run_attempt }}
+          # One name for every attempt: "Re-run failed jobs" reruns a failed
+          # shard but not this job, so the shard must find this attempt's
+          # upload; a rerun of this job replaces it.
+          name: gate-shard-inputs
           path: ${{ runner.temp }}/shard-inputs.tar.zst
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
+          overwrite: true
 
       - name: Upload execution logs
         if: always()
@@ -342,7 +359,7 @@ jobs:
       - name: Download the shard inputs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: gate-shard-inputs-${{ github.run_attempt }}
+          name: gate-shard-inputs
           path: ${{ runner.temp }}/shard-inputs
 
       - name: Unpack the shard inputs
