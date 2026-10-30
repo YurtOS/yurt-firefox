@@ -598,7 +598,9 @@ while i < len(lines):
         i += 1
         continue
     start = i + 1
-    if m.group(2).strip() in ("|", "|-", ">"):
+    # Any block scalar header: | or > with an optional chomping (+ -) and
+    # indentation (1-9) indicator, in either order.
+    if re.fullmatch(r"[|>](?:[+-][1-9]?|[1-9][+-]?)?", m.group(2).strip()):
         body, j, ind = [], i + 1, None
         while j < len(lines):
             l = lines[j]
@@ -621,16 +623,28 @@ print(n)
 PY
 }
 
-# sc2015_shape <script>: print the logical lines of the form `A && B || C`
-# (shellcheck SC2015: C also runs when B fails). Quoted strings, comments and
-# [[ ]] are blanked first; lines ending in && || | or \ continue.
+# sc2015_shape <script>: print the logical lines holding a command of the
+# form `A && B || C` (shellcheck SC2015: C also runs when B fails). Lines
+# ending in && || | or \ continue onto the next; comment-only lines are
+# skipped without ending the logical line; heredoc bodies (<<WORD, <<-WORD,
+# quoted or not) are skipped. Quoted strings, comments and [[ ]] are blanked,
+# and the line is split into commands at ';' (`a && b; c || d` is fine).
 sc2015_shape() {
   python3 -I - "$1" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
-logical, cur = [], ""
+logical, cur, heredoc = [], "", None
 for line in text.split("\n"):
+    if heredoc is not None:
+        if line.strip() == heredoc:
+            heredoc = None
+        continue
+    if re.match(r"^\s*#", line):
+        continue
     cur += line + " "
+    m = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line)
+    if m:
+        heredoc = m.group(2)
     if re.search(r"(&&|\|\||\||\\)\s*$", line):
         continue
     logical.append(cur)
@@ -641,16 +655,26 @@ for l in logical:
     s = re.sub(r'"(?:[^"\\]|\\.)*"', '""', s)
     s = re.sub(r"(^|\s)#.*$", "", s)
     s = re.sub(r"\[\[.*?\]\]", "[[ ]]", s)
-    if re.search(r"&&.*\|\|", s):
+    if any(re.search(r"&&.*\|\|", c) for c in s.split(";")):
         print(l.strip())
 PY
 }
 
 # lint_runs <workflow>: every run: script is free of the SC2015 shape (which
 # CI's actionlint + shellcheck 0.9 report as info and fail on, while a newer
-# local shellcheck does not) and passes shellcheck -S info when installed.
+# local shellcheck does not) and passes shellcheck -S info. If shellcheck is
+# not installed, that is FATAL when CI or GITHUB_ACTIONS is set, and an
+# explicit SKIP of the shellcheck part otherwise.
 lint_runs() {
-  local d f bad=0 hits
+  local d f bad=0 hits sc=1
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+      echo "FATAL: shellcheck is required to lint run: scripts under CI" >&2
+      return 1
+    fi
+    echo "SKIP: shellcheck not installed; ${1##*/} run: scripts get the SC2015 shape check only" >&2
+    sc=0
+  fi
   d=$(mktemp -d)
   run_scripts "$1" "$d" >/dev/null || { rm -rf "$d"; return 1; }
   for f in "$d"/*.sh; do
@@ -660,7 +684,7 @@ lint_runs() {
       printf '%s: run: at line %s has the SC2015 shape (A && B || C):\n%s\n' "${1##*/}" "$(basename "$f" .sh)" "$hits" >&2
       bad=1
     fi
-    if command -v shellcheck >/dev/null 2>&1 && ! shellcheck -S info -s bash "$f" >&2; then
+    if [ "$sc" = 1 ] && ! shellcheck -S info -s bash "$f" >&2; then
       echo "${1##*/}: run: at line $(basename "$f" .sh) has shellcheck findings" >&2
       bad=1
     fi
