@@ -67,9 +67,9 @@ other author of a piece gets a `Co-authored-by` trailer.
 | 0007 Build fixes for the WASI target and current toolchains | 129 | Chris Fallin (Tomasz Andrzejak) | `f7d679b00ba0`; `164f660a3602` (`build/moz.configure`) |
 | 0008 Add system_error to the system headers list | 27 | Chris Fallin | `164f660a3602` (`config/system-headers.mozbuild`) |
 | 0009 Add hooks to allow for an external compiler | 2,492 | Chris Fallin | `164f660a3602` (other paths), `f6cb6f9ddc21` |
-| 0010 Add external slot and object fuse compiler hooks | 1,391 | sunnymar `<sunnym@gmail.com>` | `95b9f31de072`, `a1d957648b20`, `a2e0c4dc9fd0`, `ff2bc3770cef`, `ec6c586a7e18`, `1df0e02d6c95`, `65e96085dce8`, `2b415d0e5bc5`, `a92a5b2dc24c`, `e57dacabd598`, `f850071eda00` (all but `js/src/tests/lib`) |
-| 0011 jit-test harness: fail interrupted runs and mismatched expected errors | 96 | sunnymar `<sunnym@gmail.com>` | `b6bf683e9267`, `0c38bedd68b3`, `f1715f0fe944`, `04031a147589` (`js/src/tests/lib`) |
-| 0012 Build fixes for wasm32-yurt-linux-musl (Yurt) | 78 | sunnymar `<sunny@h2pro.co>` | `08e2eae2c260`, `c0fb41d8ebcd` (the musl hunks: `JSONPrinter`, `RandomNum`) |
+| 0010 Add external slot and object fuse compiler hooks | 1,391 | sunnymar (`@smarcd`) | `95b9f31de072`, `a1d957648b20`, `a2e0c4dc9fd0`, `ff2bc3770cef`, `ec6c586a7e18`, `1df0e02d6c95`, `65e96085dce8`, `2b415d0e5bc5`, `a92a5b2dc24c`, `e57dacabd598`, `f850071eda00` (all but `js/src/tests/lib`) |
+| 0011 jit-test harness: fail interrupted runs and mismatched expected errors | 96 | sunnymar (`@smarcd`) | `b6bf683e9267`, `0c38bedd68b3`, `f1715f0fe944`, `04031a147589` (`js/src/tests/lib`) |
+| 0012 Build fixes for wasm32-yurt-linux-musl (Yurt) | 78 | sunnymar (`@smarcd`) | `08e2eae2c260`, `c0fb41d8ebcd` (the musl hunks: `JSONPrinter`, `RandomNum`) |
 
 sunnymar appears under two e-mail addresses in the source; each patch keeps
 the address of its source commits.
