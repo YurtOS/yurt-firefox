@@ -20,8 +20,9 @@ The queue ([`patches/`](patches/)) adds:
 
 - the JS Streams builtin, and JSAPI to reset the `Math.random` seed and to query
   pending jobs;
-- Wizer pre-initialisation and weval annotations for the JS shell on WASI, with
-  the vendored `weval.h` and `wizer.h` headers;
+- Wizer pre-initialisation of the JS shell on WASI, and weval annotations for
+  the portable baseline interpreter, with the vendored `weval.h` and `wizer.h`
+  headers;
 - external-compiler hooks (`--enable-external-compiler-hooks`) that a
   compilation tier outside the engine plugs into;
 - build fixes for the WASI target and for `wasm32-yurt-linux-musl` (Yurt);

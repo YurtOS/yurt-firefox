@@ -71,8 +71,7 @@ other author of a piece gets a `Co-authored-by` trailer.
 | 0011 jit-test harness: fail interrupted runs and mismatched expected errors | 96 | sunnymar (`@smarcd`) | `b6bf683e9267`, `0c38bedd68b3`, `f1715f0fe944`, `04031a147589` (`js/src/tests/lib`) |
 | 0012 Build fixes for wasm32-yurt-linux-musl (Yurt) | 78 | sunnymar (`@smarcd`) | `08e2eae2c260`, `c0fb41d8ebcd` (the musl hunks: `JSONPrinter`, `RandomNum`) |
 
-sunnymar appears under two e-mail addresses in the source; each patch keeps
-the address of its source commits.
+Each patch keeps the author attribution of its source commit.
 
 Source commits with no queue content: `34ecc9174ff4` (the IC corpus, now
 `data/ics`), and the excluded-path commits listed above.

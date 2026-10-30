@@ -6,7 +6,7 @@ build with the same totals as the baseline CI run.
 
 ## Setup
 
-- Box: EC2 c7a.8xlarge ( 32 vCPU, 61 GiB, Ubuntu 24.04, kernel 7.0.0-1014-aws), 2026-10-22.
+- Box: EC2 c7a.8xlarge (32 vCPU, 61 GiB, Ubuntu 24.04, kernel 7.0.0-1014-aws), 2026-10-22.
 - NightMonkey `ffb918ff3c26415f69d877f47e622cdf3196ed1a` (detached checkout).
 - Fork engine (A): `YurtOS/firefox@dff5cf5344484c56babebf9b2495c400c03e3538` (shallow fetch of that SHA, as engine.yml does).
 - Queue engine (B): this repository at `bcb94b8074374c2300846b7df4000a7b042945fe` (`feat/build-engine`), `scripts/build-engine.sh --workdir <fresh dir>`; manifest: tag `FIREFOX_147_0_4_RELEASE`, commit `310a0cc30b21`, queue sha256 `457bec9a...2ed49`, rustc 1.98.1 (48a229cea 2026-09-01).
