@@ -28,7 +28,7 @@ trap 'rm -rf "$BASE"' EXIT
 #   home/                      $HOME (no .mozbuild)
 #   runner/                    $RUNNER_TEMP
 # Every stub appends one line to $D/calls. Stub behaviour is set with
-# environment variables: STUB_CONFIGURE_RC, STUB_BUILD_RC, STUB_NO_SHELL,
+# environment variables: STUB_CONFIGURE_RC, STUB_BUILD_RC, STUB_NO_SHELL, STUB_NO_INPROC,
 # STUB_SNAP_RC, and per lane (AOT, INTERPRETER) STUB_<L>_RC, STUB_<L>_COUNT
 # (default 20000), STUB_<L>_LINE=none|twice|nolog|nul|trailing (nolog: no log
 # written; nul: a NUL byte before the line; trailing: text after "verified").
@@ -60,6 +60,7 @@ if [ "$1" = --build ]; then
   for f in nightmonkey js js-inproc wasm-jit-runner inproc-shell.sh; do
     case $f in js-inproc | wasm-jit-runner | inproc-shell.sh) [ "$inproc" = ON ] || continue ;; esac
     [ "$f" = inproc-shell.sh ] && [ -n "${STUB_NO_SHELL:-}" ] && continue
+    [ "$f" = js-inproc ] && [ -n "${STUB_NO_INPROC:-}" ] && continue
     printf '#!/bin/sh\n# fresh\n' >"$2/bin/$f"; chmod +x "$2/bin/$f"
   done
   exit 0
@@ -163,6 +164,9 @@ build_failure_fails() {
   setup
   run_accept STUB_NO_SHELL=1
   expect_fail 1 "FAIL at build: missing $D/nm/build/bin/inproc-shell.sh"
+  setup
+  run_accept STUB_NO_INPROC=1
+  expect_fail 1 "FAIL at build: missing $D/nm/build/bin/js-inproc"
 }
 
 aot_lane_failure_fails() {
