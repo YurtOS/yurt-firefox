@@ -8,7 +8,7 @@
 
 **Tech Stack:** bash, git, GitHub Actions, Firefox `mach`/mozconfig, wasmtime, NightMonkey's CMake/`ci-suite.sh`.
 
-**Spec:** `docs/superpowers/specs/2026-10-21-yurt-firefox-design.md` (drafted at `/private/tmp/claude-501/-Users-sunny-work-yurtos-nightmonkey/476dd6ad-bdd9-487f-90e0-4ddad93ea751/scratchpad/2026-10-21-yurt-firefox-design.md`; it is committed as the repo's first file).
+**Spec:** `docs/superpowers/specs/2026-10-21-yurt-firefox-design.md` (committed as the repo's first file).
 
 ## Global Constraints
 
@@ -22,7 +22,7 @@
 - Toolchain bootstrap (`./mach artifact toolchain`) runs on the **patched** tree (patches touch `build/moz.configure` and `config/`, so resolution could differ on the bare tag).
 - Smoke: `wasmtime run --dir=. dist/bin/js -e 'print(6*7)'` prints `42`, exit 0; `wasmtime` pinned by version and digest in the repo.
 - Build budget target under 90 minutes with caches (`~/.mozbuild`, shallow clone keyed by tag SHA, objdir keyed by tag SHA + queue hash + mozconfig hash).
-- Linux x86_64 only; Firefox builds on CI and EC2, never the laptop. EC2 only via `/Users/sunny/work/yurtos/bin/ec2slot launch --hours H --purpose "..."` (user's rule, 2026-10-22: 64-vCPU cap shared across sessions, self-terminating, `ec2slot stop ID` the moment the job is done and results are copied back, never touch another session's machine, never `aws ec2 run-instances`; SSH via `ec2slot ssh ID -- cmd`; pull code from GitHub, no secrets on the box). Wherever the plan says "the EC2 box" it means a machine launched this way; use the smallest type that does the job. Heavy local work goes through buildslot.
+- Linux x86_64 only; Firefox builds on CI or on a Linux x86_64 build host, never the laptop. Wherever the plan says "the EC2 box" it means such a host; use the smallest type that does the job, stop it the moment the job is done and results are copied back, pull code from GitHub, and keep no secrets on it.
 - Org policy (`docs/agents/org.md`): red test committed first; never amend or force-push an open-PR branch; draft PRs during review loops; merge only on explicit user instruction naming the PR, with `--match-head-commit`; ask before closing PRs/issues.
 - Creating `YurtOS/yurt-firefox` needs the user's explicit go-ahead (Task 2). Freezing `YurtOS/firefox` is lifted only by the user.
 - Commits end with the attribution lines the executing session is given (this planning session used `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>` and its own `Claude-Session:` URL); PR bodies end with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.

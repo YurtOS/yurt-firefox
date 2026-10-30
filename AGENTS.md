@@ -20,8 +20,8 @@ verify, export and build it. It replaces the `YurtOS/firefox` fork. Only the
   `scripts/lib/patch-queue.sh`.
 - Never apply with `--3way`, `--reject`, `--ignore-whitespace` or `--unidiff-zero`.
 - Never commit `js/src/ics` content to a patch; the corpus lives in `data/ics/`.
-- Firefox builds run on CI or on EC2 launched with
-  `/Users/sunny/work/yurtos/bin/ec2slot`, never on the laptop.
+- Firefox builds run on CI or on a Linux x86_64 build host, never on the
+  laptop.
 
 ## The semantic gate and `NIGHTMONKEY_PIN`
 
