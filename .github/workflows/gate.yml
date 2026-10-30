@@ -300,12 +300,81 @@ jobs:
           # Nightly and dispatch runs on main seed it; gated PRs only read it.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # Experiment (yurt-sandbox#367 section 2): sccache for the NightMonkey
+      # cargo build, after rust-cache so RUSTC_WRAPPER stays out of its key.
+      - name: Install sccache
+        env:
+          VERSION: 0.19.0
+          # sha256 of sccache-v0.19.0-x86_64-unknown-linux-musl.tar.gz, as
+          # published in the release's .sha256 file.
+          SHA256: aa73c7270c997894038c0d8f0d297865f57569e1687883322bc431713d4bb9dd
+        run: |
+          set -euo pipefail
+          if [ "$(uname -s)-$(uname -m)" != Linux-x86_64 ]; then
+            echo "::error::this action ships only the x86_64 Linux sccache, not $(uname -s)-$(uname -m)"
+            exit 1
+          fi
+          name="sccache-v${VERSION}-x86_64-unknown-linux-musl"
+          dir="$RUNNER_TEMP/sccache"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/sccache.tar.gz" \
+            "https://github.com/mozilla/sccache/releases/download/v${VERSION}/${name}.tar.gz"
+          echo "${SHA256}  $dir/sccache.tar.gz" | sha256sum -c --strict -
+          tar -xzf "$dir/sccache.tar.gz" -C "$dir" --strip-components=1 "${name}/sccache"
+          rm "$dir/sccache.tar.gz"
+          echo "$dir" >> "$GITHUB_PATH"
+
+      # sccache's GHA backend talks to the cache service directly, with the
+      # runtime token that only JavaScript actions see. Hand it to later steps.
+      - name: Expose the cache service to sccache
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Configure sccache
+        env:
+          WRITE: true
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          case "$WRITE" in
+            true) mode=READ_WRITE ;;
+            false) mode=READ_ONLY ;;
+            auto)
+              mode=READ_ONLY
+              case "$GITHUB_EVENT_NAME" in
+                push | schedule | workflow_dispatch)
+                  if [ -n "$DEFAULT_BRANCH" ] && [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                    mode=READ_WRITE
+                  fi ;;
+              esac ;;
+            *) echo "::error::write must be auto, true or false, got '$WRITE'"; exit 1 ;;
+          esac
+          # The server reads its config when it starts, so export before starting
+          # it. No idle timeout: a server restarted mid-job would reset the stats.
+          export SCCACHE_GHA_ENABLED=true SCCACHE_GHA_RW_MODE="$mode" SCCACHE_IDLE_TIMEOUT=0
+          {
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "SCCACHE_GHA_RW_MODE=$mode"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CARGO_INCREMENTAL=0"
+          } >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/sccache/sccache" --start-server
+          echo "sccache $("$RUNNER_TEMP/sccache/sccache" --version | cut -d' ' -f2), GitHub cache $mode"
+
       - name: Build NightMonkey
         working-directory: nightmonkey
         run: |
           cmake -S . -B build -DSPIDERMONKEY_DIST="$GITHUB_WORKSPACE/firefox/obj-nightmonkey-sm/dist"
           cmake --build build
           test -x build/bin/inproc-shell.sh
+
+      - name: sccache statistics
+        if: ${{ !cancelled() }}
+        run: sccache --show-stats
 
       # ci-suite.sh pipes each lane through scripts/run-jit-tests.sh, which
       # applies scripts/check-test-log.py: a nonempty, passing run is required.
