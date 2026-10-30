@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Tests for .github/workflows/{queue,engine,gate}.yml: structure, actionlint, action
 # pinning, the smoke command and the pinned wasmtime digest.
-set -euo pipefail
+# No pipefail: nearly every check here is `producer | grep -q ...`, and grep -q
+# exits at its first match, so a producer that flushes per line (BSD grep on
+# macOS does) dies of SIGPIPE and pipefail would fail a passing check. Every
+# pipeline ends in a content check, so the last command's status is the one
+# that matters. (exec_step still runs step scripts with -eo pipefail.)
+set -eu
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib.sh
