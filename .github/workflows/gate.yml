@@ -16,14 +16,20 @@ name: gate
 #
 # Two tiers (YurtOS/yurt-sandbox#367), picked by the `tier` job:
 #   full: every jit-test in both lanes, split over SHARDS `jit-test shard N`
-#     jobs that take the `build` job's shell and test sources. Nightly,
-#     manual dispatch, a pull request labelled `ci:full` (or `gate`), and a
+#     jobs that take the `build` job's shell and test sources. Nightly
+#     (unless nothing changed, below), manual dispatch, a pull request labelled `ci:full` (or `gate`), and a
 #     pull request that changes NIGHTMONKEY_PIN (a pin bump must show the
 #     whole gate green before merge).
 #   subset: the JIT_SUBSET path filters in both lanes, in the `build` job.
 #     A pull request without the label that changes an engine input
 #     (ENGINE_INPUTS: the queue, the pins, the build script, this file).
 #   none: any other pull request (scripts, tests, docs); every job skips.
+#     Also a nightly when no engine input changed since the last completed
+#     nightly, whatever its conclusion: the same head, or a compare from its
+#     head that lists no ENGINE_INPUTS path. Its summary links that run. Any
+#     doubt runs the gate: no earlier nightly, an API error, a compare that
+#     is not a fast-forward or may be truncated (300 files). Dispatch to
+#     re-run a red nightly on unchanged inputs: the next nightly will not.
 # The label and the changed files are read through the API when the run
 # starts, not from the event: a push's event carries the labels of the
 # moment it was sent, so a push a few seconds after labelling would take the
@@ -90,8 +96,10 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      # Read only: the pull request's labels and changed files.
+      # Read only: the pull request's labels and changed files, and the
+      # last nightly run.
       pull-requests: read
+      actions: read
     outputs:
       mode: ${{ steps.tier.outputs.mode }}
     steps:
@@ -103,7 +111,24 @@ jobs:
         run: |
           set -euo pipefail
           mode=full
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+          skipped="no engine input changed); label the PR \`ci:full\` to run it"
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            # Any API error or doubt leaves mode=full (see the top).
+            runs="repos/$GITHUB_REPOSITORY/actions/workflows/gate.yml/runs?event=schedule&status=completed&per_page=1"
+            last=$(gh api "$runs" --jq '.workflow_runs[0] // empty | "\(.head_sha) \(.conclusion) \(.html_url)"') || last=
+            read -r last_sha last_conclusion last_url <<< "$last" || true
+            if [[ "${last_sha:-}" =~ ^[0-9a-f]{40}$ ]]; then
+              if [ "$last_sha" = "$GITHUB_SHA" ]; then
+                mode=none
+              elif cmp=$(gh api "repos/$GITHUB_REPOSITORY/compare/$last_sha...$GITHUB_SHA" --jq '.status, (.files | length), .files[].filename'); then
+                { read -r status; read -r count; changed=$(cat); } <<< "$cmp"
+                if [ "$status" = ahead ] && [ "$count" -lt 300 ] && ! grep -qE "$ENGINE_INPUTS" <<< "$changed"; then
+                  mode=none
+                fi
+              fi
+              skipped="no engine input changed since the last nightly, $last_conclusion at ${last_sha:0:12}: $last_url); dispatch the workflow to run it"
+            fi
+          elif [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             labels=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')
             if ! grep -qxE 'ci:full|gate' <<< "$labels"; then
               files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')
@@ -116,7 +141,7 @@ jobs:
           case $mode in
             full) echo "### Gate: all jit-tests, $SHARDS shards" ;;
             subset) echo "### Gate: jit-test subset (\`$JIT_SUBSET\`); label the PR \`ci:full\` for all of them" ;;
-            none) echo "### Gate: skipped (no engine input changed); label the PR \`ci:full\` to run it" ;;
+            none) echo "### Gate: skipped ($skipped" ;;
           esac >> "$GITHUB_STEP_SUMMARY"
 
   build:
