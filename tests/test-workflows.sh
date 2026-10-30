@@ -345,14 +345,19 @@ t_gate_tier() {
   rm -rf "$d"
 }
 
-# When no engine input changed since the last completed nightly (the same
-# head, or a compare against its head that lists no ENGINE_INPUTS path), the
-# nightly does not rebuild: after a green one it skips (mode=none), after a
-# red one the tier step fails in seconds, writing no mode and linking the red
-# run it carries forward. Any other conclusion (cancelled, skipped) and any
-# doubt runs it: no earlier nightly, an API error, a compare that is not a
-# fast-forward or may be truncated (300 files). A dispatch never asks. Stub
-# gh prints what its --jq would. want=fail: the step fails.
+# The base is the newest completed run on main that was a nightly or a
+# dispatch (a green dispatch clears a carried red; a pull request's run, or a
+# dispatch on another branch, is not a base). When no engine input changed
+# since it (the same head, or a compare against its head that lists no
+# ENGINE_INPUTS path), the nightly does not rebuild: after a green base it
+# skips (mode=none), after a red one the tier step fails in seconds, writing
+# no mode and linking the red run it carries forward. Any other conclusion
+# (cancelled, skipped) and any doubt runs it: no base, an API error, a compare
+# that is not a fast-forward or may be truncated (300 files). A dispatch never
+# asks. The stub gh answers the runs listing from RUNS (newest first,
+# `event,branch,sha,conclusion,url;...`), applying the URL's event=, branch=
+# and per_page= as the API does, then the step's own --jq. want=fail: the
+# step fails.
 t_gate_nightly_skip() {
   local f="$WF/gate.yml" d inputs c ev runs cmp fail want rc head=1111111111111111111111111111111111111111
   local old=2222222222222222222222222222222222222222
@@ -360,31 +365,50 @@ t_gate_nightly_skip() {
   [ -n "$inputs" ] || { echo "gate.yml lacks ENGINE_INPUTS" >&2; return 1; }
   d=$(mktemp -d)
   mkdir -p "$d/bin"
-  printf '%s\n' '#!/bin/sh' 'case "$*" in' \
-    '  *"actions/workflows/gate.yml/runs?event=schedule&status=completed&per_page=1"*) [ -z "${RUNS_FAIL:-}" ] || exit 1; printf "%b" "$RUNS" ;;' \
-    '  *"/compare/'"$old"'...'"$head"'"*) [ -z "${COMPARE_FAIL:-}" ] || exit 1; printf "%b" "$COMPARE" ;;' \
-    '  *) exit 1 ;;' 'esac' >"$d/bin/gh"
+  cat >"$d/bin/gh" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+case "\$*" in
+  *"/compare/$old...$head"*) [ -z "\${COMPARE_FAIL:-}" ] || exit 1; printf "%b" "\$COMPARE"; exit ;;
+  *"actions/workflows/gate.yml/runs?"*"status=completed"*) [ -z "\${RUNS_FAIL:-}" ] || exit 1 ;;
+  *) exit 1 ;;
+esac
+url=\$2 q=
+while [ \$# -gt 0 ]; do [ "\$1" = --jq ] && q=\$2; shift; done
+param() { sed -n "s/.*[?&]\$1=\\([^&]*\\).*/\\1/p" <<<"\$url"; }
+tr ';' '\\n' <<<"\$RUNS" | jq -Rn --arg ev "\$(param event)" --arg br "\$(param branch)" --arg n "\$(param per_page)" '
+  [inputs | select(. != "") | split(",")
+   | {event: .[0], head_branch: .[1], head_sha: .[2], conclusion: .[3], html_url: .[4]}
+   | select((\$ev == "" or .event == \$ev) and (\$br == "" or .head_branch == \$br))]
+  | {workflow_runs: .[:(if \$n == "" then 30 else (\$n | tonumber) end)]}' | jq -r "\$q"
+STUB
   chmod +x "$d/bin/gh"
   for c in \
     "schedule||||full" \
-    "schedule|$head success https://h.test/1\n|||none" \
-    "schedule|$head failure https://h.test/1\n|||fail" \
-    "schedule|$head cancelled https://h.test/1\n|||full" \
-    "schedule|$head skipped https://h.test/1\n|||full" \
-    "schedule|$old success https://h.test/1\n|ahead\n2\nREADME.md\nscripts/check-queue.sh\n||none" \
-    "schedule|$old cancelled https://h.test/1\n|ahead\n0\n||full" \
-    "schedule|$old failure https://h.test/1\n|ahead\n1\nREADME.md\n||fail" \
-    "schedule|$old failure https://h.test/1\n|ahead\n1\npatches/0001-x.patch\n||full" \
-    "schedule|$old failure https://h.test/1\n|diverged\n1\nREADME.md\n||full" \
-    "schedule|$old success https://h.test/1\n|ahead\n2\nREADME.md\npatches/0001-x.patch\n||full" \
-    "schedule|$old success https://h.test/1\n|ahead\n1\nNIGHTMONKEY_PIN\n||full" \
-    "schedule|$old success https://h.test/1\n|ahead\n1\n.github/workflows/gate.yml\n||full" \
-    "schedule|$old success https://h.test/1\n|diverged\n1\nREADME.md\n||full" \
-    "schedule|$old success https://h.test/1\n|ahead\n300\nREADME.md\n||full" \
-    "schedule|$old success https://h.test/1\n|ahead\n1\nREADME.md\n|COMPARE_FAIL|full" \
-    "schedule|$head success https://h.test/1\n||RUNS_FAIL|full" \
-    "schedule|main success https://h.test/1\n|||full" \
-    "workflow_dispatch|$head success https://h.test/1\n|||full"; do
+    "schedule|schedule,main,$head,success,https://h.test/1|||none" \
+    "schedule|schedule,main,$head,failure,https://h.test/1|||fail" \
+    "schedule|schedule,main,$head,cancelled,https://h.test/1|||full" \
+    "schedule|schedule,main,$head,skipped,https://h.test/1|||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n2\nREADME.md\nscripts/check-queue.sh\n||none" \
+    "schedule|schedule,main,$old,cancelled,https://h.test/1|ahead\n0\n||full" \
+    "schedule|schedule,main,$old,failure,https://h.test/1|ahead\n1\nREADME.md\n||fail" \
+    "schedule|schedule,main,$old,failure,https://h.test/1|ahead\n1\npatches/0001-x.patch\n||full" \
+    "schedule|schedule,main,$old,failure,https://h.test/1|diverged\n1\nREADME.md\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n2\nREADME.md\npatches/0001-x.patch\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n1\nNIGHTMONKEY_PIN\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n1\n.github/workflows/gate.yml\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|diverged\n1\nREADME.md\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n300\nREADME.md\n||full" \
+    "schedule|schedule,main,$old,success,https://h.test/1|ahead\n1\nREADME.md\n|COMPARE_FAIL|full" \
+    "schedule|schedule,main,$head,success,https://h.test/1||RUNS_FAIL|full" \
+    "schedule|schedule,main,main,success,https://h.test/1|||full" \
+    "workflow_dispatch|schedule,main,$head,success,https://h.test/1|||full" \
+    "schedule|workflow_dispatch,main,$head,success,https://h.test/1;schedule,main,$head,failure,https://h.test/2|||none" \
+    "schedule|workflow_dispatch,main,$old,success,https://h.test/1;schedule,main,$old,failure,https://h.test/2|ahead\n1\nREADME.md\n||none" \
+    "schedule|workflow_dispatch,main,$head,failure,https://h.test/1;schedule,main,$head,success,https://h.test/2|||fail" \
+    "schedule|workflow_dispatch,feat/x,$head,success,https://h.test/2;schedule,main,$head,failure,https://h.test/1|||fail" \
+    "schedule|pull_request,main,$head,success,https://h.test/2;schedule,main,$head,failure,https://h.test/1|||fail" \
+    "schedule|workflow_dispatch,feat/x,$head,success,https://h.test/2|||full"; do
     IFS='|' read -r ev runs cmp fail want <<<"$c"
     : >"$d/out"
     : >"$d/summary"
