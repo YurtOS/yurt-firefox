@@ -696,6 +696,18 @@ t_run_scripts_lint() {
             [ -n "$B" ] || exit 1
 ' >"$d/bad3.yml"
   if lint_runs "$d/bad3.yml" 2>/dev/null; then echo "SC2015 shape across a continuation accepted" >&2; rm -rf "$d"; return 1; fi
+  # A comment line between the && line and the rest does not end the line.
+  printf 'jobs:\n  j:\n    steps:\n      - name: bad\n        run: |\n          [ -n "$A" ] &&\n            # B must be set too\n            [ -n "$B" ] || exit 1\n' >"$d/bad4.yml"
+  if lint_runs "$d/bad4.yml" 2>/dev/null; then echo "SC2015 shape around a comment line accepted" >&2; rm -rf "$d"; return 1; fi
+  # Every YAML block scalar header is a multi-line script (|+, >-, |2, >2-, ...).
+  for hdr in '|+' '>-' '|2' '|2-' '|-2' '>+'; do
+    printf 'jobs:\n  j:\n    steps:\n      - name: bad\n        run: %s\n          [ -n "$A" ] && [ -n "$B" ] || exit 1\n' "$hdr" >"$d/bad5.yml"
+    case $(lint_runs "$d/bad5.yml" 2>&1) in *"has the SC2015 shape"*) ;;
+      *) echo "block scalar run: $hdr is not read as a script" >&2; rm -rf "$d"; return 1 ;; esac
+  done
+  # Not SC2015: a quoted heredoc body, and && and || in separate commands.
+  printf 'jobs:\n  j:\n    steps:\n      - name: good\n        run: |\n          cat <<'"'"'EOF'"'"'\n          a && b || c\n          EOF\n          cat <<-END\n          x && y || z\n          END\n          test -n "$A" && echo a; test -n "$B" || exit 1\n' >"$d/good2.yml"
+  lint_runs "$d/good2.yml" || { echo "a heredoc or separate commands were rejected" >&2; rm -rf "$d"; return 1; }
   # An info-level shellcheck finding (SC2086, unquoted expansion) fails too.
   if command -v shellcheck >/dev/null 2>&1; then
     printf 'jobs:
@@ -706,6 +718,27 @@ t_run_scripts_lint() {
     if lint_runs "$d/info.yml" 2>/dev/null; then echo "an info-level shellcheck finding was accepted" >&2; rm -rf "$d"; return 1; fi
   fi
   lint_runs "$d/good.yml" || { echo "a clean script was rejected" >&2; rm -rf "$d"; return 1; }
+  rm -rf "$d"
+}
+
+# Without shellcheck the run: lint is FATAL under CI (CI or GITHUB_ACTIONS
+# set) and an explicit SKIP of the shellcheck part on a developer machine.
+t_run_scripts_lint_needs_shellcheck() {
+  local d t rc out
+  d=$(mktemp -d)
+  mkdir -p "$d/bin"
+  for t in python3 mktemp rm basename cat; do ln -s "$(command -v "$t")" "$d/bin/$t"; done
+  printf 'jobs:\n  j:\n    steps:\n      - run: echo ok\n' >"$d/w.yml"
+  rc=0
+  out=$( (PATH="$d/bin"; unset CI GITHUB_ACTIONS; lint_runs "$d/w.yml") 2>&1) || rc=$?
+  assert_eq 0 "$rc" "local: $out" || { rm -rf "$d"; return 1; }
+  case $out in *"SKIP: shellcheck not installed"*) ;; *) echo "no SKIP locally: $out" >&2; rm -rf "$d"; return 1 ;; esac
+  for t in CI GITHUB_ACTIONS; do
+    rc=0
+    out=$( (PATH="$d/bin"; unset CI GITHUB_ACTIONS; export "$t=true"; lint_runs "$d/w.yml") 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "no failure under $t without shellcheck" >&2; rm -rf "$d"; return 1; }
+    case $out in *"FATAL: shellcheck is required"*) ;; *) echo "no FATAL under $t: $out" >&2; rm -rf "$d"; return 1 ;; esac
+  done
   rm -rf "$d"
 }
 
@@ -764,6 +797,7 @@ run_test "engine.yml: a release call never saves the cache" t_engine_call_cache
 run_test "engine.yml: a release call has its own concurrency group" t_engine_call_concurrency
 run_test "engine.yml: the manifest is uploaded after a failed packaging" t_engine_manifest_upload
 run_test "run: scripts have no SC2015 shape and pass shellcheck -S info" t_run_scripts_lint
+run_test "run: lint is FATAL without shellcheck under CI" t_run_scripts_lint_needs_shellcheck
 run_test "queue.yml: fixtures, real check, drift" t_queue
 run_test "gate.yml: triggers, label condition, linked test tree, caches" t_gate
 run_test "gate.yml: each lane reaches the harness and failures fail" t_gate_lanes
