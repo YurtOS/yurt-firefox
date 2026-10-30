@@ -164,3 +164,4 @@ integration, tests and mutation evidence, and documentation.
   `docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md`.
 - Do not create markdown files speculatively, and keep test-only fixtures out of
   production code paths.
+
