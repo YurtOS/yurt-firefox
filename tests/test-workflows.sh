@@ -345,13 +345,16 @@ t_gate_tier() {
   rm -rf "$d"
 }
 
-# The nightly skips when no engine input changed since the last completed
-# nightly (any conclusion): the same head, or a compare against its head that
-# lists no ENGINE_INPUTS path. Any doubt runs it: no earlier nightly, an API
-# error, a compare that is not a fast-forward or may be truncated (300 files).
-# A dispatch never asks. Stub gh prints what its --jq would.
+# When no engine input changed since the last completed nightly (the same
+# head, or a compare against its head that lists no ENGINE_INPUTS path), the
+# nightly does not rebuild: after a green one it skips (mode=none), after a
+# red one the tier step fails in seconds, writing no mode and linking the red
+# run it carries forward. Any other conclusion (cancelled, skipped) and any
+# doubt runs it: no earlier nightly, an API error, a compare that is not a
+# fast-forward or may be truncated (300 files). A dispatch never asks. Stub
+# gh prints what its --jq would. want=fail: the step fails.
 t_gate_nightly_skip() {
-  local f="$WF/gate.yml" d inputs c ev runs cmp want head=1111111111111111111111111111111111111111
+  local f="$WF/gate.yml" d inputs c ev runs cmp fail want rc head=1111111111111111111111111111111111111111
   local old=2222222222222222222222222222222222222222
   inputs=$(body "$f" | sed -n "s/^  ENGINE_INPUTS: '\(.*\)'$/\1/p")
   [ -n "$inputs" ] || { echo "gate.yml lacks ENGINE_INPUTS" >&2; return 1; }
@@ -365,9 +368,14 @@ t_gate_nightly_skip() {
   for c in \
     "schedule||||full" \
     "schedule|$head success https://h.test/1\n|||none" \
-    "schedule|$head failure https://h.test/1\n|||none" \
+    "schedule|$head failure https://h.test/1\n|||fail" \
+    "schedule|$head cancelled https://h.test/1\n|||full" \
+    "schedule|$head skipped https://h.test/1\n|||full" \
     "schedule|$old success https://h.test/1\n|ahead\n2\nREADME.md\nscripts/check-queue.sh\n||none" \
-    "schedule|$old cancelled https://h.test/1\n|ahead\n0\n||none" \
+    "schedule|$old cancelled https://h.test/1\n|ahead\n0\n||full" \
+    "schedule|$old failure https://h.test/1\n|ahead\n1\nREADME.md\n||fail" \
+    "schedule|$old failure https://h.test/1\n|ahead\n1\npatches/0001-x.patch\n||full" \
+    "schedule|$old failure https://h.test/1\n|diverged\n1\nREADME.md\n||full" \
     "schedule|$old success https://h.test/1\n|ahead\n2\nREADME.md\npatches/0001-x.patch\n||full" \
     "schedule|$old success https://h.test/1\n|ahead\n1\nNIGHTMONKEY_PIN\n||full" \
     "schedule|$old success https://h.test/1\n|ahead\n1\n.github/workflows/gate.yml\n||full" \
@@ -380,10 +388,18 @@ t_gate_nightly_skip() {
     IFS='|' read -r ev runs cmp fail want <<<"$c"
     : >"$d/out"
     : >"$d/summary"
+    rc=0
     exec_step "$f" "$TIER_STEP" "$d" PATH="$d/bin:$PATH" GITHUB_EVENT_NAME="$ev" GITHUB_REPOSITORY=o/r \
       GITHUB_SHA="$head" RUNS="$runs" COMPARE="$cmp" ${fail:+"$fail=1"} ENGINE_INPUTS="$inputs" SHARDS=4 \
-      JIT_SUBSET=warp/ GITHUB_OUTPUT="$d/out" GITHUB_STEP_SUMMARY="$d/summary" >/dev/null 2>&1 ||
-      { echo "tier step failed for $c" >&2; rm -rf "$d"; return 1; }
+      JIT_SUBSET=warp/ GITHUB_OUTPUT="$d/out" GITHUB_STEP_SUMMARY="$d/summary" >"$d/log" 2>&1 || rc=$?
+    if [ "$want" = fail ]; then
+      [ "$rc" -ne 0 ] || { echo "a red nightly with unchanged inputs was not carried forward: $c" >&2; rm -rf "$d"; return 1; }
+      assert_eq "" "$(cat "$d/out")" "no tier when carrying a red nightly: $c"
+      grep -q 'https://h.test/1' "$d/summary" && grep -q 'https://h.test/1' "$d/log" ||
+        { echo "the carried red run is not linked in the summary and the log: $c" >&2; rm -rf "$d"; return 1; }
+      continue
+    fi
+    [ "$rc" -eq 0 ] || { echo "tier step failed for $c: $(cat "$d/log")" >&2; rm -rf "$d"; return 1; }
     assert_eq "mode=$want" "$(cat "$d/out")" "tier for $c"
     if [ "$want" = none ]; then
       grep -q 'https://h.test/1' "$d/summary" ||
