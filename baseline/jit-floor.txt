@@ -1,0 +1,6 @@
+# jit-test floors for scripts/accept-engine.sh: each lane's "night: jit: N
+# passing execution results verified" count (passed minus skipped, printed by
+# NightMonkey's scripts/check-test-log.py) must be >= its floor. A queue PR
+# that legitimately changes the counts updates this file.
+aot_verified=12307
+interpreter_verified=12494
