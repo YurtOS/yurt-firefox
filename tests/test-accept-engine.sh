@@ -30,7 +30,9 @@ trap 'rm -rf "$BASE"' EXIT
 # Every stub appends one line to $D/calls. Stub behaviour is set with
 # environment variables: STUB_CONFIGURE_RC, STUB_BUILD_RC, STUB_NO_SHELL,
 # STUB_SNAP_RC, and per lane (AOT, INTERPRETER) STUB_<L>_RC, STUB_<L>_COUNT
-# (default 20000), STUB_<L>_LINE=none|twice|nolog (nolog: no log written).
+# (default 20000), STUB_<L>_LINE=none|twice|nolog|nul|trailing (nolog: no log
+# written; nul: a NUL byte before the line; trailing: text after "verified").
+# NIGHT_*/SPIDERMONKEY_* variables seen by cmake and the lanes go to $D/envlog.
 setup() {
   D=$(mktemp -d "$BASE/case.XXXXXX")
   mkdir -p "$D/pkg/spidermonkey/include-private" "$D/testsrc/js/src/jit-test" "$D/tc/bin" "$D/sysroot" \
@@ -46,23 +48,42 @@ setup() {
 
   cat >"$D/stubs/cmake" <<'SH'
 #!/bin/bash
+# Like cmake for what matters here: a -D value wins over the build dir's
+# CMakeCache.txt, which wins over the default (NIGHT_INPROCESS ON); the
+# in-process lane binaries are built only when it is ON.
 echo "cmake $* | cwd=$PWD" >>"$CALLS"
+env | grep -E '^(NIGHT_|SPIDERMONKEY_)' | sort | sed 's/^/cmake-env: /' >>"$ENVLOG"
 if [ "$1" = --build ]; then
   [ "${STUB_BUILD_RC:-0}" = 0 ] || exit "$STUB_BUILD_RC"
   mkdir -p "$2/bin"
-  for f in nightmonkey js inproc-shell.sh; do
+  inproc=$(sed -n 's/^NIGHT_INPROCESS:BOOL=//p' "$2/CMakeCache.txt" 2>/dev/null)
+  for f in nightmonkey js js-inproc wasm-jit-runner inproc-shell.sh; do
+    case $f in js-inproc | wasm-jit-runner | inproc-shell.sh) [ "$inproc" = ON ] || continue ;; esac
     [ "$f" = inproc-shell.sh ] && [ -n "${STUB_NO_SHELL:-}" ] && continue
-    printf '#!/bin/sh\n' >"$2/bin/$f"; chmod +x "$2/bin/$f"
+    printf '#!/bin/sh\n# fresh\n' >"$2/bin/$f"; chmod +x "$2/bin/$f"
   done
   exit 0
 fi
-exit "${STUB_CONFIGURE_RC:-0}"
+[ "${STUB_CONFIGURE_RC:-0}" = 0 ] || exit "$STUB_CONFIGURE_RC"
+b= inproc=
+while [ $# -gt 0 ]; do
+  case $1 in -B) b=$2; shift ;; -DNIGHT_INPROCESS=*) inproc=${1#-DNIGHT_INPROCESS=} ;; esac
+  shift
+done
+mkdir -p "$b"
+[ -n "$inproc" ] || inproc=$(sed -n 's/^NIGHT_INPROCESS:BOOL=//p' "$b/CMakeCache.txt" 2>/dev/null)
+echo "NIGHT_INPROCESS:BOOL=${inproc:-ON}" >"$b/CMakeCache.txt"
 SH
   cat >"$D/nm/scripts/ci-suite.sh" <<'SH'
 #!/bin/bash
 # Stub of NightMonkey's ci-suite.sh <suite> <lane>: writes the lane log as the
 # real one does (tee into $RUNNER_TEMP/nightmonkey-logs/<suite>-<lane>.log).
 echo "ci-suite.sh $* | NIGHT_FIREFOX_TESTS=${NIGHT_FIREFOX_TESTS:-} | cwd=$PWD" >>"$CALLS"
+env | grep -E '^(NIGHT_|SPIDERMONKEY_)' | grep -v '^NIGHT_FIREFOX_TESTS=' | sort | sed 's/^/lane-env: /' >>"$ENVLOG"
+# The lane runs build/bin/inproc-shell.sh -> js-inproc under wasm-jit-runner.
+for f in js-inproc wasm-jit-runner inproc-shell.sh; do
+  grep -q fresh "build/bin/$f" 2>/dev/null || { echo "lane would run a stale build/bin/$f" >&2; exit 1; }
+done
 L=$(echo "$2" | tr '[:lower:]' '[:upper:]')
 eval "rc=\${STUB_${L}_RC:-0} count=\${STUB_${L}_COUNT:-20000} line=\${STUB_${L}_LINE:-once}"
 logs=${RUNNER_TEMP:?}/nightmonkey-logs
@@ -74,6 +95,8 @@ mkdir -p "$logs"
     once) echo "night: jit: $count passing execution results verified" ;;
     twice) echo "night: jit: $count passing execution results verified"
       echo "night: jit: $count passing execution results verified" ;;
+    nul) printf 'binary\0junk\n'; echo "night: jit: $count passing execution results verified" ;;
+    trailing) echo "night: jit: $count passing execution results verified (partial)" ;;
   esac
 } | tee "$logs/$1-$2.log"
 exit "$rc"
@@ -97,7 +120,7 @@ run_accept() {
   fi
   RC=0
   OUT=$(cd "$BASE" && env PATH="$D/stubs:$PATH" HOME="$D/home" RUNNER_TEMP="$D/runner" CALLS="$D/calls" \
-    PQ_ROOT="$D/root" ${envs[@]+"${envs[@]}"} "$ACCEPT" "$@" 2>&1) || RC=$?
+    ENVLOG="$D/envlog" PQ_ROOT="$D/root" ${envs[@]+"${envs[@]}"} "$ACCEPT" "$@" 2>&1) || RC=$?
 }
 
 # expect_fail <rc> <text>: exit <rc> and the output contains <text>.
@@ -114,7 +137,7 @@ all_green_runs_every_step_in_order() {
   run_accept
   assert_eq 0 "$RC" "$OUT"
   local want
-  want="cmake -S $D/nm -B $D/nm/build -DSPIDERMONKEY_DIST=$D/pkg/spidermonkey -DNIGHT_TOOLCHAIN_ROOT=$D/tc -DNIGHT_SYSROOT=$D/sysroot | cwd=$D/nm
+  want="cmake -S $D/nm -B $D/nm/build -DSPIDERMONKEY_DIST=$D/pkg/spidermonkey -DNIGHT_TOOLCHAIN_ROOT=$D/tc -DNIGHT_SYSROOT=$D/sysroot -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF | cwd=$D/nm
 cmake --build $D/nm/build | cwd=$D/nm
 snapshot-roundtrip.sh $D/nm/build | WASMTIME_FLAGS= | cwd=$D/nm
 ci-suite.sh jit aot | NIGHT_FIREFOX_TESTS=$D/testsrc | cwd=$D/nm
@@ -166,6 +189,13 @@ floor_comparison() {
   setup
   run_accept STUB_INTERPRETER_COUNT=12493
   expect_fail 1 "FAIL at jit interpreter: 12493 verified is below the floor interpreter_verified=12494"
+  # Counts with fewer and more digits than the floor.
+  setup
+  run_accept STUB_AOT_COUNT=9999
+  expect_fail 1 "FAIL at jit aot: 9999 verified is below the floor aot_verified=12307"
+  setup
+  run_accept STUB_AOT_COUNT=100000 STUB_INTERPRETER_COUNT=100000
+  assert_eq 0 "$RC" "$OUT"
 }
 
 # A lane log without the verified line, or with two, never passes, even when
@@ -178,6 +208,15 @@ verified_line_required() {
   run_accept STUB_INTERPRETER_LINE=twice
   expect_fail 1 "FAIL at jit interpreter: 2 'night: jit: N passing execution results verified' lines"
   setup
+  run_accept STUB_AOT_LINE=trailing
+  expect_fail 1 "FAIL at jit aot: no 'night: jit: N passing execution results verified' line"
+  setup
+  run_accept STUB_AOT_COUNT=12x
+  expect_fail 1 "FAIL at jit aot: no 'night: jit: N passing execution results verified' line"
+  setup
+  run_accept STUB_AOT_LINE=nul
+  expect_fail 1 "FAIL at jit aot: $D/runner/nightmonkey-logs/jit-aot.log contains NUL bytes"
+  setup
   mkdir -p "$D/runner/nightmonkey-logs"
   echo "night: jit: 99999 passing execution results verified" >"$D/runner/nightmonkey-logs/jit-aot.log"
   run_accept STUB_AOT_LINE=nolog
@@ -189,9 +228,11 @@ snapshot_failure_fails() {
   for rc in 1 2; do
     setup
     run_accept STUB_SNAP_RC=$rc
-    expect_fail 1 "FAIL at snapshot"
+    expect_fail 1 "FAIL at snapshot: scripts/snapshot-roundtrip.sh exited $rc"
     ! called '^ci-suite' || { echo "ran lanes after the snapshot failed" >&2; return 1; }
   done
+  # Exit 2 is snapshot-roundtrip.sh's missing prerequisite (e.g. no wasmtime).
+  case $OUT in *"missing prerequisite"*) ;; *) echo "exit 2 not reported as a prerequisite: $OUT" >&2; return 1 ;; esac
 }
 
 snapshot_gets_wasmtime_flags() {
@@ -302,11 +343,68 @@ missing_cmake_is_a_prerequisite() {
 runner_temp_defaulted() {
   setup
   RC=0
-  OUT=$(cd "$BASE" && env -u RUNNER_TEMP PATH="$D/stubs:$PATH" HOME="$D/home" CALLS="$D/calls" PQ_ROOT="$D/root" \
+  OUT=$(cd "$BASE" && env -u RUNNER_TEMP PATH="$D/stubs:$PATH" HOME="$D/home" CALLS="$D/calls" ENVLOG="$D/envlog" PQ_ROOT="$D/root" \
     "$ACCEPT" --package "$D/pkg" --testsrc "$D/testsrc" --toolchain "$D/tc" --sysroot "$D/sysroot" \
     --nightmonkey "$D/nm" 2>&1) || RC=$?
   assert_eq 0 "$RC" "$OUT"
   case $OUT in *"aot: 20000 verified"*) ;; *) echo "no count: $OUT" >&2; return 1 ;; esac
+}
+
+# Inherited overrides that redirect what is built or run (NightMonkey's
+# inproc-shell.sh honours NIGHT_WASM_SHELL, NIGHT_RUNNER, NIGHT_CACHE_DIR,
+# NIGHT_INPROCESS_OFF, NIGHT_OPTIONS) never reach cmake or the lanes; the
+# lanes get a fresh NIGHT_CACHE_DIR under RUNNER_TEMP. WASMTIME* pass through.
+inherited_overrides_cleared() {
+  setup
+  run_accept NIGHT_WASM_SHELL=/old/js-inproc NIGHT_RUNNER=/old/wasm-jit-runner NIGHT_CACHE_DIR=/old/cache \
+    NIGHT_INPROCESS_OFF=1 NIGHT_OPTIONS=--pipeline NIGHT_PAD_SEED=7 NIGHT_TEST_DUMP=/old/dump \
+    NIGHT_INPROC_STRICT=0 SPIDERMONKEY_DIST=/old/dist NIGHT_FIREFOX_TESTS=/old/tests WASMTIME_FLAGS=-Wx
+  assert_eq 0 "$RC" "$OUT"
+  if grep -E '^(cmake-env|lane-env): ' "$D/envlog" | grep -v "^lane-env: NIGHT_CACHE_DIR=$D/runner/nightmonkey-wjr-cache$"; then
+    echo "an inherited override reached cmake or a lane" >&2; return 1
+  fi
+  [ "$(grep -c "^lane-env: NIGHT_CACHE_DIR=$D/runner/nightmonkey-wjr-cache$" "$D/envlog")" = 2 ] ||
+    { echo "lanes did not get the fresh cache dir: $(cat "$D/envlog")" >&2; return 1; }
+  called "^ci-suite.sh jit aot \\| NIGHT_FIREFOX_TESTS=$D/testsrc "
+  called "^snapshot-roundtrip.sh $D/nm/build \\| WASMTIME_FLAGS=-Wx "
+}
+
+# A reused build dir whose cache turned the in-process lane off (and holds old
+# lane binaries) is reconfigured with it on, so the lanes run fresh binaries.
+stale_build_dir_reconfigured() {
+  setup
+  mkdir -p "$D/nm/build/bin"
+  echo "NIGHT_INPROCESS:BOOL=OFF" >"$D/nm/build/CMakeCache.txt"
+  local f
+  for f in js-inproc wasm-jit-runner inproc-shell.sh; do
+    printf '#!/bin/sh\n# old\n' >"$D/nm/build/bin/$f"; chmod +x "$D/nm/build/bin/$f"
+  done
+  run_accept
+  assert_eq 0 "$RC" "$OUT"
+}
+
+# A relative RUNNER_TEMP is resolved before the lanes (they run inside the
+# NightMonkey checkout).
+relative_runner_temp() {
+  setup
+  run_accept RUNNER_TEMP=rel-runner.$$
+  assert_eq 0 "$RC" "$OUT"
+  [ -f "$BASE/rel-runner.$$/nightmonkey-logs/jit-aot.log" ]
+  [ ! -e "$D/nm/rel-runner.$$" ] || { echo "logs written relative to the checkout" >&2; return 1; }
+}
+
+# Without RUNNER_TEMP, a failing run keeps its temporary logs and says where.
+default_runner_temp_kept_on_failure() {
+  setup
+  RC=0
+  OUT=$(cd "$BASE" && env -u RUNNER_TEMP PATH="$D/stubs:$PATH" HOME="$D/home" CALLS="$D/calls" ENVLOG="$D/envlog" \
+    PQ_ROOT="$D/root" STUB_AOT_RC=1 "$ACCEPT" --package "$D/pkg" --testsrc "$D/testsrc" --toolchain "$D/tc" \
+    --sysroot "$D/sysroot" --nightmonkey "$D/nm" 2>&1) || RC=$?
+  assert_eq 1 "$RC" "$OUT"
+  local kept
+  kept=$(printf '%s\n' "$OUT" | sed -n 's/^accept-engine: logs kept in \(.*\)$/\1/p')
+  [ -n "$kept" ] && [ -f "$kept/nightmonkey-logs/jit-aot.log" ] || { echo "logs not kept: $OUT" >&2; return 1; }
+  rm -rf "$kept"
 }
 
 run_test "all green runs every step in order" all_green_runs_every_step_in_order
@@ -323,4 +421,8 @@ run_test "floor file checked" floor_file_checked
 run_test "usage and prerequisites" usage_and_prerequisites
 run_test "missing cmake is a prerequisite" missing_cmake_is_a_prerequisite
 run_test "RUNNER_TEMP defaulted" runner_temp_defaulted
+run_test "inherited overrides cleared" inherited_overrides_cleared
+run_test "stale build dir reconfigured" stale_build_dir_reconfigured
+run_test "relative RUNNER_TEMP" relative_runner_temp
+run_test "default RUNNER_TEMP kept on failure" default_runner_temp_kept_on_failure
 finish
