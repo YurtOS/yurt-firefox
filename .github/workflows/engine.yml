@@ -37,10 +37,11 @@ permissions:
 # In a called run, github.* is the caller's (release.yml: a tag push, or a
 # dry-run workflow_dispatch that may be on main), so a release call gets its
 # own group: it never shares, cancels or displaces a PR's or main's engine run.
-# PR and main groups are unchanged (inputs is empty for them).
+# PR and main groups are unchanged (inputs is empty for them). Only PR runs
+# cancel in progress; release.yml calls from tag pushes and dispatches only.
 concurrency:
   group: engine-${{ inputs.package && 'release-' || '' }}${{ github.ref }}
-  cancel-in-progress: ${{ !inputs.package && github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   WASMTIME_VERSION: v50.0.0
@@ -140,8 +141,10 @@ jobs:
           PACKAGE_VERSION: ${{ inputs.version }}
           PACKAGE_REVISION: ${{ inputs.revision }}
         run: |
-          [ -n "$PACKAGE_VERSION" ] && [ -n "$PACKAGE_REVISION" ] ||
-            { echo "package: the version and revision inputs are required" >&2; exit 1; }
+          if [ -z "$PACKAGE_VERSION" ] || [ -z "$PACKAGE_REVISION" ]; then
+            echo "package: the version and revision inputs are required" >&2
+            exit 1
+          fi
           scripts/package-test-sources.sh --tree firefox --out package-out --version "$PACKAGE_VERSION" --revision "$PACKAGE_REVISION" --jstests
           scripts/package-engine.sh --dist firefox/obj-nightmonkey-sm/dist --manifest build-manifest.json --out package-out --version "$PACKAGE_VERSION" --revision "$PACKAGE_REVISION" --test-sources package-out
           echo "artifact=engine-package" >> "$GITHUB_OUTPUT"
@@ -154,7 +157,11 @@ jobs:
           path: package-out/
           if-no-files-found: error
 
+      # Also after a failed step (a failed packaging leaves the manifest for
+      # diagnosis), but not after a cancellation, and only once build-engine.sh
+      # has written it.
       - name: Upload build manifest
+        if: ${{ !cancelled() && hashFiles('build-manifest.json') != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: build-manifest
