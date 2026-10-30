@@ -510,8 +510,9 @@ t_engine_package_exec() {
   local f="$WF/engine.yml" d rc
   d=$(mktemp -d)
   mkdir -p "$d/scripts"
-  printf '#!/bin/sh\necho "${0##*/} $*" >>"$CALLS"\nexit "${STUB_RC:-0}"\n' >"$d/scripts/package-test-sources.sh"
-  cp "$d/scripts/package-test-sources.sh" "$d/scripts/package-engine.sh"
+  # Each stub has its own failure control: STUB_TESTSRC_RC, STUB_ENGINE_RC.
+  printf '#!/bin/sh\necho "${0##*/} $*" >>"$CALLS"\nexit "${STUB_TESTSRC_RC:-0}"\n' >"$d/scripts/package-test-sources.sh"
+  printf '#!/bin/sh\necho "${0##*/} $*" >>"$CALLS"\nexit "${STUB_ENGINE_RC:-0}"\n' >"$d/scripts/package-engine.sh"
   chmod +x "$d/scripts/"*.sh
   : >"$d/calls"; : >"$d/out"
   exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" PACKAGE_VERSION=147.0.4 \
@@ -527,10 +528,21 @@ package-engine.sh --dist firefox/obj-nightmonkey-sm/dist --manifest build-manife
     exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" $env >/dev/null 2>&1 || rc=$?
     [ "$rc" -ne 0 ] && [ ! -s "$d/calls" ] || { echo "package step ran with $env" >&2; rm -rf "$d"; return 1; }
   done
+  # Each packager failing alone fails the step; after a failing bundler the
+  # engine packager does not run.
+  : >"$d/calls"; : >"$d/out"
   rc=0
   exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" PACKAGE_VERSION=147.0.4 \
-    PACKAGE_REVISION=1 STUB_RC=1 >/dev/null 2>&1 || rc=$?
-  [ "$rc" -ne 0 ] || { echo "a failing packager passes the step" >&2; rm -rf "$d"; return 1; }
+    PACKAGE_REVISION=1 STUB_TESTSRC_RC=1 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a failing test-source bundler passes the step" >&2; rm -rf "$d"; return 1; }
+  ! grep -q '^package-engine.sh' "$d/calls" || { echo "package-engine.sh ran after the bundler failed" >&2; rm -rf "$d"; return 1; }
+  ! grep -q '^artifact=' "$d/out" || { echo "artifact output written after a failure" >&2; rm -rf "$d"; return 1; }
+  : >"$d/calls"; : >"$d/out"
+  rc=0
+  exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" PACKAGE_VERSION=147.0.4 \
+    PACKAGE_REVISION=1 STUB_ENGINE_RC=1 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a failing engine packager passes the step" >&2; rm -rf "$d"; return 1; }
+  ! grep -q '^artifact=' "$d/out" || { echo "artifact output written after a failure" >&2; rm -rf "$d"; return 1; }
   rm -rf "$d"
 }
 
@@ -569,6 +581,124 @@ t_engine_call_concurrency() {
   assert_eq false "$(gh_eval "$cancel" "$CTX_MAIN")" "main runs are not cancelled"
   assert_eq false "$(gh_eval "$cancel" "$CTX_TAG" "$IN_CALL")" "the tag-called run cancels in progress"
   assert_eq false "$(gh_eval "$cancel" "$CTX_DRY" "$IN_CALL")" "the release dry run cancels in progress"
+}
+
+# run_scripts <workflow> <dir>: write every `run:` script of <workflow> to
+# <dir>/<line>.sh, ${{ }} expressions replaced by a placeholder as actionlint
+# does before shellcheck. Prints the number of scripts.
+run_scripts() {
+  python3 -I - "$1" "$2" <<'PY'
+import re, sys
+path, out = sys.argv[1:]
+lines = open(path).read().split("\n")
+n, i = 0, 0
+while i < len(lines):
+    m = re.match(r"^(\s*)(?:- )?run: (.*)$", lines[i])
+    if not m or lines[i].lstrip().startswith("#"):
+        i += 1
+        continue
+    start = i + 1
+    if m.group(2).strip() in ("|", "|-", ">"):
+        body, j, ind = [], i + 1, None
+        while j < len(lines):
+            l = lines[j]
+            if l.strip() == "":
+                body.append(""); j += 1; continue
+            k = len(l) - len(l.lstrip())
+            if ind is None:
+                ind = k
+            if k < ind:
+                break
+            body.append(l[ind:]); j += 1
+        script, i = "\n".join(body), j
+    else:
+        script, i = m.group(2), i + 1
+    script = re.sub(r"\$\{\{.*?\}\}", "_GH_EXPR_", script)
+    with open("%s/%d.sh" % (out, start), "w") as f:
+        f.write("#!/bin/bash\n" + script + "\n")
+    n += 1
+print(n)
+PY
+}
+
+# sc2015_shape <script>: print the logical lines of the form `A && B || C`
+# (shellcheck SC2015: C also runs when B fails). Quoted strings, comments and
+# [[ ]] are blanked first; lines ending in && || | or \ continue.
+sc2015_shape() {
+  python3 -I - "$1" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+logical, cur = [], ""
+for line in text.split("\n"):
+    cur += line + " "
+    if re.search(r"(&&|\|\||\||\\)\s*$", line):
+        continue
+    logical.append(cur)
+    cur = ""
+logical.append(cur)
+for l in logical:
+    s = re.sub(r"'[^']*'", "''", l)
+    s = re.sub(r'"(?:[^"\\]|\\.)*"', '""', s)
+    s = re.sub(r"(^|\s)#.*$", "", s)
+    s = re.sub(r"\[\[.*?\]\]", "[[ ]]", s)
+    if re.search(r"&&.*\|\|", s):
+        print(l.strip())
+PY
+}
+
+# lint_runs <workflow>: every run: script is free of the SC2015 shape (which
+# CI's actionlint + shellcheck 0.9 report as info and fail on, while a newer
+# local shellcheck does not) and passes shellcheck -S info when installed.
+lint_runs() {
+  local d f bad=0 hits
+  d=$(mktemp -d)
+  run_scripts "$1" "$d" >/dev/null || { rm -rf "$d"; return 1; }
+  for f in "$d"/*.sh; do
+    [ -e "$f" ] || continue
+    hits=$(sc2015_shape "$f")
+    if [ -n "$hits" ]; then
+      printf '%s: run: at line %s has the SC2015 shape (A && B || C):\n%s\n' "${1##*/}" "$(basename "$f" .sh)" "$hits" >&2
+      bad=1
+    fi
+    if command -v shellcheck >/dev/null 2>&1 && ! shellcheck -S info -s bash "$f" >&2; then
+      echo "${1##*/}: run: at line $(basename "$f" .sh) has shellcheck findings" >&2
+      bad=1
+    fi
+  done
+  rm -rf "$d"
+  return "$bad"
+}
+
+t_run_scripts_lint() {
+  local f d n
+  for f in queue.yml engine.yml gate.yml; do
+    lint_runs "$WF/$f" || return 1
+  done
+  d=$(mktemp -d)
+  n=$(run_scripts "$WF/engine.yml" "$d")
+  rm -rf "$d"
+  [ "$n" -ge 5 ] || { echo "only $n run: scripts found in engine.yml" >&2; return 1; }
+  # The check rejects the SC2015 shape, on one line and across a continuation,
+  # and accepts `cmd || { ...; }` and && inside [[ ]].
+  d=$(mktemp -d)
+  printf 'jobs:\n  j:\n    steps:\n      - name: bad\n        run: |\n          [ -n "$A" ] && [ -n "$B" ] ||\n            { echo no >&2; exit 1; }\n' >"$d/bad1.yml"
+  printf 'jobs:\n  j:\n    steps:\n      - run: test -n "$A" && echo yes || echo no\n' >"$d/bad2.yml"
+  printf 'jobs:\n  j:\n    steps:\n      - name: good\n        run: |\n          [[ -n "$A" && -n "$B" ]] || { echo "a && b || c" >&2; exit 1; }\n          if [ -z "$A" ] || [ -z "$B" ]; then exit 1; fi\n' >"$d/good.yml"
+  if lint_runs "$d/bad1.yml" 2>/dev/null; then echo "multi-line SC2015 shape accepted" >&2; rm -rf "$d"; return 1; fi
+  if lint_runs "$d/bad2.yml" 2>/dev/null; then echo "one-line SC2015 shape accepted" >&2; rm -rf "$d"; return 1; fi
+  lint_runs "$d/good.yml" || { echo "a clean script was rejected" >&2; rm -rf "$d"; return 1; }
+  rm -rf "$d"
+}
+
+# The build manifest is uploaded whenever it exists and the run was not
+# cancelled, so a failed packaging step still leaves it for diagnosis.
+t_engine_manifest_upload() {
+  local f="$WF/engine.yml" n_pkg n_man
+  step "$f" "Upload build manifest" | grep -qxF "        if: \${{ !cancelled() && hashFiles('build-manifest.json') != '' }}" ||
+    { echo "manifest upload is not if: !cancelled() && the manifest exists" >&2; return 1; }
+  n_pkg=$(body "$f" | grep -n -- "- name: $ENGINE_PKG_STEP\$" | cut -d: -f1)
+  n_man=$(body "$f" | grep -n -- '- name: Upload build manifest$' | cut -d: -f1)
+  [ "$n_pkg" -lt "$n_man" ] || { echo "manifest upload is not after packaging" >&2; return 1; }
 }
 
 # The pin is validated where it is read: executed with good and bad pins.
@@ -613,6 +743,8 @@ run_test "engine.yml: packaging only when called with package: true" t_engine_pa
 run_test "engine.yml: the package step runs both packagers" t_engine_package_exec
 run_test "engine.yml: a release call never saves the cache" t_engine_call_cache
 run_test "engine.yml: a release call has its own concurrency group" t_engine_call_concurrency
+run_test "engine.yml: the manifest is uploaded after a failed packaging" t_engine_manifest_upload
+run_test "run: scripts have no SC2015 shape and pass shellcheck -S info" t_run_scripts_lint
 run_test "queue.yml: fixtures, real check, drift" t_queue
 run_test "gate.yml: triggers, label condition, linked test tree, caches" t_gate
 run_test "gate.yml: each lane reaches the harness and failures fail" t_gate_lanes
