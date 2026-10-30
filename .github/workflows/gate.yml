@@ -13,47 +13,107 @@ name: gate
 # NightMonkey is built and driven as-is at the SHA in NIGHTMONKEY_PIN. A queue
 # patch that changes opcodes or layout fails this gate by design: the
 # NightMonkey change merges first, then a queue PR bumps NIGHTMONKEY_PIN.
+#
+# Two tiers (YurtOS/yurt-sandbox#367), picked by the `tier` job:
+#   full: every jit-test in both lanes, split over SHARDS `jit-test shard N`
+#     jobs that take the `build` job's shell and test sources. Nightly,
+#     manual dispatch, and a pull request labelled `ci:full` (or `gate`).
+#   subset: the JIT_SUBSET path filters in both lanes, in the `build` job.
+#     A pull request without the label that changes an engine input
+#     (ENGINE_INPUTS: the queue, the pins, the build script, this file).
+#   none: any other pull request (scripts, tests, docs); every job skips.
+# The label and the changed files are read through the API when the run
+# starts, not from the event: a push's event carries the labels of the
+# moment it was sent, so a push a few seconds after labelling would take the
+# lower tier and cancel the `labeled` run (yurt-playground#276). The files
+# are the pull request's against its base, so a later docs-only push to a
+# queue PR still runs the subset. Adding the label starts a run (the
+# `labeled` type); any label does, which cancels the run in progress and
+# runs the same tier again. An API error fails the run, never picks a tier.
+#
+# Needs a NightMonkey with `scripts/ci-suite.sh <suite> <lane> -- <args>`
+# (YurtOS/nightmonkey#14) at NIGHTMONKEY_PIN, which also builds against an
+# engine whose config names the ccache launcher.
 
 on:
   workflow_dispatch:
   schedule:
     - cron: '17 3 * * *'
   pull_request:
-    types: [labeled, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
 
-# A push or a `gate` label replaces the PR's run in flight. A run started by
-# any other label is skipped by the job `if:`, so it gets a group of its own
-# (its run id) instead of cancelling the gate. Nightly and dispatch runs on
-# main share one group and queue rather than cancel.
+# A push or a label replaces the PR's run in flight. Nightly and dispatch
+# runs on main share one group and queue rather than cancel.
 concurrency:
-  group: gate-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'gate' && github.run_id || 'run' }}
+  group: gate-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
     shell: bash
 
+env:
+  # The pull request subset (jit_test.py path filters, substrings of the path
+  # under js/src/jit-test/tests), chosen from the per-test times of
+  # NightMonkey's full AOT lane (its run 40547142771): warp/ (Warp
+  # specialisation: CacheIR-driven inlining, bailouts), baseline/ (the
+  # baseline tier) and sunspider/ (whole programs). 339 files, about 560 s of
+  # test time (2.5 min on the 4-core runner) against 11,100 s (46 min) for
+  # all 8,571; every one passed in each green gate and NightMonkey run of
+  # 2026-10-20..28.
+  JIT_SUBSET: warp/ baseline/ sunspider/
+  # jit_test.py --total-chunks: contiguous slices of the sorted list. Four
+  # put 2,300-3,000 s of AOT test time (10-13 min) in each shard. Keep the
+  # shard matrix below in step.
+  SHARDS: 4
+  # A pull request touching one of these (an extended regex over its file
+  # paths) runs the subset.
+  ENGINE_INPUTS: '^(patches/|data/|mozconfig$|UPSTREAM$|NIGHTMONKEY_PIN$|scripts/build-engine\.sh$|scripts/lib/|\.github/workflows/gate\.yml$)'
+
 jobs:
-  jit-test:
-    # Pull requests run the gate only when labeled `gate`. Adding some other
-    # label to a gated PR does not start a run (which, by cancel-in-progress,
-    # would cancel the one in flight).
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'gate') && (github.event.action != 'labeled' || github.event.label.name == 'gate'))
+  tier:
     runs-on: ubuntu-24.04
-    # Engine build (~8 min) + NightMonkey build (~9 min) + one jit-test lane.
-    # ci-suite.sh caps a lane at 60 min (timeout 3600s); the step's 125 min is
-    # a backstop. One job per lane keeps each runner's disk and time budget
-    # independent.
-    timeout-minutes: 200
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [aot, interpreter]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Read only: the pull request's labels and changed files.
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.tier.outputs.mode }}
+    steps:
+      - name: Pick the tier
+        id: tier
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          mode=full
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            labels=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '.[].name')
+            if ! grep -qxE 'ci:full|gate' <<< "$labels"; then
+              files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[].filename')
+              if grep -qE "$ENGINE_INPUTS" <<< "$files"; then mode=subset; else mode=none; fi
+            fi
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          case $mode in
+            full) echo "### Gate: all jit-tests, $SHARDS shards" ;;
+            subset) echo "### Gate: jit-test subset (\`$JIT_SUBSET\`); label the PR \`ci:full\` for all of them" ;;
+            none) echo "### Gate: skipped (no engine input changed); label the PR \`ci:full\` to run it" ;;
+          esac >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: tier
+    if: needs.tier.outputs.mode != 'none'
+    runs-on: ubuntu-24.04
+    # Engine build (~8 min) + NightMonkey build (~2-9 min) + the subset.
+    timeout-minutes: 90
     env:
-      CI_LANE: ${{ matrix.lane }}
+      MODE: ${{ needs.tier.outputs.mode }}
     steps:
       - name: Check out this repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -76,7 +136,7 @@ jobs:
       - name: Build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip python3-venv build-essential cmake
+          sudo apt-get install -y python3-pip python3-venv build-essential cmake ccache zstd
 
       - name: Read the pins
         id: pin
@@ -96,8 +156,53 @@ jobs:
           restore-keys: |
             mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-
 
+      # ccache for SpiderMonkey's C++. Saved below from main only (nightly or
+      # a dispatch on main), one entry per run (the key is immutable); pull
+      # requests restore the newest for the tag commit, else the newest of
+      # any. Not in engine.yml: mach records the launcher in the dist's
+      # js-build-config.json, and package-engine.sh would package it.
+      - name: Restore the SpiderMonkey ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ccache
+          key: ccache-sm-ubuntu-24.04-${{ steps.pin.outputs.commit }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-sm-ubuntu-24.04-${{ steps.pin.outputs.commit }}-
+            ccache-sm-ubuntu-24.04-
+
+      # mach reads CCACHE (the env form of --with-ccache); the mozconfig is
+      # unchanged.
+      - name: Configure ccache
+        run: |
+          {
+            echo "CCACHE=ccache"
+            echo "CCACHE_DIR=$HOME/.ccache"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_MAXSIZE=2G"
+          } >> "$GITHUB_ENV"
+          CCACHE_DIR="$HOME/.ccache" ccache -z
+
       - name: Build the engine from the queue
         run: scripts/build-engine.sh
+
+      - name: ccache statistics
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '### SpiderMonkey ccache'
+            echo '```'
+            ccache -s
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Also after a failed build, but not after a cancellation or timeout.
+      - name: Save the SpiderMonkey ccache
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ccache
+          key: ccache-sm-ubuntu-24.04-${{ steps.pin.outputs.commit }}-${{ github.run_id }}
 
       # Tie the logs to what was tested: the engine's manifest (tag, commit,
       # queue tree, input and toolchain digests) next to the pin.
@@ -148,16 +253,122 @@ jobs:
 
       # ci-suite.sh pipes each lane through scripts/run-jit-tests.sh, which
       # applies scripts/check-test-log.py: a nonempty, passing run is required.
-      - name: jit-tests (${{ matrix.lane }})
+      - name: jit-tests (subset, both lanes)
+        if: env.MODE == 'subset'
         working-directory: nightmonkey
         timeout-minutes: 125
-        run: scripts/ci-suite.sh jit "$CI_LANE"
+        run: |
+          read -ra paths <<< "$JIT_SUBSET"
+          scripts/ci-suite.sh jit both -- "${paths[@]}"
+
+      # The shards' inputs: the built shell (build/bin is self-contained:
+      # inproc-shell.sh runs js-inproc under wasm-jit-runner, both next to it)
+      # and the testsrc members package-test-sources.sh names (non262 whole,
+      # for the shell.js files jit-tests load from it). A tar, because an
+      # artifact does not keep the executable bit.
+      - name: Package the shard inputs
+        if: env.MODE == 'full'
+        run: |
+          tar -C nightmonkey -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin
+          tar -C firefox -rf "$RUNNER_TEMP/shard-inputs.tar" \
+            js/src/jit-test js/src/tests/lib js/src/tests/non262 js/src/jsapi.h
+          zstd -q -T0 --rm "$RUNNER_TEMP/shard-inputs.tar"
+          ls -la "$RUNNER_TEMP/shard-inputs.tar.zst"
+
+      - name: Upload the shard inputs
+        if: env.MODE == 'full'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-shard-inputs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/shard-inputs.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
       - name: Upload execution logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: gate-jit-${{ matrix.lane }}-${{ github.run_attempt }}
+          name: gate-build-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightmonkey-logs
+          if-no-files-found: error
+          retention-days: 7
+
+  # The full jit-tests: each shard runs its slice in both lanes; together the
+  # slices are the whole list (jit_test.py chunks the sorted list after the
+  # excludes). One job per shard keeps each runner's time budget independent.
+  jit-test:
+    name: jit-test shard ${{ matrix.shard }}
+    needs: [tier, build]
+    if: needs.tier.outputs.mode == 'full'
+    runs-on: ubuntu-24.04
+    # ci-suite.sh caps a lane at 60 min (timeout 3600s); a shard's AOT slice
+    # is 10-13 min.
+    timeout-minutes: 140
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare logs
+        run: |
+          mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
+          cp NIGHTMONKEY_PIN "$RUNNER_TEMP/nightmonkey-logs/NIGHTMONKEY_PIN"
+          echo "NightMonkey pin: $(tr -d '[:space:]' < NIGHTMONKEY_PIN)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Read the shard pin
+        id: pin
+        run: |
+          pin=$(tr -d '[:space:]' < NIGHTMONKEY_PIN)
+          printf '%s\n' "$pin" | grep -Eq '^[0-9a-f]{40}$' ||
+            { echo "NIGHTMONKEY_PIN must hold one full 40-hex SHA, got '$pin'" >&2; exit 1; }
+          echo "sha=$pin" >> "$GITHUB_OUTPUT"
+
+      - name: Check out NightMonkey at NIGHTMONKEY_PIN
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: YurtOS/nightmonkey
+          ref: ${{ steps.pin.outputs.sha }}
+          path: nightmonkey
+          persist-credentials: false
+
+      - name: Download the shard inputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gate-shard-inputs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/shard-inputs
+
+      - name: Unpack the shard inputs
+        run: |
+          test ! -e nightmonkey/build
+          mkdir -p "$RUNNER_TEMP/testsrc"
+          zstd -dc "$RUNNER_TEMP/shard-inputs/shard-inputs.tar.zst" | tar -x -C "$RUNNER_TEMP/testsrc"
+          mv "$RUNNER_TEMP/testsrc/build" nightmonkey/build
+          test -x nightmonkey/build/bin/inproc-shell.sh
+          test -f "$RUNNER_TEMP/testsrc/js/src/jit-test/jit_test.py"
+
+      - name: jit-tests (shard ${{ matrix.shard }}, both lanes)
+        working-directory: nightmonkey
+        timeout-minutes: 125
+        run: |
+          if [ "$SHARD" -lt 1 ] || [ "$SHARD" -gt "$SHARDS" ]; then
+            echo "shard $SHARD is outside 1..$SHARDS: keep the matrix and SHARDS in step" >&2
+            exit 1
+          fi
+          NIGHT_FIREFOX_TESTS="$RUNNER_TEMP/testsrc" scripts/ci-suite.sh jit both -- --total-chunks="$SHARDS" --this-chunk="$SHARD"
+
+      - name: Upload execution logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-jit-shard${{ matrix.shard }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nightmonkey-logs
           if-no-files-found: error
           retention-days: 7
