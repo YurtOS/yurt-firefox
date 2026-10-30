@@ -16,7 +16,10 @@ WASMTIME_SHA=77c19ee0437991f9ac7837b9c269d9c7076744f85dad263fea5214cc2723c7ff
 body() { grep -Ev '^[[:space:]]*#' "$1"; }
 
 # has_line <file> <text>: some body line, leading blanks stripped, is exactly <text>.
-has_line() { body "$1" | sed 's/^[[:space:]]*//' | grep -qxF -- "$2"; }
+# It counts (grep -c reads all its input) rather than grep -q, which exits at
+# the first match and, under pipefail, fails the check when GNU sed then dies
+# of SIGPIPE ("sed: couldn't flush stdout: Broken pipe").
+has_line() { [ "$(body "$1" | sed 's/^[[:space:]]*//' | grep -cxF -- "$2")" -ge 1 ]; }
 
 # step <file> <name>: the body of the step named <name>, up to the next step.
 step() { body "$1" | awk -v n="- name: $2" '{t=$0; sub(/^[[:space:]]+/, "", t)} f && t ~ /^- name:/{exit} t == n{f=1} f{print}'; }
@@ -124,7 +127,15 @@ t_permissions() {
     assert_eq "permissions:" "$top" "$f top-level permissions line"
     block=$(body "$WF/$f" | awk '/^permissions:/{f=1; next} f && /^[^[:space:]]/{exit} f && NF{print}')
     assert_eq "  contents: read" "$block" "$f top-level permissions block"
-    ! body "$WF/$f" | grep -Eq '^[[:space:]]+permissions:' || { echo "$f has job-level permissions" >&2; return 1; }
+    if [ "$f" = gate.yml ]; then
+      # One exception: gate.yml's tier job reads the PR's labels and files.
+      assert_eq 1 "$(body "$WF/$f" | grep -cE '^[[:space:]]+permissions:')" "gate.yml job-level permissions blocks"
+      block=$(body "$WF/$f" | awk '/^    permissions:/{f=1; next} f && !/^      /{exit} f{print}' | sed 's/^[[:space:]]*//')
+      assert_eq "contents: read
+pull-requests: read" "$block" "gate.yml tier job permissions"
+    else
+      ! body "$WF/$f" | grep -Eq '^[[:space:]]+permissions:' || { echo "$f has job-level permissions" >&2; return 1; }
+    fi
     ! body "$WF/$f" | grep -q 'secrets\.' || { echo "$f uses secrets" >&2; return 1; }
     ! body "$WF/$f" | grep -Eq 'pull_request_target|workflow_run' || { echo "$f runs on pull_request_target or workflow_run" >&2; return 1; }
   done
@@ -191,8 +202,9 @@ t_queue() {
 
 # gate.yml: the semantic gate. The engine tree built from the queue is the
 # test-source tree; it is never the bare tag or the YurtOS/firefox fork.
-GATE_IF="if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'gate') && (github.event.action != 'labeled' || github.event.label.name == 'gate'))"
-JIT_STEP='jit-tests (${{ matrix.lane }})'
+SUBSET_STEP='jit-tests (subset, both lanes)'
+SHARD_STEP='jit-tests (shard ${{ matrix.shard }}, both lanes)'
+TIER_STEP='Pick the tier'
 BUILD_STEP='Build the engine from the queue'
 
 t_gate() {
@@ -202,11 +214,11 @@ t_gate() {
   body "$f" | grep -Eq '^  schedule:' || { echo "gate.yml lacks schedule" >&2; return 1; }
   body "$f" | grep -Eq "cron: '17 3 \* \* \*'" || { echo "gate.yml lacks the 03:17 UTC nightly cron" >&2; return 1; }
   body "$f" | grep -Eq '^  pull_request:' || { echo "gate.yml lacks pull_request" >&2; return 1; }
-  body "$f" | grep -Eq 'types: \[labeled, synchronize, reopened\]' || { echo "gate.yml pull_request lacks the label types" >&2; return 1; }
-  # PRs run the gate only when labeled `gate`, and adding another label to such
-  # a PR does not restart (and, by cancel-in-progress, cancel) a running gate
-  has_line "$f" "$GATE_IF" || { echo "gate.yml job if: is not the gate-label condition" >&2; return 1; }
-  [ "$(body "$f" | grep -cE '^[[:space:]]+if:')" -ge 1 ]
+  body "$f" | grep -Eq 'types: \[opened, synchronize, reopened, labeled\]' || { echo "gate.yml pull_request lacks the label types" >&2; return 1; }
+  # The tier comes from the tier job's API reads, never from the event's labels
+  ! body "$f" | grep -q 'github.event.pull_request.labels' || { echo "gate.yml reads labels from the event" >&2; return 1; }
+  has_line "$f" "if: needs.tier.outputs.mode != 'none'" || { echo "the build job is not gated on the tier" >&2; return 1; }
+  has_line "$f" "if: needs.tier.outputs.mode == 'full'" || { echo "the shard jobs are not gated on the full tier" >&2; return 1; }
   body "$f" | grep -q 'steps.pin.outputs.sha' || { echo "gate.yml checkout does not use the pin" >&2; return 1; }
   body "$f" | grep -q 'repository: YurtOS/nightmonkey' || { echo "gate.yml does not check out YurtOS/nightmonkey" >&2; return 1; }
   has_line "$f" 'test ! -e nightmonkey/firefox' || { echo "gate.yml does not check the link target is free" >&2; return 1; }
@@ -219,16 +231,21 @@ t_gate() {
   # the test tree is never the fork or a bare tag checkout
   ! body "$f" | grep -Eiq 'YurtOS/firefox|mozilla-firefox|FIREFOX_RELEASE|git (clone|fetch).*(firefox|--branch)' ||
     { echo "gate.yml references the fork or a bare tag as the test tree" >&2; return 1; }
-  [ "$(body "$f" | grep -c 'repository:')" = 1 ] || { echo "gate.yml checks out more than NightMonkey" >&2; return 1; }
+  # NightMonkey, once in the build job and once in the shard job
+  [ "$(body "$f" | grep -c 'repository:')" = 2 ] || { echo "gate.yml checks out more than NightMonkey" >&2; return 1; }
+  [ "$(body "$f" | grep -c 'repository: YurtOS/nightmonkey')" = 2 ] || { echo "gate.yml checks out something besides NightMonkey" >&2; return 1; }
   # nothing may let a failing step pass
   ! body "$f" | grep -q 'continue-on-error' || { echo "gate.yml uses continue-on-error" >&2; return 1; }
   no_or_on "$f" 'ci-suite.sh'
   no_or_on "$f" 'build-engine.sh'
-  has_line "$f" 'run: scripts/ci-suite.sh jit "$CI_LANE"' || { echo "the jit step is not exactly ci-suite.sh jit \"\$CI_LANE\"" >&2; return 1; }
   has_line "$f" 'run: scripts/build-engine.sh' || { echo "the engine step is not exactly build-engine.sh" >&2; return 1; }
-  # ~/.mozbuild is restore-only (engine.yml seeds it from main); rust-cache saves
-  # only on main, so gated PRs do not fill the repository's cache quota
-  ! body "$f" | grep -Eq 'actions/cache(/save)?@' || { echo "gate.yml saves ~/.mozbuild" >&2; return 1; }
+  # ~/.mozbuild is restore-only (engine.yml seeds it from main); the ccache is
+  # the one cache gate.yml saves, only on main; rust-cache saves only on main,
+  # so gated PRs do not fill the repository's cache quota
+  ! body "$f" | grep -Eq 'actions/cache@' || { echo "gate.yml uses actions/cache (restore and save)" >&2; return 1; }
+  assert_eq 1 "$(body "$f" | grep -cE 'actions/cache/save@')" "gate.yml cache saves"
+  [ "$(step "$f" "Save the SpiderMonkey ccache" | grep -cxF '          path: ~/.ccache')" = 1 ] || { echo "gate.yml saves something besides the ccache" >&2; return 1; }
+  has_line "$f" "if: \${{ !cancelled() && github.ref == 'refs/heads/main' }}" || { echo "the ccache save is not main-only" >&2; return 1; }
   has_line "$f" "save-if: \${{ github.ref == 'refs/heads/main' }}" || { echo "rust-cache saves on PRs" >&2; return 1; }
   # the gate uses wasmtime only as NightMonkey's crate; no CLI download
   ! body "$f" | grep -q 'bytecodealliance/wasmtime/releases' || { echo "gate.yml downloads an unused wasmtime CLI" >&2; return 1; }
@@ -237,31 +254,42 @@ t_gate() {
   has_line "$f" 'path: ${{ runner.temp }}/nightmonkey-logs' || { echo "log upload path is not the logs dir" >&2; return 1; }
 }
 
-# Each matrix lane reaches the harness as `ci-suite.sh jit <lane>`, the engine
-# step runs build-engine.sh, and a failing harness or build fails the step.
+# The subset and each shard reach the harness as `ci-suite.sh jit both -- ...`
+# from nightmonkey/, the engine step runs build-engine.sh, and a failing
+# harness or build fails the step.
 t_gate_lanes() {
-  local f="$WF/gate.yml" d lanes lane rc
-  has_line "$f" 'lane: [aot, interpreter]' || { echo "gate.yml lanes are not [aot, interpreter]" >&2; return 1; }
+  local f="$WF/gate.yml" d shard rc s
+  has_line "$f" 'shard: [1, 2, 3, 4]' || { echo "gate.yml shards are not [1, 2, 3, 4]" >&2; return 1; }
+  has_line "$f" 'SHARDS: 4' || { echo "SHARDS is not 4 (the matrix)" >&2; return 1; }
   ! body "$f" | grep -Eq '^[[:space:]]+(exclude|include):' || { echo "gate.yml matrix has exclude/include" >&2; return 1; }
-  has_line "$f" 'CI_LANE: ${{ matrix.lane }}' || { echo "CI_LANE is not the matrix lane" >&2; return 1; }
-  step "$f" "$JIT_STEP" | grep -qE '^[[:space:]]+working-directory: nightmonkey$' ||
-    { echo "the jit step does not run in nightmonkey/" >&2; return 1; }
-  lanes=$(body "$f" | sed -n 's/^[[:space:]]*lane: \[\(.*\)\][[:space:]]*$/\1/p' | tr -d ' ' | tr ',' ' ')
-  assert_eq "aot interpreter" "$lanes" "matrix lanes"
+  for s in "$SUBSET_STEP" "$SHARD_STEP"; do
+    [ "$(step "$f" "$s" | grep -cE '^[[:space:]]+working-directory: nightmonkey$')" = 1 ] ||
+      { echo "step '$s' does not run in nightmonkey/" >&2; return 1; }
+  done
   d=$(mktemp -d)
-  mkdir -p "$d/nightmonkey/scripts" "$d/scripts"
+  mkdir -p "$d/nightmonkey/scripts" "$d/scripts" "$d/tmp"
   printf '#!/bin/sh\necho "$*" >>"$CALLS"\nexit "${STUB_RC:-0}"\n' >"$d/nightmonkey/scripts/ci-suite.sh"
   cp "$d/nightmonkey/scripts/ci-suite.sh" "$d/scripts/build-engine.sh"
   chmod +x "$d/nightmonkey/scripts/ci-suite.sh" "$d/scripts/build-engine.sh"
-  for lane in $lanes; do
+  : >"$d/calls"
+  exec_step "$f" "$SUBSET_STEP" "$d/nightmonkey" JIT_SUBSET="warp/ baseline/" CALLS="$d/calls" >/dev/null 2>&1 ||
+    { echo "subset step failed" >&2; rm -rf "$d"; return 1; }
+  assert_eq "jit both -- warp/ baseline/" "$(cat "$d/calls")" "subset harness call"
+  rc=0
+  exec_step "$f" "$SUBSET_STEP" "$d/nightmonkey" JIT_SUBSET="warp/" CALLS="$d/calls" STUB_RC=3 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a failing harness passes the subset" >&2; rm -rf "$d"; return 1; }
+  for shard in 1 2 3 4; do
     : >"$d/calls"
-    exec_step "$f" "$JIT_STEP" "$d/nightmonkey" CI_LANE="$lane" CALLS="$d/calls" >/dev/null 2>&1 ||
-      { echo "jit step failed for lane $lane" >&2; rm -rf "$d"; return 1; }
-    assert_eq "jit $lane" "$(cat "$d/calls")" "harness call for lane $lane"
+    exec_step "$f" "$SHARD_STEP" "$d/nightmonkey" SHARD="$shard" SHARDS=4 RUNNER_TEMP="$d/tmp" CALLS="$d/calls" >/dev/null 2>&1 ||
+      { echo "shard step failed for shard $shard" >&2; rm -rf "$d"; return 1; }
+    assert_eq "jit both -- --total-chunks=4 --this-chunk=$shard" "$(cat "$d/calls")" "harness call for shard $shard"
     rc=0
-    exec_step "$f" "$JIT_STEP" "$d/nightmonkey" CI_LANE="$lane" CALLS="$d/calls" STUB_RC=3 >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || { echo "a failing harness passes lane $lane" >&2; rm -rf "$d"; return 1; }
+    exec_step "$f" "$SHARD_STEP" "$d/nightmonkey" SHARD="$shard" SHARDS=4 RUNNER_TEMP="$d/tmp" CALLS="$d/calls" STUB_RC=3 >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || { echo "a failing harness passes shard $shard" >&2; rm -rf "$d"; return 1; }
   done
+  rc=0
+  exec_step "$f" "$SHARD_STEP" "$d/nightmonkey" SHARD=5 SHARDS=4 RUNNER_TEMP="$d/tmp" CALLS="$d/calls" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a shard outside 1..SHARDS passes" >&2; rm -rf "$d"; return 1; }
   : >"$d/calls"
   exec_step "$f" "$BUILD_STEP" "$d" CALLS="$d/calls" >/dev/null 2>&1 || { echo "engine step failed" >&2; rm -rf "$d"; return 1; }
   assert_eq "" "$(cat "$d/calls")" "build-engine.sh called once with no arguments"
@@ -269,6 +297,49 @@ t_gate_lanes() {
   rc=0
   exec_step "$f" "$BUILD_STEP" "$d" CALLS="$d/calls" STUB_RC=3 >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || { echo "a failing engine build passes" >&2; rm -rf "$d"; return 1; }
+  rm -rf "$d"
+}
+
+# The tier step, executed with a stub gh: a `ci:full` or `gate` label runs
+# everything; otherwise a changed engine input runs the subset and anything
+# else nothing; non-PR events run everything; an API error fails the step.
+t_gate_tier() {
+  local f="$WF/gate.yml" d inputs c ev labels files want rc
+  inputs=$(body "$f" | sed -n "s/^  ENGINE_INPUTS: '\(.*\)'$/\1/p")
+  [ -n "$inputs" ] || { echo "gate.yml lacks ENGINE_INPUTS" >&2; return 1; }
+  d=$(mktemp -d)
+  mkdir -p "$d/bin"
+  printf '%s\n' '#!/bin/sh' '[ -z "${GH_FAIL:-}" ] || exit 1' 'case "$*" in' \
+    '  *"/labels"*) printf "%b" "$LABELS" ;;' '  *"/files"*) printf "%b" "$FILES" ;;' \
+    '  *) exit 1 ;;' 'esac' >"$d/bin/gh"
+  chmod +x "$d/bin/gh"
+  for c in \
+    'pull_request|ci:full\n|docs/x.md\n|full' \
+    'pull_request|gate\n|README.md\n|full' \
+    'pull_request|ready\n|patches/0001-x.patch\n|subset' \
+    'pull_request||NIGHTMONKEY_PIN\n|full' \
+    'pull_request|ready\n|README.md\nNIGHTMONKEY_PIN\n|full' \
+    'pull_request||docs/NIGHTMONKEY_PIN.md\n|none' \
+    'pull_request||README.md\nmozconfig\n|subset' \
+    'pull_request||scripts/lib/patch-queue.sh\n|subset' \
+    'pull_request||.github/workflows/gate.yml\n|subset' \
+    'pull_request|ci:fuller\n|scripts/check-queue.sh\ndocs/mozconfig.md\n|none' \
+    'schedule|||full' \
+    'workflow_dispatch|||full'; do
+    IFS='|' read -r ev labels files want <<<"$c"
+    : >"$d/out"
+    exec_step "$f" "$TIER_STEP" "$d" PATH="$d/bin:$PATH" GITHUB_EVENT_NAME="$ev" GITHUB_REPOSITORY=o/r PR=7 \
+      LABELS="$labels" FILES="$files" ENGINE_INPUTS="$inputs" SHARDS=4 JIT_SUBSET=warp/ \
+      GITHUB_OUTPUT="$d/out" GITHUB_STEP_SUMMARY="$d/summary" >/dev/null 2>&1 ||
+      { echo "tier step failed for $c" >&2; rm -rf "$d"; return 1; }
+    assert_eq "mode=$want" "$(cat "$d/out")" "tier for $c"
+  done
+  : >"$d/out"
+  rc=0
+  exec_step "$f" "$TIER_STEP" "$d" PATH="$d/bin:$PATH" GITHUB_EVENT_NAME=pull_request GITHUB_REPOSITORY=o/r PR=7 GH_FAIL=1 \
+    ENGINE_INPUTS="$inputs" GITHUB_OUTPUT="$d/out" GITHUB_STEP_SUMMARY="$d/summary" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "an API error picks a tier" >&2; rm -rf "$d"; return 1; }
+  assert_eq "" "$(cat "$d/out")" "no tier on an API error"
   rm -rf "$d"
 }
 
@@ -384,35 +455,67 @@ print(re.sub(r"\$\{\{(.*?)\}\}", lambda m: show(ev(m.group(1))), template))
 PY
 }
 
-# The gate's concurrency group: a push or a `gate` label on a PR replaces the
-# run in flight; adding any other label (whose run the job if: skips) must not
-# join that group, or it would cancel the gate. Nightly and dispatch runs on
-# main share one group and are never cancelled.
+# The gate's concurrency group: a push, a `ci:full` or a `gate` label on a PR
+# replaces the run in flight. A run started by any other label gets a group
+# of its own (its run id), so it cancels nothing, and the tier job's `if:`
+# skips it (every other job needs the tier). Nightly and dispatch runs on main
+# share one group and are never cancelled.
 t_gate_concurrency() {
-  local f="$WF/gate.yml" group cancel a b c c2 d e
+  local f="$WF/gate.yml" group cancel cond a b b2 c c2 d e ev
   group=$(concurrency_value "$f" group)
   cancel=$(concurrency_value "$f" cancel-in-progress)
   [ -n "$group" ] && [ -n "$cancel" ] || { echo "gate.yml lacks concurrency group / cancel-in-progress" >&2; return 1; }
   a=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":101,"event":{"action":"synchronize"}}')
-  b=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":102,"event":{"action":"labeled","label":{"name":"gate"}}}')
+  b=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":102,"event":{"action":"labeled","label":{"name":"ci:full"}}}')
+  b2=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":107,"event":{"action":"labeled","label":{"name":"gate"}}}')
   c=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":103,"event":{"action":"labeled","label":{"name":"ready"}}}')
   c2=$(gh_eval "$group" '{"event_name":"pull_request","ref":"refs/pull/7/merge","run_id":104,"event":{"action":"labeled","label":{"name":"docs"}}}')
   d=$(gh_eval "$group" '{"event_name":"schedule","ref":"refs/heads/main","run_id":105,"event":{}}')
   e=$(gh_eval "$group" '{"event_name":"workflow_dispatch","ref":"refs/heads/main","run_id":106,"event":{}}')
   [ -n "$a" ] && [ -n "$c" ] && [ -n "$d" ] || { echo "group did not evaluate" >&2; return 1; }
-  assert_eq "$a" "$b" "synchronize and a gate label share the PR's group"
-  [ "$c" != "$a" ] || { echo "an unrelated label joins the gate's group ($c) and would cancel it" >&2; return 1; }
+  assert_eq "$a" "$b" "synchronize and a ci:full label share the PR's group"
+  assert_eq "$a" "$b2" "synchronize and a gate label share the PR's group"
+  [ "$c" != "$a" ] || { echo "an unrelated label joins the PR's group ($c) and would cancel its run" >&2; return 1; }
   [ "$c" != "$c2" ] || { echo "unrelated-label runs share a group ($c)" >&2; return 1; }
   assert_eq "$d" "$e" "nightly and dispatch on main share a group"
   [ "$d" != "$a" ] || { echo "main runs share the PR's group" >&2; return 1; }
   assert_eq true "$(gh_eval "$cancel" '{"event_name":"pull_request"}')" "PR runs cancel in progress"
   assert_eq false "$(gh_eval "$cancel" '{"event_name":"schedule"}')" "nightly runs are not cancelled"
   assert_eq false "$(gh_eval "$cancel" '{"event_name":"workflow_dispatch"}')" "dispatch runs are not cancelled"
+  # The tier job runs on everything but an unrelated-label run.
+  cond=$(body "$f" | awk '/^  tier:$/{f=1; next} f && /^  [^ ]/{exit} f && /^    if: /{sub(/^    if: /, ""); print; exit}')
+  [ -n "$cond" ] || { echo "the tier job has no if:" >&2; return 1; }
+  for ev in '{"event_name":"pull_request","event":{"action":"synchronize"}}:true' \
+            '{"event_name":"pull_request","event":{"action":"opened"}}:true' \
+            '{"event_name":"pull_request","event":{"action":"labeled","label":{"name":"ci:full"}}}:true' \
+            '{"event_name":"pull_request","event":{"action":"labeled","label":{"name":"gate"}}}:true' \
+            '{"event_name":"pull_request","event":{"action":"labeled","label":{"name":"ready"}}}:false' \
+            '{"event_name":"schedule","event":{}}:true'; do
+    assert_eq "${ev##*:}" "$(gh_eval "\${{ $cond }}" "${ev%:*}")" "tier job runs for ${ev%:*}"
+  done
+  # Every other job needs the tier, so skipping it skips them.
+  assert_eq "needs: tier
+needs: [tier, build]" "$(body "$f" | grep -E '^    needs:' | sed 's/^[[:space:]]*//')" "jobs need the tier"
+}
+
+# "Re-run failed jobs" reruns a failed shard but not the build job that
+# uploaded its inputs: the artifact's name must not depend on the attempt,
+# and a rerun build replaces it.
+t_gate_shard_inputs() {
+  local f="$WF/gate.yml" up down
+  up=$(step "$f" "Upload the shard inputs" | sed -n 's/^[[:space:]]*name: //p')
+  down=$(step "$f" "Download the shard inputs" | sed -n 's/^[[:space:]]*name: //p')
+  [ -n "$up" ] || { echo "no shard-inputs upload name" >&2; return 1; }
+  assert_eq "$up" "$down" "the shards download the build job's artifact"
+  case $up in *run_attempt*) echo "the shard-inputs name depends on the attempt: $up" >&2; return 1 ;; esac
+  [ "$(step "$f" "Upload the shard inputs" | grep -cxE '[[:space:]]+overwrite: true')" = 1 ] ||
+    { echo "the shard-inputs upload does not overwrite" >&2; return 1; }
 }
 
 # The pin is validated where it is read: executed with good and bad pins.
 t_gate_pin() {
   check_pin_step "$WF/gate.yml" "Read the pins"
+  check_pin_step "$WF/gate.yml" "Read the shard pin"
 }
 
 # The logs artifact carries provenance: the logs dir is created (with the pin)
@@ -420,7 +523,7 @@ t_gate_pin() {
 # and shown in the step summary after the build.
 t_gate_provenance() {
   local f="$WF/gate.yml" d pin=0123456789abcdef0123456789abcdef01234567 prep build rec
-  prep=$(body "$f" | grep -n -- '- name: Prepare logs$' | cut -d: -f1 || true)
+  prep=$(body "$f" | grep -n -- '- name: Prepare logs$' | head -1 | cut -d: -f1 || true)
   build=$(body "$f" | grep -nF -- "- name: $BUILD_STEP" | cut -d: -f1 || true)
   rec=$(body "$f" | grep -n -- '- name: Record provenance$' | cut -d: -f1 || true)
   [ -n "$prep" ] && [ -n "$build" ] && [ -n "$rec" ] || { echo "missing Prepare logs / build / Record provenance steps" >&2; return 1; }
@@ -448,9 +551,11 @@ run_test "read-only permissions, no secrets" t_permissions
 run_test "checkouts do not persist credentials" t_credentials
 run_test "engine.yml: smoke, wasmtime digest, triggers" t_engine
 run_test "queue.yml: fixtures, real check, drift" t_queue
-run_test "gate.yml: triggers, label condition, linked test tree, caches" t_gate
-run_test "gate.yml: each lane reaches the harness and failures fail" t_gate_lanes
+run_test "gate.yml: triggers, tiers, linked test tree, caches" t_gate
+run_test "gate.yml: the subset and each shard reach the harness and failures fail" t_gate_lanes
+run_test "gate.yml: the tier comes from the labels and the changed files" t_gate_tier
 run_test "gate.yml: the pin step rejects bad pins" t_gate_pin
 run_test "gate.yml: an unrelated label does not cancel the gate" t_gate_concurrency
+run_test "gate.yml: shard inputs survive a rerun of failed shards" t_gate_shard_inputs
 run_test "gate.yml: logs carry the pin and the build manifest" t_gate_provenance
 finish
