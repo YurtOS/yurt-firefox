@@ -910,10 +910,12 @@ t_run_scripts_lint() {
       *) printf 'not flagged:\n%b\n' "$body" >&2; rm -rf "$d"; return 1 ;; esac
   done
   # Intentionally over-flagged (not SC2015, but && and || share a joined
-  # line): && inside [[ ]], a quoted heredoc body, `a && b; c || d`, and a
-  # quoted string. Rewrite them as if/then or split the lines.
+  # line): && inside [[ ]], a quoted heredoc body, `a && b; c || d`, a
+  # quoted string, and || before && (`a || b && c`, the order SC2015 does not
+  # name). Rewrite them as if/then or split the lines.
   for body in \
     '[[ -n "$A" && -n "$B" ]] || exit 1' \
+    'test -n "$A" || test -n "$B" && echo one' \
     "cat <<'EOF'\na && b || c\nEOF" \
     'test -n "$A" && echo a; test -n "$B" || exit 1' \
     'echo "a && b || c"'; do
