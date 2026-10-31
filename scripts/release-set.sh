@@ -264,7 +264,7 @@ PY
     [ "$size" -le "$cap" ] || die "$name: $size bytes exceeds the $cap-byte release asset cap"
     top=$(zstd -q -dc "$work/download/$name" | python3 -I -c '
 import posixpath, re, sys, tarfile
-tops, dirs = set(), set()
+tops, dirs, files = set(), set(), set()
 def inside(path, top_):
     p = posixpath.normpath(path)
     return not p.startswith("/") and (p == top_ or p.startswith(top_ + "/"))
@@ -285,11 +285,18 @@ for m in tarfile.open(fileobj=sys.stdin.buffer, mode="r|"):
                 or not inside(target, parts[0])):
             sys.exit("symlink %r -> %r may leave %s/" % (name, m.linkname, parts[0]))
     elif m.islnk():
-        if not inside(m.linkname, parts[0]):
-            sys.exit("hardlink %r -> %r leaves %s/" % (name, m.linkname, parts[0]))
+        # GNU tar strips a leading prefix through ../ from hard-link targets,
+        # so the target is used as written: no absolute path, no "..", and it
+        # must be a regular file met earlier in the same top-level directory.
+        lp = m.linkname.split("/")
+        if (m.linkname.startswith("/") or ".." in lp or not inside(m.linkname, parts[0])
+                or "/".join(x for x in lp if x not in ("", ".")) not in files):
+            sys.exit("hardlink %r -> %r is not an earlier regular file of %s/" % (name, m.linkname, parts[0]))
     elif not (m.isfile() or m.isdir()):
         sys.exit("member %r is not a regular file, directory or link" % name)
     tops.add(parts[0])
+    if m.isfile():
+        files.add(name)
     if len(parts) == 1 and m.isdir():
         dirs.add(parts[0])
     if len(parts) > 1:
