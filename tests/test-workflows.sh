@@ -894,36 +894,52 @@ t_run_scripts_lint() {
   n=$(run_scripts "$WF/engine.yml" "$d")
   rm -rf "$d"
   [ "$n" -ge 5 ] || { echo "only $n run: scripts found in engine.yml" >&2; return 1; }
-  # The check rejects the SC2015 shape, on one line and across a continuation,
-  # and accepts `cmd || { ...; }` and && inside [[ ]].
+  # The shape check is a conservative backstop for CI's shellcheck 0.9 (the
+  # hosted actionlint is the real gate): any joined logical line holding both
+  # && and || is flagged, quotes, heredocs, `;` and [[ ]] included. A flagged
+  # line is rewritten as an explicit if/then, the repo style.
   d=$(mktemp -d)
-  printf 'jobs:\n  j:\n    steps:\n      - name: bad\n        run: |\n          [ -n "$A" ] && [ -n "$B" ] ||\n            { echo no >&2; exit 1; }\n' >"$d/bad1.yml"
-  printf 'jobs:\n  j:\n    steps:\n      - run: test -n "$A" && echo yes || echo no\n' >"$d/bad2.yml"
-  printf 'jobs:\n  j:\n    steps:\n      - name: good\n        run: |\n          [[ -n "$A" && -n "$B" ]] || { echo "a && b || c" >&2; exit 1; }\n          if [ -z "$A" ] || [ -z "$B" ]; then exit 1; fi\n' >"$d/good.yml"
-  if lint_runs "$d/bad1.yml" 2>/dev/null; then echo "multi-line SC2015 shape accepted" >&2; rm -rf "$d"; return 1; fi
-  if lint_runs "$d/bad2.yml" 2>/dev/null; then echo "one-line SC2015 shape accepted" >&2; rm -rf "$d"; return 1; fi
-  # && ending one line, || on the next: only found by joining continuations.
-  printf 'jobs:
-  j:
-    steps:
-      - name: bad
-        run: |
-          [ -n "$A" ] &&
-            [ -n "$B" ] || exit 1
-' >"$d/bad3.yml"
-  if lint_runs "$d/bad3.yml" 2>/dev/null; then echo "SC2015 shape across a continuation accepted" >&2; rm -rf "$d"; return 1; fi
-  # A comment line between the && line and the rest does not end the line.
-  printf 'jobs:\n  j:\n    steps:\n      - name: bad\n        run: |\n          [ -n "$A" ] &&\n            # B must be set too\n            [ -n "$B" ] || exit 1\n' >"$d/bad4.yml"
-  if lint_runs "$d/bad4.yml" 2>/dev/null; then echo "SC2015 shape around a comment line accepted" >&2; rm -rf "$d"; return 1; fi
-  # Every YAML block scalar header is a multi-line script (|+, >-, |2, >2-, ...).
+  local body
+  for body in \
+    '[ -n "$A" ] && [ -n "$B" ] ||\n  { echo no >&2; exit 1; }' \
+    'test -n "$A" && echo yes || echo no' \
+    '[ -n "$A" ] &&\n  [ -n "$B" ] || exit 1' \
+    '[ -n "$A" ] &&\n  # B must be set too\n  [ -n "$B" ] || exit 1' \
+    '[ -n "$A" ] && # A first\n  [ -n "$B" ] || exit 1' \
+    '[ -n "$A" ] && { [ -n "$B" ]; } || exit 1' \
+    'echo "<<EOF"\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
+    'echo hi # <<EOF\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
+    'cat <<EOF\n$([ -n "$A" ] && [ -n "$B" ] || exit 1)\nEOF' \
+    'cat <<<EOF\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
+    'echo $((a<<b))\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
+    'a && x=$(y; z) || c' \
+    'echo "$(a && b || c)"'; do
+    printf 'jobs:\n  j:\n    steps:\n      - name: case\n        run: |\n' >"$d/w.yml"
+    printf '%b\n' "$body" | sed 's/^/          /' >>"$d/w.yml"
+    case $(lint_runs "$d/w.yml" 2>&1) in *"has the SC2015 shape"*) ;;
+      *) printf 'not flagged:\n%b\n' "$body" >&2; rm -rf "$d"; return 1 ;; esac
+  done
+  # Intentionally over-flagged (not SC2015, but && and || share a joined
+  # line): && inside [[ ]], a quoted heredoc body, `a && b; c || d`, and a
+  # quoted string. Rewrite them as if/then or split the lines.
+  for body in \
+    '[[ -n "$A" && -n "$B" ]] || exit 1' \
+    "cat <<'EOF'\na && b || c\nEOF" \
+    'test -n "$A" && echo a; test -n "$B" || exit 1' \
+    'echo "a && b || c"'; do
+    printf 'jobs:\n  j:\n    steps:\n      - name: case\n        run: |\n' >"$d/w.yml"
+    printf '%b\n' "$body" | sed 's/^/          /' >>"$d/w.yml"
+    case $(lint_runs "$d/w.yml" 2>&1) in *"has the SC2015 shape"*) ;;
+      *) printf 'expected to be over-flagged:\n%b\n' "$body" >&2; rm -rf "$d"; return 1 ;; esac
+  done
+  # Every YAML block scalar header is a multi-line script (|+, >-, |2, ...).
   for hdr in '|+' '>-' '|2' '|2-' '|-2' '>+'; do
     printf 'jobs:\n  j:\n    steps:\n      - name: bad\n        run: %s\n          [ -n "$A" ] && [ -n "$B" ] || exit 1\n' "$hdr" >"$d/bad5.yml"
     case $(lint_runs "$d/bad5.yml" 2>&1) in *"has the SC2015 shape"*) ;;
       *) echo "block scalar run: $hdr is not read as a script" >&2; rm -rf "$d"; return 1 ;; esac
   done
-  # Not SC2015: a quoted heredoc body, and && and || in separate commands.
-  printf 'jobs:\n  j:\n    steps:\n      - name: good\n        run: |\n          cat <<'"'"'EOF'"'"'\n          a && b || c\n          EOF\n          cat <<-END\n          x && y || z\n          END\n          test -n "$A" && echo a; test -n "$B" || exit 1\n' >"$d/good2.yml"
-  lint_runs "$d/good2.yml" || { echo "a heredoc or separate commands were rejected" >&2; rm -rf "$d"; return 1; }
+  # Accepted: the if/then form, and || alone or && alone on a line.
+  printf 'jobs:\n  j:\n    steps:\n      - name: good\n        run: |\n          if [ -z "$A" ] || [ -z "$B" ]; then exit 1; fi\n          cmd || { echo no >&2; exit 1; }\n          test -n "$A" && echo a\n' >"$d/good.yml"
   # An info-level shellcheck finding (SC2086, unquoted expansion) fails too.
   if command -v shellcheck >/dev/null 2>&1; then
     printf 'jobs:
