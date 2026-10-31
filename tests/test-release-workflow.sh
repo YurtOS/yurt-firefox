@@ -728,7 +728,7 @@ t_prepare_size_cap() {
 t_prepare_toolchain_layout() {
   golden
   local s case
-  for case in two-tops no-clang file-top abs-link escape-link out-hardlink device bad-name newline-name; do
+  for case in two-tops no-clang file-top abs-link escape-link out-hardlink device bad-name newline-name chain-link; do
     setup_set
     TC=$(mktemp -d "$BASE/tcl.XXXXXX")
     cp "$BASE/tc/sysroot-wasm32-wasi.tar.zst" "$TC/"
@@ -739,7 +739,7 @@ t_prepare_toolchain_layout() {
       two-tops) mkdir -p "$s/extra"; echo x >"$s/extra/f"; (cd "$s" && "$TAR" -cf - clang extra) | zstd -q -c >"$TC/clang.tar.zst" ;;
       no-clang) rm "$s/clang/bin/clang++"; (cd "$s" && "$TAR" -cf - clang) | zstd -q -c >"$TC/clang.tar.zst" ;;
       file-top) echo x >"$s/README"; (cd "$s" && "$TAR" -cf - README) | zstd -q -c >"$TC/clang.tar.zst" ;;
-      abs-link | escape-link | out-hardlink | device | bad-name | newline-name)
+      abs-link | escape-link | out-hardlink | device | bad-name | newline-name | chain-link)
         python3 - "$TC/clang.tar" "$case" <<'PY'
 import io, sys, tarfile
 out, case = sys.argv[1:]
@@ -759,6 +759,10 @@ with tarfile.open(out, "w", format=tarfile.GNU_FORMAT) as t:
         i.type, i.linkname = tarfile.LNKTYPE, "etc/passwd"
     elif case == "device":
         i.type, i.devmajor, i.devminor = tarfile.CHRTYPE, 1, 3
+    elif case == "chain-link":
+        # Each target stays inside as text, but esc resolves through d.
+        j = tarfile.TarInfo(top + "/d"); j.type, j.linkname = tarfile.SYMTYPE, "."; t.addfile(j)
+        i = tarfile.TarInfo(top + "/esc"); i.type, i.linkname = tarfile.SYMTYPE, "d/d/../.."
     else:
         i.type, i.linkname = tarfile.SYMTYPE, "clang"
     t.addfile(i)
@@ -872,6 +876,17 @@ PY
   finalize; assert_eq 1 "$RC" "engine re-made after prepare: $OUT"
   case $OUT in *"$P-wasm32-wasi.tar.zst: sha256 is not prepare's"*) ;; *) echo "engine swap not named: $OUT" >&2; return 1 ;; esac
   setup_set; prepare; FIN_ENGINE='' finalize; assert_eq 2 "$RC" "no engine digest: $OUT"
+  # The work dir's copy of the manifest changed after prepare.
+  setup_set; prepare; assert_eq 0 "$RC" "$OUT"
+  python3 - "$W/package-manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+m["rust_version"] = "rustc 0.0 (changed)"
+json.dump(m, open(sys.argv[1], "w"))
+PY
+  finalize; assert_eq 1 "$RC" "package-manifest.json changed: $OUT"
+  case $OUT in *"package-manifest.json is not the engine archive's MANIFEST.json"*) ;;
+    *) echo "changed package-manifest.json not named: $OUT" >&2; return 1 ;; esac
 }
 
 # setup_final: a finalized release set copied to D (as publish downloads it)
