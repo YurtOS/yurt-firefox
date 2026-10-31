@@ -544,10 +544,13 @@ t_engine_package_steps() {
   printf '%s\n' "$s" | grep -qE '^[[:space:]]+PACKAGE_VERSION: \$\{\{ inputs\.version \}\}$' &&
     printf '%s\n' "$s" | grep -qE '^[[:space:]]+PACKAGE_REVISION: \$\{\{ inputs\.revision \}\}$' ||
     { echo "package step env does not bind inputs.version/revision" >&2; return 1; }
-  # The upload: package-out/ as engine-package, failing when empty.
+  # The upload: package-out/ as engine-package-<run attempt> (a re-run never
+  # collides with an earlier attempt's upload), uncompressed (the archives
+  # are zstd), failing when empty.
   s=$(step "$f" "$ENGINE_UPLOAD_PKG_STEP")
   printf '%s\n' "$s" | grep -qE 'uses: actions/upload-artifact@[0-9a-f]{40}' || { echo "package upload is not upload-artifact" >&2; return 1; }
-  printf '%s\n' "$s" | grep -qE '^[[:space:]]+name: engine-package$' || { echo "package artifact is not engine-package" >&2; return 1; }
+  printf '%s\n' "$s" | grep -qxF '          name: engine-package-${{ github.run_attempt }}' || { echo "package artifact is not engine-package-<attempt>" >&2; return 1; }
+  printf '%s\n' "$s" | grep -qx '          compression-level: 0' || { echo "package upload recompresses" >&2; return 1; }
   printf '%s\n' "$s" | grep -qE '^[[:space:]]+path: package-out/$' || { echo "package upload path is not package-out/" >&2; return 1; }
   printf '%s\n' "$s" | grep -qE '^[[:space:]]+if-no-files-found: error$' || { echo "package upload tolerates no files" >&2; return 1; }
   # Both run only for a call with package: true.
@@ -575,11 +578,11 @@ t_engine_package_exec() {
   chmod +x "$d/scripts/"*.sh
   : >"$d/calls"; : >"$d/out"
   exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" PACKAGE_VERSION=147.0.4 \
-    PACKAGE_REVISION=1 >/dev/null 2>&1 || { echo "package step failed" >&2; rm -rf "$d"; return 1; }
+    PACKAGE_REVISION=1 GITHUB_RUN_ATTEMPT=3 >/dev/null 2>&1 || { echo "package step failed" >&2; rm -rf "$d"; return 1; }
   assert_eq "package-test-sources.sh --tree firefox --out package-out --version 147.0.4 --revision 1 --jstests
 package-engine.sh --dist firefox/obj-nightmonkey-sm/dist --manifest build-manifest.json --out package-out --version 147.0.4 --revision 1 --test-sources package-out" \
     "$(cat "$d/calls")" "packager calls" || { rm -rf "$d"; return 1; }
-  grep -qx 'artifact=engine-package' "$d/out" || { echo "no artifact=engine-package output" >&2; rm -rf "$d"; return 1; }
+  grep -qx 'artifact=engine-package-3' "$d/out" || { echo "no artifact=engine-package-<attempt> output: $(cat "$d/out")" >&2; rm -rf "$d"; return 1; }
   for env in "PACKAGE_VERSION= PACKAGE_REVISION=1" "PACKAGE_VERSION=147.0.4 PACKAGE_REVISION="; do
     : >"$d/calls"
     rc=0

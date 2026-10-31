@@ -103,7 +103,7 @@ t_publish_condition() {
 # Only publish may write; it gets the token through github.token, never a
 # secret; and it re-checks main, verifies, then publishes, in that order.
 t_publish_job() {
-  local j n_main n_dl n_verify n_pub
+  local j n_tag n_main n_dl n_verify n_pub
   j=$(job publish)
   assert_eq "    permissions:
       contents: write" "$(grep -A1 -E '^    permissions:' "$j")" "publish permissions"
@@ -113,13 +113,16 @@ t_publish_job() {
   ! body "$F" | grep -q 'secrets\.' || { echo "release.yml uses secrets" >&2; return 1; }
   grep -qx '          GH_TOKEN: ${{ github.token }}' "$j" || { echo "publish does not use github.token" >&2; return 1; }
   grep -qx '          fetch-depth: 0' "$j" || { echo "publish checkout is not full history" >&2; return 1; }
+  n_tag=$(grep -n -- '- name: Require the tag to still name this commit$' "$j" | cut -d: -f1)
   n_main=$(grep -n -- "- name: Require the tag's commit on main$" "$j" | cut -d: -f1)
   n_dl=$(grep -n -- '- name: Download the release set$' "$j" | cut -d: -f1)
   n_verify=$(grep -n -- '- name: Verify the release set$' "$j" | cut -d: -f1)
   n_pub=$(grep -n -- '- name: Publish the release$' "$j" | cut -d: -f1)
-  [ -n "$n_main" ] && [ -n "$n_dl" ] && [ -n "$n_verify" ] && [ -n "$n_pub" ] &&
-    [ "$n_main" -lt "$n_dl" ] && [ "$n_dl" -lt "$n_verify" ] && [ "$n_verify" -lt "$n_pub" ] ||
-    { echo "publish steps are not main < download < verify < publish" >&2; return 1; }
+  [ -n "$n_tag" ] && [ -n "$n_main" ] && [ -n "$n_dl" ] && [ -n "$n_verify" ] && [ -n "$n_pub" ] &&
+    [ "$n_tag" -lt "$n_main" ] && [ "$n_main" -lt "$n_dl" ] && [ "$n_dl" -lt "$n_verify" ] && [ "$n_verify" -lt "$n_pub" ] ||
+    { echo "publish steps are not tag-commit < main < download < verify < publish" >&2; return 1; }
+  step "$(job accept)" 'Finalize the release manifest' | grep -qx '          ENGINE_SHA256: ${{ steps.prepare.outputs.engine_sha256 }}' ||
+    { echo "finalize does not take prepare's engine digest" >&2; return 1; }
   grep -qx '          MANIFEST_SHA256: ${{ needs.accept.outputs.manifest-sha256 }}' "$j" ||
     { echo "publish does not take the manifest digest from accept's outputs" >&2; return 1; }
   grep -qx '      manifest-sha256: ${{ steps.finalize.outputs.manifest_sha256 }}' "$(job accept)" ||
@@ -140,8 +143,26 @@ t_accept_job() {
   step_run "$j" "Accept the engine" | grep -q -- '--require-clean-runner' || { echo "accept-engine.sh without --require-clean-runner" >&2; return 1; }
   grep -Eq '^    timeout-minutes: [0-9]+$' "$j" || { echo "accept has no timeout" >&2; return 1; }
   [ "$(sed -n 's/^    timeout-minutes: //p' "$j")" -ge 180 ] || { echo "accept timeout below 180 minutes" >&2; return 1; }
-  grep -qx '          name: release-set' "$j" || { echo "accept does not upload release-set" >&2; return 1; }
-  grep -qx '          if-no-files-found: error' "$j" || { echo "release-set upload tolerates no files" >&2; return 1; }
+  step "$j" 'Upload the release set' | grep -qx '          name: release-set-${{ github.run_attempt }}' ||
+    { echo "accept does not upload release-set-<attempt>" >&2; return 1; }
+  grep -qx '      release-set-artifact: release-set-${{ github.run_attempt }}' "$j" ||
+    { echo "accept does not output the release-set artifact name" >&2; return 1; }
+  step "$j" 'Upload the release set' | grep -qx '          if-no-files-found: error' || { echo "release-set upload tolerates no files" >&2; return 1; }
+  # The archives are zstd already.
+  step "$j" 'Upload the release set' | grep -qx '          compression-level: 0' || { echo "release-set upload recompresses" >&2; return 1; }
+}
+
+# Every artifact a job downloads is named by the job output of the job that
+# uploaded it (names carry the run attempt, so a re-run never collides with an
+# earlier attempt's upload, and a re-run of a later job reads its producer's).
+t_artifact_names() {
+  step "$(job accept)" 'Download the engine package' | grep -qx '          name: ${{ needs.build.outputs.package-artifact }}' ||
+    { echo "accept does not download the build's named package" >&2; return 1; }
+  step "$(job publish)" 'Download the release set' | grep -qx '          name: ${{ needs.accept.outputs.release-set-artifact }}' ||
+    { echo "publish does not download accept's named release set" >&2; return 1; }
+  local n
+  n=$(body "$F" | grep -cE '^[[:space:]]+name: (engine-package|release-set)$' || true)
+  assert_eq 0 "$n" "fixed artifact names"
 }
 
 # The release's own concurrency group never equals engine.yml's group for the
@@ -259,10 +280,13 @@ t_steps() {
   run_step accept 'Accept the engine' \
     'accept-engine --package /rt/release/package --testsrc /rt/release/testsrc --toolchain /tc --sysroot /sr --nightmonkey nightmonkey --require-clean-runner' \
     TOOLCHAIN_ROOT=/tc SYSROOT=/sr
-  run_step accept 'Finalize the release manifest' 'release-set finalize --work /rt/release --tag engine-v147.0.4-1' TAG=engine-v147.0.4-1
+  run_step accept 'Finalize the release manifest' 'release-set finalize --work /rt/release --tag engine-v147.0.4-1 --engine-sha256 ee' \
+    TAG=engine-v147.0.4-1 ENGINE_SHA256=ee
+  run_step publish 'Require the tag to still name this commit' 'release-check tag-commit engine-v147.0.4-1 abc123' TAG=engine-v147.0.4-1
   run_step publish "Require the tag's commit on main" 'require-ref-on-main abc123'
   run_step publish 'Verify the release set' \
-    'release-set verify --dir /rt/release-set --manifest-sha256 ff --version 147.0.4 --revision 1' MANIFEST_SHA256=ff VERSION=147.0.4 REVISION=1
+    'release-set verify --dir /rt/release-set --manifest-sha256 ff --version 147.0.4 --revision 1 --tag engine-v147.0.4-1' \
+    MANIFEST_SHA256=ff VERSION=147.0.4 REVISION=1 TAG=engine-v147.0.4-1
   run_step publish 'Publish the release' 'release-publish --tag engine-v147.0.4-1 --dir /rt/release-set' TAG=engine-v147.0.4-1
   # The tag reaches check-tag from the push, or from the dispatch input.
   local env
@@ -334,6 +358,34 @@ t_require_ref_on_main() {
 }
 
 # --- scripts/release-check.sh ------------------------------------------------
+# tag_fixture: an origin with main (M1, M2), an unmerged X, tag T=engine-v147.0.4-1
+# at M2, and a clone C (its local tag at M2 too); CHECK_ROOT is C.
+tag_fixture() {
+  main_fixture
+  git -C "$ORIGIN" tag engine-v147.0.4-1 "$M2"
+  git -C "$C" fetch -q --tags origin
+  cp "$ROOT/UPSTREAM" "$C/UPSTREAM.ignored"
+  CHECK_ROOT=$C
+}
+
+t_check_tag_commit() {
+  tag_fixture
+  run_check tag-commit engine-v147.0.4-1 "$M2"; assert_eq 0 "$RC" "$OUT"
+  # Moved on the origin after the run started (the clone's tag is stale).
+  git -C "$ORIGIN" tag -f engine-v147.0.4-1 "$M1" >/dev/null
+  run_check tag-commit engine-v147.0.4-1 "$M2"; assert_eq 1 "$RC" "moved to a merged commit: $OUT"
+  case $OUT in *"names $M1"*) ;; *) echo "new target not named: $OUT" >&2; return 1 ;; esac
+  git -C "$ORIGIN" tag -f engine-v147.0.4-1 "$X" >/dev/null
+  run_check tag-commit engine-v147.0.4-1 "$M2"; assert_eq 1 "$RC" "moved to an unmerged commit: $OUT"
+  # An annotated tag is peeled to its commit.
+  git -C "$ORIGIN" tag -f -a -m release engine-v147.0.4-1 "$M2" >/dev/null
+  run_check tag-commit engine-v147.0.4-1 "$M2"; assert_eq 0 "$RC" "annotated: $OUT"
+  # Deleted on the origin.
+  git -C "$ORIGIN" tag -d engine-v147.0.4-1 >/dev/null
+  run_check tag-commit engine-v147.0.4-1 "$M2"; assert_eq 1 "$RC" "deleted: $OUT"
+  run_check tag-commit engine-v147.0.4-1; assert_eq 2 "$RC" "no commit: $OUT"
+}
+
 
 run_check() {
   RC=0
@@ -481,6 +533,7 @@ write_curl_stub() {
   cat >"$1/curl" <<'SH'
 #!/bin/sh
 out= url=
+ARGS="$*"
 while [ $# -gt 0 ]; do
   case $1 in
     -o) out=$2; shift ;;
@@ -489,6 +542,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 echo "curl $url" >>"$CALLS"
+echo "$ARGS" >>"$CALLS.args"
 [ -z "${CURL_FAIL:-}" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
 [ -n "$out" ] && [ -n "$url" ] || { echo "curl stub: need -o FILE and an https URL" >&2; exit 2; }
 cp "$TC_SRC/${url##*/}" "$out"
@@ -528,7 +582,10 @@ run_set() {
     ${SET_ENV:+$SET_ENV} "$SET" "$@" 2>&1) || RC=$?
 }
 
-prepare() { run_set prepare --package-out "$PO" --version "$V" --revision "$N" --work "$W"; }
+prepare() {
+  run_set prepare --package-out "$PO" --version "$V" --revision "$N" --work "$W"
+  cp "$BASE/set-out" "$W.prep-out" 2>/dev/null || true
+}
 
 ASSETS="$P-jstests.tar.zst
 $P-jstests.tar.zst.sha256
@@ -556,6 +613,14 @@ t_prepare_ok() {
   cmp "$PO/$P-wasm32-wasi.tar.zst" "$W/release-set/$P-wasm32-wasi.tar.zst"
   assert_eq "curl $TC_URL_CLANG
 curl $TC_URL_SYSROOT" "$(cat "$CALLS")" "downloads"
+  # https only, also across redirects, and never more than the asset cap.
+  local args
+  while IFS= read -r args; do
+    case " $args " in *" --proto =https "*) ;; *) echo "no --proto =https: $args" >&2; return 1 ;; esac
+    case " $args " in *" --proto-redir =https "*) ;; *) echo "no --proto-redir =https: $args" >&2; return 1 ;; esac
+    case " $args " in *" --max-filesize 2040109465 "*) ;; *) echo "no --max-filesize cap: $args" >&2; return 1 ;; esac
+  done <"$CALLS.args"
+  grep -qx "engine_sha256=$(digest "$W/release-set/$P-wasm32-wasi.tar.zst")" "$BASE/set-out" || { echo "no engine_sha256 output" >&2; return 1; }
   # Extracted inputs for accept-engine.sh, and the outputs naming them.
   [ -f "$W/package/spidermonkey/include-private/js-build-config.json" ]
   [ -f "$W/testsrc/js/src/jit-test/jit_test.py" ] && [ -f "$W/testsrc/xul-info.txt" ]
@@ -663,7 +728,7 @@ t_prepare_size_cap() {
 t_prepare_toolchain_layout() {
   golden
   local s case
-  for case in two-tops no-clang file-top; do
+  for case in two-tops no-clang file-top abs-link escape-link out-hardlink device bad-name newline-name; do
     setup_set
     TC=$(mktemp -d "$BASE/tcl.XXXXXX")
     cp "$BASE/tc/sysroot-wasm32-wasi.tar.zst" "$TC/"
@@ -674,10 +739,37 @@ t_prepare_toolchain_layout() {
       two-tops) mkdir -p "$s/extra"; echo x >"$s/extra/f"; (cd "$s" && "$TAR" -cf - clang extra) | zstd -q -c >"$TC/clang.tar.zst" ;;
       no-clang) rm "$s/clang/bin/clang++"; (cd "$s" && "$TAR" -cf - clang) | zstd -q -c >"$TC/clang.tar.zst" ;;
       file-top) echo x >"$s/README"; (cd "$s" && "$TAR" -cf - README) | zstd -q -c >"$TC/clang.tar.zst" ;;
+      abs-link | escape-link | out-hardlink | device | bad-name | newline-name)
+        python3 - "$TC/clang.tar" "$case" <<'PY'
+import io, sys, tarfile
+out, case = sys.argv[1:]
+top = {"bad-name": "clang tool", "newline-name": "clang\nx"}.get(case, "clang")
+with tarfile.open(out, "w", format=tarfile.GNU_FORMAT) as t:
+    def d(n):
+        i = tarfile.TarInfo(n); i.type = tarfile.DIRTYPE; i.mode = 0o755; t.addfile(i)
+    def f(n, data=b"#!/bin/sh\n"):
+        i = tarfile.TarInfo(n); i.size = len(data); i.mode = 0o755; t.addfile(i, io.BytesIO(data))
+    d(top); d(top + "/bin"); f(top + "/bin/clang"); f(top + "/bin/clang++")
+    i = tarfile.TarInfo(top + "/bin/odd")
+    if case == "abs-link":
+        i.type, i.linkname = tarfile.SYMTYPE, "/usr/bin/clang"
+    elif case == "escape-link":
+        i.type, i.linkname = tarfile.SYMTYPE, "../../../etc/passwd"
+    elif case == "out-hardlink":
+        i.type, i.linkname = tarfile.LNKTYPE, "etc/passwd"
+    elif case == "device":
+        i.type, i.devmajor, i.devminor = tarfile.CHRTYPE, 1, 3
+    else:
+        i.type, i.linkname = tarfile.SYMTYPE, "clang"
+    t.addfile(i)
+PY
+        zstd -q -f "$TC/clang.tar" -o "$TC/clang.tar.zst"; rm -f "$TC/clang.tar" ;;
     esac
     repack "import hashlib; m['toolchain'][0]['sha256'] = hashlib.sha256(open('$TC/clang.tar.zst','rb').read()).hexdigest()"
     prepare
     expect_prepare_fails "clang.tar.zst"
+    [ ! -e "$W/toolchain/clang" ] || [ "$case" = no-clang ] || [ "$case" = two-tops ] ||
+      { echo "$case: extracted before the member check" >&2; return 1; }
   done
 }
 
@@ -715,7 +807,11 @@ t_prepare_contract_recheck() {
   assert_eq 0 "$RC" "leak of another host's HOME: $OUT"
 }
 
-finalize() { run_set finalize --work "$W" --tag engine-v147.0.4-1; }
+# engine_out: the engine_sha256 prepare printed.
+engine_out() { sed -n 's/^engine_sha256=//p' "$W.prep-out"; }
+finalize() {
+  run_set finalize --work "$W" --tag "${FIN_TAG:-engine-v147.0.4-1}" --engine-sha256 "${FIN_ENGINE-$(engine_out)}"
+}
 
 t_finalize() {
   golden; setup_set
@@ -748,7 +844,23 @@ PY
   # finalize needs a prepared work dir, and refuses to run twice.
   finalize; assert_eq 1 "$RC" "second finalize: $OUT"
   case $OUT in *"finalize runs once"*) ;; *) echo "second finalize not refused by name: $OUT" >&2; return 1 ;; esac
-  setup_set; finalize; assert_eq 1 "$RC" "finalize without prepare: $OUT"
+  setup_set; FIN_ENGINE=0 finalize; assert_eq 1 "$RC" "finalize without prepare: $OUT"
+  # A tag other than engine-v<package_version>.
+  setup_set; prepare; FIN_TAG=engine-v147.0.4-2 finalize; assert_eq 1 "$RC" "other tag: $OUT"
+  case $OUT in *"engine-v147.0.4-1"*) ;; *) echo "tag mismatch not explained: $OUT" >&2; return 1 ;; esac
+  # A prepared asset swapped after prepare, its .sha256 regenerated: the
+  # build-time record (toolchain[], test_sources) or prepare's engine digest
+  # refuses it.
+  local a
+  for a in toolchain-clang toolchain-sysroot testsrc jstests wasm32-wasi; do
+    setup_set; prepare; assert_eq 0 "$RC" "$OUT"
+    echo tampered >>"$W/release-set/$P-$a.tar.zst"
+    printf '%s  %s\n' "$(digest "$W/release-set/$P-$a.tar.zst")" "$P-$a.tar.zst" >"$W/release-set/$P-$a.tar.zst.sha256"
+    finalize; assert_eq 1 "$RC" "swapped $a after prepare: $OUT"
+    case $OUT in *"$P-$a.tar.zst"*) ;; *) echo "swapped $a not named: $OUT" >&2; return 1 ;; esac
+    [ ! -e "$W/release-set/MANIFEST.json" ] || { echo "manifest written over a swapped $a" >&2; return 1; }
+  done
+  setup_set; prepare; FIN_ENGINE='' finalize; assert_eq 2 "$RC" "no engine digest: $OUT"
 }
 
 # setup_final: a finalized release set copied to D (as publish downloads it)
@@ -761,7 +873,7 @@ setup_final() {
   H=$(digest "$D/MANIFEST.json")
 }
 
-verify() { run_set verify --dir "$D" --manifest-sha256 "${1-$H}" --version "$V" --revision "$N"; }
+verify() { run_set verify --dir "$D" --manifest-sha256 "${1-$H}" --version "$V" --revision "$N" --tag "${VER_TAG:-engine-v147.0.4-1}"; }
 
 t_verify() {
   setup_final
@@ -793,7 +905,30 @@ PY
   setup_final; echo x >"$D/extra.txt"; verify; assert_eq 1 "$RC" "extra file: $OUT"
   setup_final; verify 0000000000000000000000000000000000000000000000000000000000000000; assert_eq 1 "$RC" "wrong digest: $OUT"
   setup_final; verify ''; assert_eq 2 "$RC" "empty digest: $OUT"
-  setup_final; run_set verify --dir "$D" --manifest-sha256 "$H" --version "$V" --revision 2; assert_eq 1 "$RC" "other revision: $OUT"
+  setup_final; run_set verify --dir "$D" --manifest-sha256 "$H" --version "$V" --revision 2 --tag engine-v147.0.4-2; assert_eq 1 "$RC" "other revision: $OUT"
+  # The manifest's release.tag must be the tag being published.
+  setup_final; VER_TAG=engine-v147.0.4-3 verify; assert_eq 1 "$RC" "other tag: $OUT"
+  case $OUT in *"release.tag"*) ;; *) echo "tag mismatch not named: $OUT" >&2; return 1 ;; esac
+  # A swapped toolchain with the manifest rewritten to match and its digest
+  # trusted: still refused, the asset is not the toolchain[] recorded at build.
+  local a
+  for a in toolchain-clang testsrc; do
+    setup_final
+    echo x >>"$D/$P-$a.tar.zst"
+    printf '%s  %s\n' "$(digest "$D/$P-$a.tar.zst")" "$P-$a.tar.zst" >"$D/$P-$a.tar.zst.sha256"
+    python3 - "$D" <<'PY'
+import hashlib, json, os, sys
+d = sys.argv[1]
+p = os.path.join(d, "MANIFEST.json")
+m = json.load(open(p))
+for a in m["release"]["assets"]:
+    data = open(os.path.join(d, a["name"]), "rb").read()
+    a["sha256"], a["size"] = hashlib.sha256(data).hexdigest(), len(data)
+json.dump(m, open(p, "w"), indent=2, sort_keys=True)
+PY
+    verify "$(digest "$D/MANIFEST.json")"; assert_eq 1 "$RC" "swapped $a, manifest trusted: $OUT"
+    case $OUT in *"$P-$a.tar.zst"*) ;; *) echo "swapped $a not named: $OUT" >&2; return 1 ;; esac
+  done
 }
 
 # --- scripts/release-publish.sh ----------------------------------------------
@@ -877,6 +1012,7 @@ run_test "release.yml: publish only for a tag push" t_publish_condition
 run_test "release.yml: publish is the only writer, re-checks and verifies" t_publish_job
 run_test "release.yml: accept on a clean runner" t_accept_job
 run_test "release.yml: own concurrency group, never cancelled" t_concurrency
+run_test "release.yml: downloads are named by their uploader's output" t_artifact_names
 run_test "release.yml: no expression in a run: script" t_no_expressions_in_run
 run_test "release.yml: full-history checkouts" t_checkouts
 run_test "RELEASE_REQUIRES_NIGHTMONKEY" t_requires_file
@@ -885,6 +1021,7 @@ run_test "release.yml: accept validates the NightMonkey pin" t_accept_pin
 run_test "require-ref-on-main.sh" t_require_ref_on_main
 run_test "release-check.sh tag" t_check_tag
 run_test "release-check.sh nightmonkey" t_check_nightmonkey
+run_test "release-check.sh tag-commit" t_check_tag_commit
 run_test "release-set.sh prepare" t_prepare_ok
 run_test "release-set.sh prepare: toolchain digest" t_prepare_toolchain_digest
 run_test "release-set.sh prepare: toolchain unreachable" t_prepare_toolchain_unreachable
