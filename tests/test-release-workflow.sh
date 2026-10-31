@@ -728,7 +728,8 @@ t_prepare_size_cap() {
 t_prepare_toolchain_layout() {
   golden
   local s case
-  for case in two-tops no-clang file-top abs-link escape-link out-hardlink device bad-name newline-name chain-link; do
+  for case in two-tops no-clang file-top abs-link escape-link out-hardlink device bad-name newline-name chain-link \
+    hardlink-dotdot hardlink-missing hardlink-dir; do
     setup_set
     TC=$(mktemp -d "$BASE/tcl.XXXXXX")
     cp "$BASE/tc/sysroot-wasm32-wasi.tar.zst" "$TC/"
@@ -739,7 +740,8 @@ t_prepare_toolchain_layout() {
       two-tops) mkdir -p "$s/extra"; echo x >"$s/extra/f"; (cd "$s" && "$TAR" -cf - clang extra) | zstd -q -c >"$TC/clang.tar.zst" ;;
       no-clang) rm "$s/clang/bin/clang++"; (cd "$s" && "$TAR" -cf - clang) | zstd -q -c >"$TC/clang.tar.zst" ;;
       file-top) echo x >"$s/README"; (cd "$s" && "$TAR" -cf - README) | zstd -q -c >"$TC/clang.tar.zst" ;;
-      abs-link | escape-link | out-hardlink | device | bad-name | newline-name | chain-link)
+      abs-link | escape-link | out-hardlink | device | bad-name | newline-name | chain-link | \
+        hardlink-dotdot | hardlink-missing | hardlink-dir)
         python3 - "$TC/clang.tar" "$case" <<'PY'
 import io, sys, tarfile
 out, case = sys.argv[1:]
@@ -759,6 +761,12 @@ with tarfile.open(out, "w", format=tarfile.GNU_FORMAT) as t:
         i.type, i.linkname = tarfile.LNKTYPE, "etc/passwd"
     elif case == "device":
         i.type, i.devmajor, i.devminor = tarfile.CHRTYPE, 1, 3
+    elif case == "hardlink-dotdot":
+        i.type, i.linkname = tarfile.LNKTYPE, top + "/bin/../bin/clang"
+    elif case == "hardlink-missing":
+        i.type, i.linkname = tarfile.LNKTYPE, top + "/bin/clang-19"
+    elif case == "hardlink-dir":
+        i.type, i.linkname = tarfile.LNKTYPE, top + "/bin"
     elif case == "chain-link":
         # Each target stays inside as text, but esc resolves through d.
         j = tarfile.TarInfo(top + "/d"); j.type, j.linkname = tarfile.SYMTYPE, "."; t.addfile(j)
@@ -774,6 +782,53 @@ PY
     expect_prepare_fails "clang.tar.zst"
     [ ! -e "$W/toolchain/clang" ] || [ "$case" = no-clang ] || [ "$case" = two-tops ] ||
       { echo "$case: extracted before the member check" >&2; return 1; }
+  done
+}
+
+# Hard links: a sysroot member whose target text normalizes inside the
+# sysroot but that GNU tar resolves through ../ into clang/ is refused; a
+# plain same-directory hard link to an earlier regular file passes.
+t_prepare_toolchain_hardlinks() {
+  golden
+  local case
+  for case in cross-top same-dir; do
+    setup_set
+    TC=$(mktemp -d "$BASE/tch.XXXXXX")
+    python3 - "$TC" "$case" <<'PY'
+import io, sys, tarfile
+out, case = sys.argv[1:]
+def add(t, name, kind="dir", data=b"x\n", link=None, mode=0o644):
+    i = tarfile.TarInfo(name)
+    if kind == "dir":
+        i.type, i.mode = tarfile.DIRTYPE, 0o755; t.addfile(i)
+    elif kind == "file":
+        i.size, i.mode = len(data), mode; t.addfile(i, io.BytesIO(data))
+    else:
+        i.type, i.linkname = tarfile.LNKTYPE, link; t.addfile(i)
+with tarfile.open(out + "/clang.tar", "w", format=tarfile.GNU_FORMAT) as t:
+    add(t, "clang"); add(t, "clang/bin")
+    add(t, "clang/bin/clang", "file", b"#!/bin/sh\n", mode=0o755)
+    if case == "same-dir":
+        add(t, "clang/bin/clang++", "link", link="clang/bin/clang")
+    else:
+        add(t, "clang/bin/clang++", "file", b"#!/bin/sh\n", mode=0o755)
+with tarfile.open(out + "/sysroot-wasm32-wasi.tar", "w", format=tarfile.GNU_FORMAT) as t:
+    add(t, "sysroot-wasm32-wasi"); add(t, "sysroot-wasm32-wasi/include")
+    add(t, "sysroot-wasm32-wasi/include/stdio.h", "file")
+    if case == "cross-top":
+        add(t, "sysroot-wasm32-wasi/alias", "link", link="sysroot-wasm32-wasi/d/../clang/bin/clang")
+PY
+    zstd -q -f "$TC/clang.tar" -o "$TC/clang.tar.zst"
+    zstd -q -f "$TC/sysroot-wasm32-wasi.tar" -o "$TC/sysroot-wasm32-wasi.tar.zst"
+    repack "import hashlib
+for t in m['toolchain']:
+    t['sha256'] = hashlib.sha256(open('$TC/' + t['name'], 'rb').read()).hexdigest()"
+    prepare
+    case $case in
+      cross-top) expect_prepare_fails "sysroot-wasm32-wasi.tar.zst" ;;
+      same-dir) assert_eq 0 "$RC" "same-directory hard link: $OUT"
+        [ -x "$W/toolchain/clang/bin/clang++" ] || { echo "hard-linked clang++ not extracted" >&2; return 1; } ;;
+    esac
   done
 }
 
@@ -1066,6 +1121,7 @@ run_test "release-set.sh prepare: toolchain unreachable" t_prepare_toolchain_unr
 run_test "release-set.sh prepare: toolchain mapping" t_prepare_toolchain_mapping
 run_test "release-set.sh prepare: size cap" t_prepare_size_cap
 run_test "release-set.sh prepare: toolchain layout" t_prepare_toolchain_layout
+run_test "release-set.sh prepare: toolchain hard links" t_prepare_toolchain_hardlinks
 run_test "release-set.sh prepare: package consistency" t_prepare_package_consistency
 run_test "release-set.sh prepare: contract recheck" t_prepare_contract_recheck
 run_test "release-set.sh finalize" t_finalize
