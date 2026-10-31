@@ -638,6 +638,24 @@ t_prepare_size_cap() {
   setup_set
   SET_ENV=RELEASE_SET_MAX_BYTES=99999999999 prepare
   assert_eq 2 "$RC" "raised cap: $OUT"
+  # A toolchain over the cap while the package archives fit: the cap is the
+  # largest package archive, and the served clang archive is larger.
+  setup_set
+  local cap s f
+  cap=0
+  for f in "$PO"/*.tar.zst; do s=$(wc -c <"$f" | tr -d ' '); [ "$s" -le "$cap" ] || cap=$s; done
+  TC=$(mktemp -d "$BASE/tcbig.XXXXXX")
+  cp "$BASE/tc/sysroot-wasm32-wasi.tar.zst" "$TC/"
+  s=$(mktemp -d "$BASE/tcbigs.XXXXXX")
+  mkdir -p "$s/clang/bin"
+  printf '#!/bin/sh\n' >"$s/clang/bin/clang"; chmod +x "$s/clang/bin/clang"; ln -s clang "$s/clang/bin/clang++"
+  head -c $((cap + 4096)) /dev/urandom >"$s/clang/blob"
+  (cd "$s" && "$TAR" -cf - clang) | zstd -q -c >"$TC/clang.tar.zst"
+  repack "import hashlib; m['toolchain'][0]['sha256'] = hashlib.sha256(open('$TC/clang.tar.zst','rb').read()).hexdigest()"
+  for f in "$PO"/*.tar.zst; do s=$(wc -c <"$f" | tr -d ' '); [ "$s" -le "$cap" ] || cap=$s; done
+  SET_ENV=RELEASE_SET_MAX_BYTES=$cap prepare
+  expect_prepare_fails "clang.tar.zst: "
+  case $OUT in *"exceeds"*) ;; *) echo "toolchain cap not reported: $OUT" >&2; return 1 ;; esac
 }
 
 # A toolchain archive must have exactly one top-level directory, and the clang
@@ -669,7 +687,11 @@ t_prepare_package_consistency() {
   golden
   setup_set; echo x >>"$PO/$P-wasm32-wasi.tar.zst"; prepare; expect_prepare_fails "$P-wasm32-wasi.tar.zst"
   setup_set; echo x >>"$PO/$P-jstests.tar.zst"; prepare; expect_prepare_fails "$P-jstests.tar.zst"
-  setup_set; rm "$PO/$P-jstests.tar.zst" "$PO/$P-jstests.tar.zst.sha256"; prepare; expect_prepare_fails "jstests"
+  setup_set; rm "$PO/$P-jstests.tar.zst" "$PO/$P-jstests.tar.zst.sha256"; prepare
+  expect_prepare_fails "$P-jstests.tar.zst: missing from package-out"
+  # A .sha256 that disagrees with an intact archive.
+  setup_set; printf '%064d  %s\n' 0 "$P-wasm32-wasi.tar.zst" >"$PO/$P-wasm32-wasi.tar.zst.sha256"; prepare
+  expect_prepare_fails "$P-wasm32-wasi.tar.zst: sha256"
   setup_set; edit_manifest 'm["test_sources"]["testsrc"]["sha256"] = "0" * 64'; prepare; expect_prepare_fails "testsrc"
   setup_set; edit_manifest 'm["package_version"] = "147.0.4-2"'; prepare; expect_prepare_fails "package_version"
   # A file changed inside a re-made archive (manifests and .sha256 consistent).
@@ -725,6 +747,7 @@ assert by["spidermonkey_147.0.4-1-toolchain-sysroot.tar.zst"] == tc["sysroot-was
 PY
   # finalize needs a prepared work dir, and refuses to run twice.
   finalize; assert_eq 1 "$RC" "second finalize: $OUT"
+  case $OUT in *"finalize runs once"*) ;; *) echo "second finalize not refused by name: $OUT" >&2; return 1 ;; esac
   setup_set; finalize; assert_eq 1 "$RC" "finalize without prepare: $OUT"
 }
 
