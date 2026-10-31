@@ -14,12 +14,41 @@ on:
     branches:
       - main
   workflow_dispatch:
+  # release.yml builds through this job (one wasmtime pin, cache logic and
+  # smoke test) with package: true; it then also packages the engine and the
+  # test sources and uploads them as the engine-package artifact.
+  workflow_call:
+    inputs:
+      package:
+        description: Package the engine and the test sources after the smoke test
+        type: boolean
+        default: false
+        required: false
+      version:
+        description: Firefox version of the package (UPSTREAM's), required with package
+        type: string
+        default: ''
+        required: false
+      revision:
+        description: Package revision N (engine-v<version>-<N>), required with package
+        type: string
+        default: ''
+        required: false
+    outputs:
+      package-artifact:
+        description: Name of the artifact holding package-out/ (empty unless packaged)
+        value: ${{ jobs.engine.outputs.package-artifact }}
 
 permissions:
   contents: read
 
+# In a called run, github.* is the caller's (release.yml: a tag push, or a
+# dry-run workflow_dispatch that may be on main), so a release call gets its
+# own group: it never shares, cancels or displaces a PR's or main's engine run.
+# PR and main groups are unchanged (inputs is empty for them). Only PR runs
+# cancel in progress; release.yml calls from tag pushes and dispatches only.
 concurrency:
-  group: engine-${{ github.ref }}
+  group: engine-${{ inputs.package && 'release-' || '' }}${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -30,6 +59,8 @@ jobs:
   engine:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    outputs:
+      package-artifact: ${{ steps.package.outputs.artifact }}
     steps:
       - name: Check out this repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,7 +75,7 @@ jobs:
       - name: Build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip python3-venv build-essential
+          sudo apt-get install -y python3-pip python3-venv build-essential zstd
 
       - name: Install pinned wasmtime (verified before the build, to fail fast)
         run: |
@@ -66,7 +97,8 @@ jobs:
       # cached: build-engine.sh always fetches into a fresh, empty workdir (the
       # objdir lives inside it, and a fresh checkout invalidates its
       # timestamps). Restore runs on every event; save runs only on main pushes
-      # or manual dispatch (main seeds the cache for PRs), and also after a
+      # or manual dispatch (main seeds the cache for PRs), never for a release
+      # call (package: true; its github.* is the caller's), and also after a
       # failed build so the expensive toolchain bootstrap is kept, but not after
       # a cancellation or timeout, which can leave a partial ~/.mozbuild that the
       # immutable key would then serve to every later run.
@@ -87,7 +119,7 @@ jobs:
 
       - name: Save ~/.mozbuild
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
+        if: ${{ !cancelled() && !inputs.package && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
         with:
           path: ~/.mozbuild
           key: mozbuild-ubuntu-24.04-${{ steps.pin.outputs.commit }}-${{ hashFiles('mozconfig', 'scripts/build-engine.sh', 'scripts/lib/patch-queue.sh', 'patches/*.patch') }}
@@ -105,7 +137,39 @@ jobs:
           [ "$out" = 42 ] || { echo "smoke: script expected 42, got '$out'" >&2; exit 1; }
           echo "smoke ok: $out"
 
+      # Release builds only. The engine package (scripts/package-engine.sh)
+      # records the test-source bundles' digests, so the bundles come first.
+      # The tree is build-engine.sh's workdir (firefox/, with its objdir) and
+      # the manifest is its build-manifest.json; both packagers re-check what
+      # they take (UPSTREAM tree, clean index, contract).
+      - name: Package the engine and test sources
+        id: package
+        if: ${{ inputs.package == true }}
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+          PACKAGE_REVISION: ${{ inputs.revision }}
+        run: |
+          if [ -z "$PACKAGE_VERSION" ] || [ -z "$PACKAGE_REVISION" ]; then
+            echo "package: the version and revision inputs are required" >&2
+            exit 1
+          fi
+          scripts/package-test-sources.sh --tree firefox --out package-out --version "$PACKAGE_VERSION" --revision "$PACKAGE_REVISION" --jstests
+          scripts/package-engine.sh --dist firefox/obj-nightmonkey-sm/dist --manifest build-manifest.json --out package-out --version "$PACKAGE_VERSION" --revision "$PACKAGE_REVISION" --test-sources package-out
+          echo "artifact=engine-package" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the package
+        if: ${{ inputs.package == true }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-package
+          path: package-out/
+          if-no-files-found: error
+
+      # Also after a failed step (a failed packaging leaves the manifest for
+      # diagnosis), but not after a cancellation, and only once build-engine.sh
+      # has written it.
       - name: Upload build manifest
+        if: ${{ !cancelled() && hashFiles('build-manifest.json') != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: build-manifest

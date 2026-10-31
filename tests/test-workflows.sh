@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Tests for .github/workflows/{queue,engine,gate}.yml: structure, actionlint, action
 # pinning, the smoke command and the pinned wasmtime digest.
-set -euo pipefail
+# No pipefail: nearly every check here is `producer | grep -q ...`, and grep -q
+# exits at its first match, so a producer that flushes per line (BSD grep on
+# macOS does) dies of SIGPIPE and pipefail would fail a passing check. Every
+# pipeline ends in a content check, so the last command's status is the one
+# that matters. (exec_step still runs step scripts with -eo pipefail.)
+set -eu
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib.sh
@@ -440,16 +445,19 @@ concurrency_value() {
     f { t=$0; sub(/^[[:space:]]+/, "", t); if (index(t, k ": ") == 1) { print substr(t, length(k) + 3); exit } }'
 }
 
-# gh_eval <template> <context-json>: evaluate a workflow value containing
-# ${{ }} expressions the way Actions does for the subset used here: github.*
-# property paths (missing -> null), string/number/boolean/null literals, ==, !=,
+# gh_eval <template> <github-json> [<inputs-json>]: evaluate a workflow value
+# containing ${{ }} expressions the way Actions does for the subset used here:
+# github.* and inputs.* property paths (missing -> null; no inputs-json is the
+# empty inputs context of a pull_request or push run), string/number/boolean/null literals, ==, !=,
 # !, &&, || (returning an operand, not a boolean), parentheses; string == is
 # case-insensitive; null, false, 0 and '' are falsy; null interpolates as ''.
 gh_eval() {
-  python3 -I - "$1" "$2" <<'PY'
+  local no_inputs='{}'
+  python3 -I - "$1" "$2" "${3:-$no_inputs}" <<'PY'
 import json, re, sys
 
-template, ctx = sys.argv[1], {"github": json.loads(sys.argv[2])}
+template = sys.argv[1]
+ctx = {"github": json.loads(sys.argv[2]), "inputs": json.loads(sys.argv[3])}
 TOK = re.compile(r"\s*(?:(?P<s>'(?:[^']|'')*')|(?P<n>-?\d+(?:\.\d+)?)|(?P<op>==|!=|&&|\|\||!|\(|\))|(?P<id>[A-Za-z_][A-Za-z0-9_.-]*))")
 
 def tokens(src):
@@ -602,6 +610,386 @@ t_gate_shard_inputs() {
     { echo "the shard-inputs upload does not overwrite" >&2; return 1; }
 }
 
+# engine.yml as a reusable workflow (release.yml calls it with package: true).
+ENGINE_PKG_STEP='Package the engine and test sources'
+ENGINE_UPLOAD_PKG_STEP='Upload the package'
+ENGINE_SAVE_STEP='Save ~/.mozbuild'
+
+# step_if <file> <step>: the step's `if:` value, wrapped in ${{ }} if bare.
+step_if() {
+  local v
+  v=$(step "$1" "$2" | sed -n 's/^[[:space:]]*if:[[:space:]]*//p' | head -1)
+  case $v in '${{'*) printf '%s\n' "$v" ;; '') ;; *) printf '${{ %s }}\n' "$v" ;; esac
+}
+
+# Contexts: an engine PR run, a main push, an engine dispatch, release.yml's
+# tag push calling engine.yml, and release.yml's dry-run dispatch on main.
+CTX_PR='{"event_name":"pull_request","ref":"refs/pull/7/merge"}'
+CTX_PR2='{"event_name":"pull_request","ref":"refs/pull/8/merge"}'
+CTX_MAIN='{"event_name":"push","ref":"refs/heads/main"}'
+CTX_DISPATCH='{"event_name":"workflow_dispatch","ref":"refs/heads/main"}'
+CTX_TAG='{"event_name":"push","ref":"refs/tags/engine-v147.0.4-1"}'
+CTX_DRY='{"event_name":"workflow_dispatch","ref":"refs/heads/main"}'
+IN_CALL='{"package":true,"version":"147.0.4","revision":"1"}'
+
+t_engine_call_inputs() {
+  local f="$WF/engine.yml" block
+  block=$(body "$f" | awk '/^  workflow_call:/{f=1; print; next} f && /^  [^ ]/{exit} f{print}')
+  [ -n "$block" ] || { echo "engine.yml lacks on: workflow_call" >&2; return 1; }
+  printf '%s\n' "$block" | python3 -c '
+import re, sys
+text = sys.stdin.read()
+def inp(name):
+    m = re.search(r"^      %s:\n((?:        .*\n?)+)" % name, text, re.M)
+    assert m, "no input " + name
+    return m.group(1)
+p = inp("package")
+assert re.search(r"^        type: boolean$", p, re.M), p
+assert re.search(r"^        default: false$", p, re.M), p
+assert re.search(r"^        required: false$", p, re.M), p
+for n in ("version", "revision"):
+    b = inp(n)
+    assert re.search(r"^        type: string$", b, re.M), (n, b)
+    assert re.search(r"^        required: false$", b, re.M), (n, b)
+o = re.search(r"^    outputs:\n      package-artifact:\n((?:        .*\n?)+)", text, re.M)
+assert o and "value: ${{ jobs.engine.outputs.package-artifact }}" in o.group(1), "no package-artifact output"
+'
+  has_line "$f" 'package-artifact: ${{ steps.package.outputs.artifact }}' ||
+    { echo "job output package-artifact is not the package step's artifact" >&2; return 1; }
+  # The other triggers stay.
+  body "$f" | grep -Eq '^  pull_request:$' && body "$f" | grep -Eq '^  push:$' && body "$f" | grep -Eq '^  workflow_dispatch:$'
+}
+
+# Packaging runs after the smoke test, only when called with package: true;
+# PR, push and dispatch runs never package.
+t_engine_package_steps() {
+  local f="$WF/engine.yml" s n_smoke n_pkg n_up ctx
+  s=$(step "$f" "$ENGINE_PKG_STEP")
+  [ -n "$s" ] || { echo "no '$ENGINE_PKG_STEP' step" >&2; return 1; }
+  printf '%s\n' "$s" | grep -qE '^[[:space:]]+id: package$' || { echo "package step has no id: package" >&2; return 1; }
+  n_smoke=$(body "$f" | grep -n -- '- name: Smoke$' | cut -d: -f1)
+  n_pkg=$(body "$f" | grep -n -- "- name: $ENGINE_PKG_STEP\$" | cut -d: -f1)
+  n_up=$(body "$f" | grep -n -- "- name: $ENGINE_UPLOAD_PKG_STEP\$" | cut -d: -f1)
+  [ -n "$n_smoke" ] && [ -n "$n_pkg" ] && [ -n "$n_up" ] && [ "$n_smoke" -lt "$n_pkg" ] && [ "$n_pkg" -lt "$n_up" ] ||
+    { echo "order is not smoke < package < upload ($n_smoke $n_pkg $n_up)" >&2; return 1; }
+  # Inputs reach the script through env:, never interpolated into run:.
+  ! step_run "$f" "$ENGINE_PKG_STEP" | grep -q '\${{' || { echo "package run: interpolates an expression" >&2; return 1; }
+  printf '%s\n' "$s" | grep -qE '^[[:space:]]+PACKAGE_VERSION: \$\{\{ inputs\.version \}\}$' &&
+    printf '%s\n' "$s" | grep -qE '^[[:space:]]+PACKAGE_REVISION: \$\{\{ inputs\.revision \}\}$' ||
+    { echo "package step env does not bind inputs.version/revision" >&2; return 1; }
+  # The upload: package-out/ as engine-package, failing when empty.
+  s=$(step "$f" "$ENGINE_UPLOAD_PKG_STEP")
+  printf '%s\n' "$s" | grep -qE 'uses: actions/upload-artifact@[0-9a-f]{40}' || { echo "package upload is not upload-artifact" >&2; return 1; }
+  printf '%s\n' "$s" | grep -qE '^[[:space:]]+name: engine-package$' || { echo "package artifact is not engine-package" >&2; return 1; }
+  printf '%s\n' "$s" | grep -qE '^[[:space:]]+path: package-out/$' || { echo "package upload path is not package-out/" >&2; return 1; }
+  printf '%s\n' "$s" | grep -qE '^[[:space:]]+if-no-files-found: error$' || { echo "package upload tolerates no files" >&2; return 1; }
+  # Both run only for a call with package: true.
+  for s in "$ENGINE_PKG_STEP" "$ENGINE_UPLOAD_PKG_STEP"; do
+    [ -n "$(step_if "$f" "$s")" ] || { echo "'$s' has no if:" >&2; return 1; }
+    for ctx in "$CTX_PR" "$CTX_MAIN" "$CTX_DISPATCH" "$CTX_TAG"; do
+      assert_eq false "$(gh_eval "$(step_if "$f" "$s")" "$ctx")" "'$s' without package input ($ctx)"
+    done
+    assert_eq false "$(gh_eval "$(step_if "$f" "$s")" "$CTX_TAG" '{"package":false}')" "'$s' with package: false"
+    assert_eq true "$(gh_eval "$(step_if "$f" "$s")" "$CTX_TAG" "$IN_CALL")" "'$s' with package: true"
+  done
+  # zstd is installed for the packagers.
+  step_run "$f" "Build prerequisites" | grep -qE 'apt-get install -y .*\bzstd\b' || { echo "zstd not installed" >&2; return 1; }
+}
+
+# The package step, executed with stub packagers: exact arguments, refuses
+# missing inputs, and a failing packager fails the step.
+t_engine_package_exec() {
+  local f="$WF/engine.yml" d rc
+  d=$(mktemp -d)
+  mkdir -p "$d/scripts"
+  # Each stub has its own failure control: STUB_TESTSRC_RC, STUB_ENGINE_RC.
+  printf '#!/bin/sh\necho "${0##*/} $*" >>"$CALLS"\nexit "${STUB_TESTSRC_RC:-0}"\n' >"$d/scripts/package-test-sources.sh"
+  printf '#!/bin/sh\necho "${0##*/} $*" >>"$CALLS"\nexit "${STUB_ENGINE_RC:-0}"\n' >"$d/scripts/package-engine.sh"
+  chmod +x "$d/scripts/"*.sh
+  : >"$d/calls"; : >"$d/out"
+  exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" PACKAGE_VERSION=147.0.4 \
+    PACKAGE_REVISION=1 >/dev/null 2>&1 || { echo "package step failed" >&2; rm -rf "$d"; return 1; }
+  assert_eq "package-test-sources.sh --tree firefox --out package-out --version 147.0.4 --revision 1 --jstests
+package-engine.sh --dist firefox/obj-nightmonkey-sm/dist --manifest build-manifest.json --out package-out --version 147.0.4 --revision 1 --test-sources package-out" \
+    "$(cat "$d/calls")" "packager calls" || { rm -rf "$d"; return 1; }
+  grep -qx 'artifact=engine-package' "$d/out" || { echo "no artifact=engine-package output" >&2; rm -rf "$d"; return 1; }
+  for env in "PACKAGE_VERSION= PACKAGE_REVISION=1" "PACKAGE_VERSION=147.0.4 PACKAGE_REVISION="; do
+    : >"$d/calls"
+    rc=0
+    # shellcheck disable=SC2086 # two name=value words
+    exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" $env >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] && [ ! -s "$d/calls" ] || { echo "package step ran with $env" >&2; rm -rf "$d"; return 1; }
+  done
+  # Each packager failing alone fails the step; after a failing bundler the
+  # engine packager does not run.
+  : >"$d/calls"; : >"$d/out"
+  rc=0
+  exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" PACKAGE_VERSION=147.0.4 \
+    PACKAGE_REVISION=1 STUB_TESTSRC_RC=1 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a failing test-source bundler passes the step" >&2; rm -rf "$d"; return 1; }
+  ! grep -q '^package-engine.sh' "$d/calls" || { echo "package-engine.sh ran after the bundler failed" >&2; rm -rf "$d"; return 1; }
+  ! grep -q '^artifact=' "$d/out" || { echo "artifact output written after a failure" >&2; rm -rf "$d"; return 1; }
+  : >"$d/calls"; : >"$d/out"
+  rc=0
+  exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" PACKAGE_VERSION=147.0.4 \
+    PACKAGE_REVISION=1 STUB_ENGINE_RC=1 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || { echo "a failing engine packager passes the step" >&2; rm -rf "$d"; return 1; }
+  ! grep -q '^artifact=' "$d/out" || { echo "artifact output written after a failure" >&2; rm -rf "$d"; return 1; }
+  rm -rf "$d"
+}
+
+# Cache save, evaluated in the caller's context: a release call (tag push or
+# dry-run dispatch) never saves; main pushes and engine dispatches still do;
+# PRs never do. (!cancelled() is checked by t_engine and taken as true here.)
+t_engine_call_cache() {
+  local f="$WF/engine.yml" cond
+  cond=$(step_if "$f" "$ENGINE_SAVE_STEP" | sed 's/!cancelled() && //')
+  [ -n "$cond" ] || { echo "no save condition" >&2; return 1; }
+  assert_eq false "$(gh_eval "$cond" "$CTX_TAG" "$IN_CALL")" "tag-called release saves the cache"
+  assert_eq false "$(gh_eval "$cond" "$CTX_DRY" "$IN_CALL")" "release dry run saves the cache"
+  assert_eq false "$(gh_eval "$cond" "$CTX_PR")" "PR saves the cache"
+  assert_eq true "$(gh_eval "$cond" "$CTX_MAIN")" "main push does not save the cache"
+  assert_eq true "$(gh_eval "$cond" "$CTX_DISPATCH")" "engine dispatch does not save the cache"
+}
+
+# Concurrency, evaluated in the caller's context: PR and main groups are what
+# they were; a release call has its own group (also when dispatched on main),
+# so it neither cancels nor displaces a PR or main run, and is not cancelled.
+t_engine_call_concurrency() {
+  local f="$WF/engine.yml" group cancel pr pr2 main tag dry
+  group=$(concurrency_value "$f" group)
+  cancel=$(concurrency_value "$f" cancel-in-progress)
+  [ -n "$group" ] && [ -n "$cancel" ] || { echo "engine.yml lacks concurrency" >&2; return 1; }
+  pr=$(gh_eval "$group" "$CTX_PR"); pr2=$(gh_eval "$group" "$CTX_PR2"); main=$(gh_eval "$group" "$CTX_MAIN")
+  tag=$(gh_eval "$group" "$CTX_TAG" "$IN_CALL"); dry=$(gh_eval "$group" "$CTX_DRY" "$IN_CALL")
+  assert_eq "engine-refs/pull/7/merge" "$pr" "PR group unchanged"
+  assert_eq "engine-refs/heads/main" "$main" "main group unchanged"
+  [ "$pr" != "$pr2" ] || { echo "two PRs share a group" >&2; return 1; }
+  for g in "$pr" "$pr2" "$main"; do
+    [ "$tag" != "$g" ] || { echo "the tag-called run shares group $g" >&2; return 1; }
+    [ "$dry" != "$g" ] || { echo "the release dry run shares group $g" >&2; return 1; }
+  done
+  assert_eq true "$(gh_eval "$cancel" "$CTX_PR")" "PR runs cancel in progress"
+  assert_eq false "$(gh_eval "$cancel" "$CTX_MAIN")" "main runs are not cancelled"
+  assert_eq false "$(gh_eval "$cancel" "$CTX_TAG" "$IN_CALL")" "the tag-called run cancels in progress"
+  assert_eq false "$(gh_eval "$cancel" "$CTX_DRY" "$IN_CALL")" "the release dry run cancels in progress"
+}
+
+# run_scripts <workflow> <dir>: write every `run:` script of <workflow> to
+# <dir>/<line>.sh, ${{ }} expressions replaced by a placeholder as actionlint
+# does before shellcheck. Prints the number of scripts.
+run_scripts() {
+  python3 -I - "$1" "$2" <<'PY'
+import re, sys
+path, out = sys.argv[1:]
+lines = open(path).read().split("\n")
+n, i = 0, 0
+while i < len(lines):
+    m = re.match(r"^(\s*)(?:- )?run: (.*)$", lines[i])
+    if not m or lines[i].lstrip().startswith("#"):
+        i += 1
+        continue
+    start = i + 1
+    # Any block scalar header: | or > with an optional chomping (+ -) and
+    # indentation (1-9) indicator, in either order.
+    if re.fullmatch(r"[|>](?:[+-][1-9]?|[1-9][+-]?)?", m.group(2).strip()):
+        body, j, ind = [], i + 1, None
+        while j < len(lines):
+            l = lines[j]
+            if l.strip() == "":
+                body.append(""); j += 1; continue
+            k = len(l) - len(l.lstrip())
+            if ind is None:
+                ind = k
+            if k < ind:
+                break
+            body.append(l[ind:]); j += 1
+        script, i = "\n".join(body), j
+    else:
+        script, i = m.group(2), i + 1
+    script = re.sub(r"\$\{\{.*?\}\}", "_GH_EXPR_", script)
+    with open("%s/%d.sh" % (out, start), "w") as f:
+        f.write("#!/bin/bash\n" + script + "\n")
+    n += 1
+print(n)
+PY
+}
+
+# sc2015_shape <script>: print the joined logical lines holding both && and
+# || (shellcheck SC2015 is `A && B || C`: C also runs when B fails). This is a
+# conservative backstop for CI's shellcheck 0.9 (the hosted actionlint is the
+# real gate): quotes, heredocs, `;`, $( ) and [[ ]] are not parsed, so it may
+# over-flag; a flagged line is rewritten as an explicit if/then. A line ending
+# in && || | or \ (an inline comment after && || | allowed) continues onto the
+# next; comment-only lines, and blank lines inside a join, are skipped
+# without ending the joined line.
+sc2015_shape() {
+  python3 -I - "$1" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+logical, cur = [], ""
+for line in text.split("\n"):
+    if re.match(r"^\s*#", line):
+        continue
+    # A blank line inside an open join (after a trailing && || |) does not
+    # end the command in bash, so it does not end the joined line either.
+    if cur and not line.strip():
+        continue
+    cur += line + " "
+    if re.search(r"(&&|\|\||\|)\s*(#.*)?$", line) or re.search(r"\\$", line):
+        continue
+    logical.append(cur)
+    cur = ""
+logical.append(cur)
+for l in logical:
+    if "&&" in l and "||" in l:
+        print(l.strip())
+PY
+}
+
+# lint_flags_shape <workflow>: lint_runs fails on <workflow> (nonzero status)
+# and reports the SC2015 shape; either alone is not enough.
+lint_flags_shape() {
+  local out rc=0
+  out=$(lint_runs "$1" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  case $out in *"has the SC2015 shape"*) return 0 ;; *) return 1 ;; esac
+}
+
+# lint_runs <workflow>: every run: script is free of the SC2015 shape (which
+# CI's actionlint + shellcheck 0.9 report as info and fail on, while a newer
+# local shellcheck does not) and passes shellcheck -S info. If shellcheck is
+# not installed, that is FATAL when CI or GITHUB_ACTIONS is set, and an
+# explicit SKIP of the shellcheck part otherwise.
+lint_runs() {
+  local d f bad=0 hits sc=1
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+      echo "FATAL: shellcheck is required to lint run: scripts under CI" >&2
+      return 1
+    fi
+    echo "SKIP: shellcheck not installed; ${1##*/} run: scripts get the SC2015 shape check only" >&2
+    sc=0
+  fi
+  d=$(mktemp -d)
+  run_scripts "$1" "$d" >/dev/null || { rm -rf "$d"; return 1; }
+  for f in "$d"/*.sh; do
+    [ -e "$f" ] || continue
+    hits=$(sc2015_shape "$f")
+    if [ -n "$hits" ]; then
+      printf '%s: run: at line %s has the SC2015 shape (A && B || C):\n%s\n' "${1##*/}" "$(basename "$f" .sh)" "$hits" >&2
+      bad=1
+    fi
+    if [ "$sc" = 1 ] && ! shellcheck -S info -s bash "$f" >&2; then
+      echo "${1##*/}: run: at line $(basename "$f" .sh) has shellcheck findings" >&2
+      bad=1
+    fi
+  done
+  rm -rf "$d"
+  return "$bad"
+}
+
+t_run_scripts_lint() {
+  local f d n
+  for f in queue.yml engine.yml gate.yml; do
+    lint_runs "$WF/$f" || return 1
+  done
+  d=$(mktemp -d)
+  n=$(run_scripts "$WF/engine.yml" "$d")
+  rm -rf "$d"
+  [ "$n" -ge 5 ] || { echo "only $n run: scripts found in engine.yml" >&2; return 1; }
+  # The shape check is a conservative backstop for CI's shellcheck 0.9 (the
+  # hosted actionlint is the real gate): any joined logical line holding both
+  # && and || is flagged, quotes, heredocs, `;` and [[ ]] included. A flagged
+  # line is rewritten as an explicit if/then, the repo style.
+  d=$(mktemp -d)
+  local body
+  for body in \
+    '[ -n "$A" ] && [ -n "$B" ] ||\n  { echo no >&2; exit 1; }' \
+    'test -n "$A" && echo yes || echo no' \
+    '[ -n "$A" ] &&\n  [ -n "$B" ] || exit 1' \
+    '[ -n "$A" ] &&\n  # B must be set too\n  [ -n "$B" ] || exit 1' \
+    '[ -n "$A" ] && # A first\n  [ -n "$B" ] || exit 1' \
+    '[ -n "$A" ] &&\n\n  [ -n "$B" ] || exit 1' \
+    'printf x |\n\n  grep -q x && echo y || echo n' \
+    '[ -n "$A" ] && { [ -n "$B" ]; } || exit 1' \
+    'echo "<<EOF"\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
+    'echo hi # <<EOF\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
+    'cat <<EOF\n$([ -n "$A" ] && [ -n "$B" ] || exit 1)\nEOF' \
+    'cat <<<EOF\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
+    'echo $((a<<b))\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
+    'a && x=$(y; z) || c' \
+    'echo "$(a && b || c)"'; do
+    printf 'jobs:\n  j:\n    steps:\n      - name: case\n        run: |\n' >"$d/w.yml"
+    printf '%b\n' "$body" | sed 's/^/          /' >>"$d/w.yml"
+    lint_flags_shape "$d/w.yml" || { printf 'not flagged:\n%b\n' "$body" >&2; rm -rf "$d"; return 1; }
+  done
+  # Intentionally over-flagged (not SC2015, but && and || share a joined
+  # line): && inside [[ ]], a quoted heredoc body, `a && b; c || d`, a
+  # quoted string, and || before && (`a || b && c`, the order SC2015 does not
+  # name). Rewrite them as if/then or split the lines.
+  for body in \
+    '[[ -n "$A" && -n "$B" ]] || exit 1' \
+    'test -n "$A" || test -n "$B" && echo one' \
+    "cat <<'EOF'\na && b || c\nEOF" \
+    'test -n "$A" && echo a; test -n "$B" || exit 1' \
+    'echo "a && b || c"'; do
+    printf 'jobs:\n  j:\n    steps:\n      - name: case\n        run: |\n' >"$d/w.yml"
+    printf '%b\n' "$body" | sed 's/^/          /' >>"$d/w.yml"
+    lint_flags_shape "$d/w.yml" || { printf 'expected to be over-flagged:\n%b\n' "$body" >&2; rm -rf "$d"; return 1; }
+  done
+  # Every YAML block scalar header is a multi-line script (|+, >-, |2, ...).
+  for hdr in '|+' '>-' '|2' '|2-' '|-2' '>+'; do
+    printf 'jobs:\n  j:\n    steps:\n      - name: bad\n        run: %s\n          [ -n "$A" ] && [ -n "$B" ] || exit 1\n' "$hdr" >"$d/bad5.yml"
+    lint_flags_shape "$d/bad5.yml" || { echo "block scalar run: $hdr is not read as a script" >&2; rm -rf "$d"; return 1; }
+  done
+  # Accepted: the if/then form, and || alone or && alone on a line.
+  printf 'jobs:\n  j:\n    steps:\n      - name: good\n        run: |\n          if [ -z "$A" ] || [ -z "$B" ]; then exit 1; fi\n          cmd || { echo no >&2; exit 1; }\n          test -n "$A" && echo a\n' >"$d/good.yml"
+  # An info-level shellcheck finding (SC2086, unquoted expansion) fails too.
+  if command -v shellcheck >/dev/null 2>&1; then
+    printf 'jobs:
+  j:
+    steps:
+      - run: echo $A
+' >"$d/info.yml"
+    if lint_runs "$d/info.yml" 2>/dev/null; then echo "an info-level shellcheck finding was accepted" >&2; rm -rf "$d"; return 1; fi
+  fi
+  lint_runs "$d/good.yml" || { echo "a clean script was rejected" >&2; rm -rf "$d"; return 1; }
+  rm -rf "$d"
+}
+
+# Without shellcheck the run: lint is FATAL under CI (CI or GITHUB_ACTIONS
+# set) and an explicit SKIP of the shellcheck part on a developer machine.
+t_run_scripts_lint_needs_shellcheck() {
+  local d t rc out
+  d=$(mktemp -d)
+  mkdir -p "$d/bin"
+  for t in python3 mktemp rm basename cat; do ln -s "$(command -v "$t")" "$d/bin/$t"; done
+  printf 'jobs:\n  j:\n    steps:\n      - run: echo ok\n' >"$d/w.yml"
+  rc=0
+  out=$( (PATH="$d/bin"; unset CI GITHUB_ACTIONS; lint_runs "$d/w.yml") 2>&1) || rc=$?
+  assert_eq 0 "$rc" "local: $out" || { rm -rf "$d"; return 1; }
+  case $out in *"SKIP: shellcheck not installed"*) ;; *) echo "no SKIP locally: $out" >&2; rm -rf "$d"; return 1 ;; esac
+  for t in CI GITHUB_ACTIONS; do
+    rc=0
+    out=$( (PATH="$d/bin"; unset CI GITHUB_ACTIONS; export "$t=true"; lint_runs "$d/w.yml") 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "no failure under $t without shellcheck" >&2; rm -rf "$d"; return 1; }
+    case $out in *"FATAL: shellcheck is required"*) ;; *) echo "no FATAL under $t: $out" >&2; rm -rf "$d"; return 1 ;; esac
+  done
+  rm -rf "$d"
+}
+
+# The build manifest is uploaded whenever it exists and the run was not
+# cancelled, so a failed packaging step still leaves it for diagnosis.
+t_engine_manifest_upload() {
+  local f="$WF/engine.yml" n_pkg n_man
+  step "$f" "Upload build manifest" | grep -qxF "        if: \${{ !cancelled() && hashFiles('build-manifest.json') != '' }}" ||
+    { echo "manifest upload is not if: !cancelled() && the manifest exists" >&2; return 1; }
+  n_pkg=$(body "$f" | grep -n -- "- name: $ENGINE_PKG_STEP\$" | cut -d: -f1)
+  n_man=$(body "$f" | grep -n -- '- name: Upload build manifest$' | cut -d: -f1)
+  [ "$n_pkg" -lt "$n_man" ] || { echo "manifest upload is not after packaging" >&2; return 1; }
+}
+
 # The pin is validated where it is read: executed with good and bad pins.
 t_gate_pin() {
   check_pin_step "$WF/gate.yml" "Read the pins"
@@ -663,6 +1051,14 @@ run_test "every uses: is pinned by 40-hex SHA" t_pinned
 run_test "read-only permissions, no secrets" t_permissions
 run_test "checkouts do not persist credentials" t_credentials
 run_test "engine.yml: smoke, wasmtime digest, triggers" t_engine
+run_test "engine.yml: workflow_call inputs and output" t_engine_call_inputs
+run_test "engine.yml: packaging only when called with package: true" t_engine_package_steps
+run_test "engine.yml: the package step runs both packagers" t_engine_package_exec
+run_test "engine.yml: a release call never saves the cache" t_engine_call_cache
+run_test "engine.yml: a release call has its own concurrency group" t_engine_call_concurrency
+run_test "engine.yml: the manifest is uploaded after a failed packaging" t_engine_manifest_upload
+run_test "run: scripts have no SC2015 shape and pass shellcheck -S info" t_run_scripts_lint
+run_test "run: lint is FATAL without shellcheck under CI" t_run_scripts_lint_needs_shellcheck
 run_test "queue.yml: fixtures, real check, drift" t_queue
 run_test "engine.yml, queue.yml: a Markdown-only pull request skips them" t_docs_only
 run_test "gate.yml: triggers, tiers, linked test tree, caches" t_gate
