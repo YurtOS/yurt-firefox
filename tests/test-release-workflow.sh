@@ -844,7 +844,7 @@ PY
   # finalize needs a prepared work dir, and refuses to run twice.
   finalize; assert_eq 1 "$RC" "second finalize: $OUT"
   case $OUT in *"finalize runs once"*) ;; *) echo "second finalize not refused by name: $OUT" >&2; return 1 ;; esac
-  setup_set; FIN_ENGINE=0 finalize; assert_eq 1 "$RC" "finalize without prepare: $OUT"
+  setup_set; FIN_ENGINE=$(printf "%064d" 0) finalize; assert_eq 1 "$RC" "finalize without prepare: $OUT"
   # A tag other than engine-v<package_version>.
   setup_set; prepare; FIN_TAG=engine-v147.0.4-2 finalize; assert_eq 1 "$RC" "other tag: $OUT"
   case $OUT in *"engine-v147.0.4-1"*) ;; *) echo "tag mismatch not explained: $OUT" >&2; return 1 ;; esac
