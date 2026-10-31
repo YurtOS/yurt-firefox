@@ -11,47 +11,12 @@ set -eu
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib.sh
 . "$ROOT/tests/lib.sh"
+# shellcheck source=workflow-lib.sh
+. "$ROOT/tests/workflow-lib.sh"
 
 WF="$ROOT/.github/workflows"
 SMOKE="wasmtime run --dir=. dist/bin/js -e 'print(6*7)'"
 WASMTIME_SHA=77c19ee0437991f9ac7837b9c269d9c7076744f85dad263fea5214cc2723c7ff
-
-# body <file>: the workflow text without full-line comments, so a commented-out
-# line cannot satisfy an assertion.
-body() { grep -Ev '^[[:space:]]*#' "$1"; }
-
-# has_line <file> <text>: some body line, leading blanks stripped, is exactly <text>.
-# It counts (grep -c reads all its input) rather than grep -q, which exits at
-# the first match and, under pipefail, fails the check when GNU sed then dies
-# of SIGPIPE ("sed: couldn't flush stdout: Broken pipe").
-has_line() { [ "$(body "$1" | sed 's/^[[:space:]]*//' | grep -cxF -- "$2")" -ge 1 ]; }
-
-# step <file> <name>: the body of the step named <name>, up to the next step.
-step() { body "$1" | awk -v n="- name: $2" '{t=$0; sub(/^[[:space:]]+/, "", t)} f && t ~ /^- name:/{exit} t == n{f=1} f{print}'; }
-
-# step_run <file> <name>: the step's `run:` script (a one-liner, or a `run: |`
-# block dedented).
-step_run() {
-  step "$1" "$2" | awk '
-    blk { if ($0 ~ /^[[:space:]]*$/) { print ""; next }
-          match($0, /^[[:space:]]*/)
-          if (ind == "") ind = RLENGTH
-          if (RLENGTH < ind) exit
-          print substr($0, ind + 1); next }
-    /^[[:space:]]*run: \|[[:space:]]*$/ { blk = 1; next }
-    /^[[:space:]]*run: / { sub(/^[[:space:]]*run: /, ""); print; exit }'
-}
-
-# exec_step <file> <name> <dir> [name=value...]: run the step's script in <dir>
-# as Actions runs a bash step (bash --noprofile --norc -eo pipefail), with the
-# given environment. Returns the script's status; output goes to stdout/stderr.
-exec_step() {
-  local f=$1 name=$2 dir=$3 script
-  shift 3
-  script=$(step_run "$f" "$name")
-  [ -n "$script" ] || { echo "${f##*/}: no run script in step '$name'" >&2; return 2; }
-  (cd "$dir" && env "$@" bash --noprofile --norc -eo pipefail -c "$script")
-}
 
 # check_pin_step <file> <step name>: the step accepts a 40-hex pin and writes
 # sha=<pin>; it fails, writing no sha=, on a branch name, an empty file, upper
@@ -77,18 +42,11 @@ check_pin_step() {
   rm -rf "$d"
 }
 
-# no_or_on <file> <pattern>: no body line matching <pattern> carries `||`, so a
-# failing check cannot be swallowed.
-no_or_on() {
-  local bad
-  bad=$(body "$1" | grep -F -- "$2" | grep -F '||' || true)
-  [ -z "$bad" ] || { printf '%s: failure swallowed:\n%s\n' "${1##*/}" "$bad" >&2; return 1; }
-}
-
 t_exist() {
   [ -f "$WF/queue.yml" ] || { echo "missing queue.yml" >&2; return 1; }
   [ -f "$WF/engine.yml" ] || { echo "missing engine.yml" >&2; return 1; }
   [ -f "$WF/gate.yml" ] || { echo "missing gate.yml" >&2; return 1; }
+  [ -f "$WF/release.yml" ] || { echo "missing release.yml" >&2; return 1; }
 }
 
 t_actionlint() {
@@ -100,22 +58,48 @@ t_actionlint() {
     echo "SKIP: actionlint not installed" >&2
     return 0
   fi
-  actionlint "$WF/queue.yml" "$WF/engine.yml" "$WF/gate.yml"
+  actionlint "$WF/queue.yml" "$WF/engine.yml" "$WF/gate.yml" "$WF/release.yml"
+}
+
+# pinned_ok <workflow> <allow-local-engine 0|1>: every `uses:` names a remote
+# action or workflow by a full 40-hex SHA. With 1, the one exception is a
+# job-level call of exactly ./.github/workflows/engine.yml (release.yml's
+# build job); any other local or unpinned `uses:` fails.
+pinned_ok() {
+  local f=$1 local_ok=$2 bad
+  [ -f "$f" ] || { echo "missing $f" >&2; return 1; }
+  bad=$(body "$f" | grep -E '^[[:space:]-]*uses:' | grep -Ev 'uses:[[:space:]]+[^@[:space:]./][^@[:space:]]*@[0-9a-f]{40}([[:space:]]+#.*)?$' || true)
+  if [ "$local_ok" = 1 ]; then
+    bad=$(printf '%s\n' "$bad" | grep -vx '    uses: ./.github/workflows/engine.yml' || true)
+  fi
+  [ -z "$bad" ] || { printf '%s: unpinned or local uses:\n%s\n' "${f##*/}" "$bad" >&2; return 1; }
+  body "$f" | grep -Eq '^[[:space:]-]*uses:' || { echo "${f##*/} has no uses:" >&2; return 1; }
 }
 
 t_pinned() {
-  local f bad
+  local f d
   for f in queue.yml engine.yml gate.yml; do
-    [ -f "$WF/$f" ] || { echo "missing $f" >&2; return 1; }
-    bad=$(body "$WF/$f" | grep -E '^[[:space:]-]*uses:' | grep -Ev 'uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]+#.*)?$' || true)
-    [ -z "$bad" ] || { printf '%s: unpinned uses:\n%s\n' "$f" "$bad" >&2; return 1; }
-    body "$WF/$f" | grep -Eq '^[[:space:]-]*uses:' || { echo "$f has no uses:" >&2; return 1; }
+    pinned_ok "$WF/$f" 0 || return 1
   done
+  pinned_ok "$WF/release.yml" 1 || return 1
+  has_line "$WF/release.yml" 'uses: ./.github/workflows/engine.yml' || { echo "release.yml does not call engine.yml" >&2; return 1; }
+  # The exception is that exact call in release.yml only: an unpinned remote
+  # action, a tag-pinned one, another local workflow, and the engine call in
+  # another workflow all still fail.
+  d=$(mktemp -d)
+  for bad in '      - uses: actions/checkout@v4' '      - uses: actions/checkout@3d3c42e5' \
+    '    uses: ./.github/workflows/gate.yml' '    uses: ./.github/workflows/engine.yml@main' \
+    '    uses: YurtOS/yurt-firefox/.github/workflows/engine.yml@main'; do
+    { cat "$WF/release.yml"; printf '%s\n' "$bad"; } >"$d/w.yml"
+    if pinned_ok "$d/w.yml" 1 2>/dev/null; then echo "accepted: $bad" >&2; rm -rf "$d"; return 1; fi
+  done
+  if pinned_ok "$WF/release.yml" 0 2>/dev/null; then echo "the local engine call passes without the exception" >&2; rm -rf "$d"; return 1; fi
+  rm -rf "$d"
 }
 
 t_credentials() {
   local f n p
-  for f in queue.yml engine.yml gate.yml; do
+  for f in queue.yml engine.yml gate.yml release.yml; do
     n=$(body "$WF/$f" | grep -cE 'uses: actions/checkout@')
     p=$(body "$WF/$f" | grep -cE '^[[:space:]]+persist-credentials: false$')
     [ "$n" -gt 0 ] && [ "$n" = "$p" ] ||
@@ -125,7 +109,7 @@ t_credentials() {
 
 t_permissions() {
   local f top block
-  for f in queue.yml engine.yml gate.yml; do
+  for f in queue.yml engine.yml gate.yml release.yml; do
     # The top-level block is exactly `permissions:` + `contents: read`, and no job
     # or step widens it with its own permissions.
     top=$(body "$WF/$f" | grep -E '^permissions:' || true)
@@ -140,6 +124,11 @@ t_permissions() {
       assert_eq "contents: read
 pull-requests: read
 actions: read" "$block" "gate.yml tier job permissions"
+    elif [ "$f" = release.yml ]; then
+      # One exception: release.yml's publish job, and only it, may write.
+      assert_eq 1 "$(body "$WF/$f" | grep -cE '^[[:space:]]+permissions:')" "release.yml job-level permissions blocks"
+      block=$(body "$WF/$f" | awk '/^  publish:$/{j=1} j && /^    permissions:/{f=1; next} f && !/^      /{exit} f{print}' | sed 's/^[[:space:]]*//')
+      assert_eq "contents: write" "$block" "release.yml publish job permissions"
     else
       ! body "$WF/$f" | grep -Eq '^[[:space:]]+permissions:' || { echo "$f has job-level permissions" >&2; return 1; }
     fi
@@ -438,121 +427,6 @@ STUB
   rm -rf "$d"
 }
 
-# concurrency_value <file> <key>: the value of <key> in the top-level
-# `concurrency:` block.
-concurrency_value() {
-  body "$1" | awk -v k="$2" '/^concurrency:/{f=1; next} f && /^[^[:space:]]/{exit}
-    f { t=$0; sub(/^[[:space:]]+/, "", t); if (index(t, k ": ") == 1) { print substr(t, length(k) + 3); exit } }'
-}
-
-# gh_eval <template> <github-json> [<inputs-json>]: evaluate a workflow value
-# containing ${{ }} expressions the way Actions does for the subset used here:
-# github.* and inputs.* property paths (missing -> null; no inputs-json is the
-# empty inputs context of a pull_request or push run), string/number/boolean/null literals, ==, !=,
-# !, &&, || (returning an operand, not a boolean), parentheses; string == is
-# case-insensitive; null, false, 0 and '' are falsy; null interpolates as ''.
-gh_eval() {
-  local no_inputs='{}'
-  python3 -I - "$1" "$2" "${3:-$no_inputs}" <<'PY'
-import json, re, sys
-
-template = sys.argv[1]
-ctx = {"github": json.loads(sys.argv[2]), "inputs": json.loads(sys.argv[3])}
-TOK = re.compile(r"\s*(?:(?P<s>'(?:[^']|'')*')|(?P<n>-?\d+(?:\.\d+)?)|(?P<op>==|!=|&&|\|\||!|\(|\))|(?P<id>[A-Za-z_][A-Za-z0-9_.-]*))")
-
-def tokens(src):
-    out, i = [], 0
-    while i < len(src):
-        if src[i:].strip() == "":
-            break
-        m = TOK.match(src, i)
-        if not m:
-            sys.exit("gh_eval: cannot parse at: " + src[i:])
-        i = m.end()
-        out.append((m.lastgroup, m.group(m.lastgroup)))
-    return out
-
-def truthy(v):
-    return v not in (None, False, 0, "") and v == v
-
-def eq(a, b):
-    if isinstance(a, str) and isinstance(b, str):
-        return a.lower() == b.lower()
-    return a == b
-
-class P:
-    def __init__(self, t):
-        self.t, self.i = t, 0
-    def peek(self):
-        return self.t[self.i] if self.i < len(self.t) else (None, None)
-    def take(self):
-        tok = self.peek()
-        self.i += 1
-        return tok
-    def expr(self):
-        v = self.and_()
-        while self.peek() == ("op", "||"):
-            self.take()
-            r = self.and_()
-            v = v if truthy(v) else r
-        return v
-    def and_(self):
-        v = self.cmp()
-        while self.peek() == ("op", "&&"):
-            self.take()
-            r = self.cmp()
-            v = r if truthy(v) else v
-        return v
-    def cmp(self):
-        v = self.unary()
-        while self.peek() in (("op", "=="), ("op", "!=")):
-            op = self.take()[1]
-            r = self.unary()
-            v = eq(v, r) if op == "==" else not eq(v, r)
-        return v
-    def unary(self):
-        if self.peek() == ("op", "!"):
-            self.take()
-            return not truthy(self.unary())
-        kind, val = self.take()
-        if kind == "op" and val == "(":
-            v = self.expr()
-            if self.take() != ("op", ")"):
-                sys.exit("gh_eval: missing )")
-            return v
-        if kind == "s":
-            return val[1:-1].replace("''", "'")
-        if kind == "n":
-            return float(val) if "." in val else int(val)
-        if kind == "id":
-            if val in ("true", "false"):
-                return val == "true"
-            if val == "null":
-                return None
-            cur = ctx
-            for part in val.split("."):
-                cur = cur.get(part) if isinstance(cur, dict) else None
-            return cur
-        sys.exit("gh_eval: unexpected token %r" % (val,))
-
-def ev(src):
-    p = P(tokens(src))
-    v = p.expr()
-    if p.peek() != (None, None):
-        sys.exit("gh_eval: trailing tokens in: " + src)
-    return v
-
-def show(v):
-    if v is None:
-        return ""
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return str(v)
-
-print(re.sub(r"\$\{\{(.*?)\}\}", lambda m: show(ev(m.group(1))), template))
-PY
-}
-
 # The gate's concurrency group: a push, a `ci:full` or a `gate` label on a PR
 # replaces the run in flight. A run started by any other label gets a group
 # of its own (its run id), so it cancels nothing, and the tier job's `if:`
@@ -615,13 +489,6 @@ ENGINE_PKG_STEP='Package the engine and test sources'
 ENGINE_UPLOAD_PKG_STEP='Upload the package'
 ENGINE_SAVE_STEP='Save ~/.mozbuild'
 
-# step_if <file> <step>: the step's `if:` value, wrapped in ${{ }} if bare.
-step_if() {
-  local v
-  v=$(step "$1" "$2" | sed -n 's/^[[:space:]]*if:[[:space:]]*//p' | head -1)
-  case $v in '${{'*) printf '%s\n' "$v" ;; '') ;; *) printf '${{ %s }}\n' "$v" ;; esac
-}
-
 # Contexts: an engine PR run, a main push, an engine dispatch, release.yml's
 # tag push calling engine.yml, and release.yml's dry-run dispatch on main.
 CTX_PR='{"event_name":"pull_request","ref":"refs/pull/7/merge"}'
@@ -677,10 +544,13 @@ t_engine_package_steps() {
   printf '%s\n' "$s" | grep -qE '^[[:space:]]+PACKAGE_VERSION: \$\{\{ inputs\.version \}\}$' &&
     printf '%s\n' "$s" | grep -qE '^[[:space:]]+PACKAGE_REVISION: \$\{\{ inputs\.revision \}\}$' ||
     { echo "package step env does not bind inputs.version/revision" >&2; return 1; }
-  # The upload: package-out/ as engine-package, failing when empty.
+  # The upload: package-out/ as engine-package-<run attempt> (a re-run never
+  # collides with an earlier attempt's upload), uncompressed (the archives
+  # are zstd), failing when empty.
   s=$(step "$f" "$ENGINE_UPLOAD_PKG_STEP")
   printf '%s\n' "$s" | grep -qE 'uses: actions/upload-artifact@[0-9a-f]{40}' || { echo "package upload is not upload-artifact" >&2; return 1; }
-  printf '%s\n' "$s" | grep -qE '^[[:space:]]+name: engine-package$' || { echo "package artifact is not engine-package" >&2; return 1; }
+  printf '%s\n' "$s" | grep -qxF '          name: engine-package-${{ github.run_attempt }}' || { echo "package artifact is not engine-package-<attempt>" >&2; return 1; }
+  printf '%s\n' "$s" | grep -qx '          compression-level: 0' || { echo "package upload recompresses" >&2; return 1; }
   printf '%s\n' "$s" | grep -qE '^[[:space:]]+path: package-out/$' || { echo "package upload path is not package-out/" >&2; return 1; }
   printf '%s\n' "$s" | grep -qE '^[[:space:]]+if-no-files-found: error$' || { echo "package upload tolerates no files" >&2; return 1; }
   # Both run only for a call with package: true.
@@ -708,11 +578,11 @@ t_engine_package_exec() {
   chmod +x "$d/scripts/"*.sh
   : >"$d/calls"; : >"$d/out"
   exec_step "$f" "$ENGINE_PKG_STEP" "$d" CALLS="$d/calls" GITHUB_OUTPUT="$d/out" PACKAGE_VERSION=147.0.4 \
-    PACKAGE_REVISION=1 >/dev/null 2>&1 || { echo "package step failed" >&2; rm -rf "$d"; return 1; }
+    PACKAGE_REVISION=1 GITHUB_RUN_ATTEMPT=3 >/dev/null 2>&1 || { echo "package step failed" >&2; rm -rf "$d"; return 1; }
   assert_eq "package-test-sources.sh --tree firefox --out package-out --version 147.0.4 --revision 1 --jstests
 package-engine.sh --dist firefox/obj-nightmonkey-sm/dist --manifest build-manifest.json --out package-out --version 147.0.4 --revision 1 --test-sources package-out" \
     "$(cat "$d/calls")" "packager calls" || { rm -rf "$d"; return 1; }
-  grep -qx 'artifact=engine-package' "$d/out" || { echo "no artifact=engine-package output" >&2; rm -rf "$d"; return 1; }
+  grep -qx 'artifact=engine-package-3' "$d/out" || { echo "no artifact=engine-package-<attempt> output: $(cat "$d/out")" >&2; rm -rf "$d"; return 1; }
   for env in "PACKAGE_VERSION= PACKAGE_REVISION=1" "PACKAGE_VERSION=147.0.4 PACKAGE_REVISION="; do
     : >"$d/calls"
     rc=0
@@ -775,123 +645,9 @@ t_engine_call_concurrency() {
   assert_eq false "$(gh_eval "$cancel" "$CTX_DRY" "$IN_CALL")" "the release dry run cancels in progress"
 }
 
-# run_scripts <workflow> <dir>: write every `run:` script of <workflow> to
-# <dir>/<line>.sh, ${{ }} expressions replaced by a placeholder as actionlint
-# does before shellcheck. Prints the number of scripts.
-run_scripts() {
-  python3 -I - "$1" "$2" <<'PY'
-import re, sys
-path, out = sys.argv[1:]
-lines = open(path).read().split("\n")
-n, i = 0, 0
-while i < len(lines):
-    m = re.match(r"^(\s*)(?:- )?run: (.*)$", lines[i])
-    if not m or lines[i].lstrip().startswith("#"):
-        i += 1
-        continue
-    start = i + 1
-    # Any block scalar header: | or > with an optional chomping (+ -) and
-    # indentation (1-9) indicator, in either order.
-    if re.fullmatch(r"[|>](?:[+-][1-9]?|[1-9][+-]?)?", m.group(2).strip()):
-        body, j, ind = [], i + 1, None
-        while j < len(lines):
-            l = lines[j]
-            if l.strip() == "":
-                body.append(""); j += 1; continue
-            k = len(l) - len(l.lstrip())
-            if ind is None:
-                ind = k
-            if k < ind:
-                break
-            body.append(l[ind:]); j += 1
-        script, i = "\n".join(body), j
-    else:
-        script, i = m.group(2), i + 1
-    script = re.sub(r"\$\{\{.*?\}\}", "_GH_EXPR_", script)
-    with open("%s/%d.sh" % (out, start), "w") as f:
-        f.write("#!/bin/bash\n" + script + "\n")
-    n += 1
-print(n)
-PY
-}
-
-# sc2015_shape <script>: print the joined logical lines holding both && and
-# || (shellcheck SC2015 is `A && B || C`: C also runs when B fails). This is a
-# conservative backstop for CI's shellcheck 0.9 (the hosted actionlint is the
-# real gate): quotes, heredocs, `;`, $( ) and [[ ]] are not parsed, so it may
-# over-flag; a flagged line is rewritten as an explicit if/then. A line ending
-# in && || | or \ (an inline comment after && || | allowed) continues onto the
-# next; comment-only lines, and blank lines inside a join, are skipped
-# without ending the joined line.
-sc2015_shape() {
-  python3 -I - "$1" <<'PY'
-import re, sys
-text = open(sys.argv[1]).read()
-logical, cur = [], ""
-for line in text.split("\n"):
-    if re.match(r"^\s*#", line):
-        continue
-    # A blank line inside an open join (after a trailing && || |) does not
-    # end the command in bash, so it does not end the joined line either.
-    if cur and not line.strip():
-        continue
-    cur += line + " "
-    if re.search(r"(&&|\|\||\|)\s*(#.*)?$", line) or re.search(r"\\$", line):
-        continue
-    logical.append(cur)
-    cur = ""
-logical.append(cur)
-for l in logical:
-    if "&&" in l and "||" in l:
-        print(l.strip())
-PY
-}
-
-# lint_flags_shape <workflow>: lint_runs fails on <workflow> (nonzero status)
-# and reports the SC2015 shape; either alone is not enough.
-lint_flags_shape() {
-  local out rc=0
-  out=$(lint_runs "$1" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || return 1
-  case $out in *"has the SC2015 shape"*) return 0 ;; *) return 1 ;; esac
-}
-
-# lint_runs <workflow>: every run: script is free of the SC2015 shape (which
-# CI's actionlint + shellcheck 0.9 report as info and fail on, while a newer
-# local shellcheck does not) and passes shellcheck -S info. If shellcheck is
-# not installed, that is FATAL when CI or GITHUB_ACTIONS is set, and an
-# explicit SKIP of the shellcheck part otherwise.
-lint_runs() {
-  local d f bad=0 hits sc=1
-  if ! command -v shellcheck >/dev/null 2>&1; then
-    if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
-      echo "FATAL: shellcheck is required to lint run: scripts under CI" >&2
-      return 1
-    fi
-    echo "SKIP: shellcheck not installed; ${1##*/} run: scripts get the SC2015 shape check only" >&2
-    sc=0
-  fi
-  d=$(mktemp -d)
-  run_scripts "$1" "$d" >/dev/null || { rm -rf "$d"; return 1; }
-  for f in "$d"/*.sh; do
-    [ -e "$f" ] || continue
-    hits=$(sc2015_shape "$f")
-    if [ -n "$hits" ]; then
-      printf '%s: run: at line %s has the SC2015 shape (A && B || C):\n%s\n' "${1##*/}" "$(basename "$f" .sh)" "$hits" >&2
-      bad=1
-    fi
-    if [ "$sc" = 1 ] && ! shellcheck -S info -s bash "$f" >&2; then
-      echo "${1##*/}: run: at line $(basename "$f" .sh) has shellcheck findings" >&2
-      bad=1
-    fi
-  done
-  rm -rf "$d"
-  return "$bad"
-}
-
 t_run_scripts_lint() {
   local f d n
-  for f in queue.yml engine.yml gate.yml; do
+  for f in queue.yml engine.yml gate.yml release.yml; do
     lint_runs "$WF/$f" || return 1
   done
   d=$(mktemp -d)

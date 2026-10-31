@@ -1,0 +1,253 @@
+name: release
+
+# Publishes an engine release: a checksummed, relocatable SpiderMonkey package,
+# its test sources and the two toolchain archives, proven on a clean runner
+# against NightMonkey before anything is published.
+#
+#   check-tag  the tag is engine-v<UPSTREAM's version>-<n>, its commit is on
+#              main, and NIGHTMONKEY_PIN contains RELEASE_REQUIRES_NIGHTMONKEY
+#              (the NightMonkey that can consume packages) on NightMonkey's yurt
+#   build      engine.yml with package: true (one wasmtime pin, cache logic and
+#              smoke test); uploads the engine-package artifact
+#   accept     a fresh runner without ~/.mozbuild: re-checks the package,
+#              mirrors the toolchains verbatim from the URLs recorded at build
+#              time (digest-checked), builds NightMonkey at NIGHTMONKEY_PIN
+#              against the package and runs both jit lanes and the snapshot
+#              round-trip (scripts/accept-engine.sh --require-clean-runner),
+#              then writes the final MANIFEST.json and uploads release-set
+#   publish    a tag push only: re-checks main, verifies every asset against
+#              the final manifest and that manifest against accept's digest,
+#              refuses an existing release, and creates it
+#
+# A workflow_dispatch is a dry run: it builds and accepts (for the tag named
+# in its input, on the dispatched commit) and never publishes.
+
+on:
+  push:
+    tags: ['engine-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag the dry run stands for (engine-v<version>-<n>); nothing is published
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+# Never the group engine.yml takes for this call (engine-release-<ref>): equal
+# names would make the called build wait on its caller. A release is never
+# cancelled in progress; a second run for the same ref queues.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check-tag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      revision: ${{ steps.tag.outputs.revision }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Check out this repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A tag push names the tag; a dry run names the tag it stands for.
+      - name: Check the tag
+        id: tag
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        run: scripts/release-check.sh tag "$TAG"
+
+      - name: Require the commit on main
+        run: scripts/require-ref-on-main.sh "$GITHUB_SHA"
+
+      - name: Check out NightMonkey yurt (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: YurtOS/nightmonkey
+          ref: yurt
+          path: nightmonkey-history
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require RELEASE_REQUIRES_NIGHTMONKEY in NIGHTMONKEY_PIN
+        run: scripts/release-check.sh nightmonkey nightmonkey-history
+
+  build:
+    needs: check-tag
+    uses: ./.github/workflows/engine.yml
+    with:
+      package: true
+      version: ${{ needs.check-tag.outputs.version }}
+      revision: ${{ needs.check-tag.outputs.revision }}
+
+  accept:
+    needs: [check-tag, build]
+    runs-on: ubuntu-24.04
+    # NightMonkey build (~10 min) + two jit lanes (ci-suite.sh caps each at
+    # 60 min) + downloads and the snapshot round-trip.
+    timeout-minutes: 200
+    outputs:
+      manifest-sha256: ${{ steps.finalize.outputs.manifest_sha256 }}
+      # Names carry the run attempt: a re-run never collides with an earlier
+      # attempt's upload, and a re-run of publish reads this attempt's set.
+      release-set-artifact: release-set-${{ github.run_attempt }}
+    env:
+      # engine.yml's pin (tests/test-release-workflow.sh keeps them equal).
+      WASMTIME_VERSION: v50.0.0
+      WASMTIME_SHA256: 77c19ee0437991f9ac7837b9c269d9c7076744f85dad263fea5214cc2723c7ff
+      TAG: ${{ needs.check-tag.outputs.tag }}
+      VERSION: ${{ needs.check-tag.outputs.version }}
+      REVISION: ${{ needs.check-tag.outputs.revision }}
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare logs
+        run: mkdir -p "$RUNNER_TEMP/nightmonkey-logs"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip python3-venv build-essential cmake ninja-build zstd
+
+      - name: Install pinned wasmtime
+        run: |
+          url="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+          curl --retry 3 -fsSL -o "$RUNNER_TEMP/wasmtime.tar.xz" "$url"
+          echo "${WASMTIME_SHA256}  $RUNNER_TEMP/wasmtime.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/wasmtime"
+          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP/wasmtime" --strip-components=1
+          echo "$RUNNER_TEMP/wasmtime" >> "$GITHUB_PATH"
+
+      - name: Read NIGHTMONKEY_PIN
+        id: pin
+        run: |
+          pin=$(tr -d '[:space:]' < NIGHTMONKEY_PIN)
+          if ! printf '%s\n' "$pin" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "NIGHTMONKEY_PIN must hold one full 40-hex SHA, got '$pin'" >&2
+            exit 1
+          fi
+          echo "sha=$pin" >> "$GITHUB_OUTPUT"
+
+      - name: Download the engine package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.package-artifact }}
+          path: ${{ runner.temp }}/package-out
+
+      # Re-checks the package, mirrors the toolchains (digest-checked) and
+      # extracts everything under $RUNNER_TEMP/release, never ~/.mozbuild.
+      - name: Prepare the release set
+        id: prepare
+        run: scripts/release-set.sh prepare --package-out "$RUNNER_TEMP/package-out" --version "$VERSION" --revision "$REVISION" --work "$RUNNER_TEMP/release"
+
+      - name: Check out NightMonkey at NIGHTMONKEY_PIN
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: YurtOS/nightmonkey
+          ref: ${{ steps.pin.outputs.sha }}
+          path: nightmonkey
+          persist-credentials: false
+
+      - name: Install Rust from rust-toolchain.toml
+        working-directory: nightmonkey
+        run: |
+          rustup show
+          rustup target add wasm32-wasip1
+          rustup component add rust-src
+
+      - name: Accept the engine
+        env:
+          TOOLCHAIN_ROOT: ${{ steps.prepare.outputs.toolchain_root }}
+          SYSROOT: ${{ steps.prepare.outputs.sysroot }}
+        run: scripts/accept-engine.sh --package "$RUNNER_TEMP/release/package" --testsrc "$RUNNER_TEMP/release/testsrc" --toolchain "$TOOLCHAIN_ROOT" --sysroot "$SYSROOT" --nightmonkey nightmonkey --require-clean-runner
+
+      # The engine digest is prepare's step output, not a file in the work dir:
+      # an asset changed there after prepare is refused.
+      - name: Finalize the release manifest
+        id: finalize
+        env:
+          ENGINE_SHA256: ${{ steps.prepare.outputs.engine_sha256 }}
+        run: scripts/release-set.sh finalize --work "$RUNNER_TEMP/release" --tag "$TAG" --engine-sha256 "$ENGINE_SHA256"
+
+      - name: Upload the release set
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-set-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release/release-set/
+          if-no-files-found: error
+          # The archives are zstd already.
+          compression-level: 0
+
+      - name: Upload acceptance logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-accept-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightmonkey-logs
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    needs: [check-tag, accept]
+    # A workflow_dispatch can target a tag, so ref_type alone is not enough.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.check-tag.outputs.tag }}
+      VERSION: ${{ needs.check-tag.outputs.version }}
+      REVISION: ${{ needs.check-tag.outputs.revision }}
+    steps:
+      - name: Check out this repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # --verify-tag only checks that the tag exists; a tag moved or deleted
+      # during the hours this run took must not publish what was built here.
+      - name: Require the tag to still name this commit
+        run: scripts/release-check.sh tag-commit "$TAG" "$GITHUB_SHA"
+
+      - name: Require the tag's commit on main
+        run: scripts/require-ref-on-main.sh "$GITHUB_SHA"
+
+      - name: Download the release set
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.accept.outputs.release-set-artifact }}
+          path: ${{ runner.temp }}/release-set
+
+      # The manifest travels in the same artifact, so it alone proves only
+      # internal consistency; its digest comes from accept's job output.
+      - name: Verify the release set
+        env:
+          MANIFEST_SHA256: ${{ needs.accept.outputs.manifest-sha256 }}
+        run: scripts/release-set.sh verify --dir "$RUNNER_TEMP/release-set" --manifest-sha256 "$MANIFEST_SHA256" --version "$VERSION" --revision "$REVISION" --tag "$TAG"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/release-publish.sh --tag "$TAG" --dir "$RUNNER_TEMP/release-set"
