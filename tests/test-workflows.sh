@@ -821,7 +821,8 @@ PY
 # real gate): quotes, heredocs, `;`, $( ) and [[ ]] are not parsed, so it may
 # over-flag; a flagged line is rewritten as an explicit if/then. A line ending
 # in && || | or \ (an inline comment after && || | allowed) continues onto the
-# next; comment-only lines are skipped without ending the joined line.
+# next; comment-only lines, and blank lines inside a join, are skipped
+# without ending the joined line.
 sc2015_shape() {
   python3 -I - "$1" <<'PY'
 import re, sys
@@ -829,6 +830,10 @@ text = open(sys.argv[1]).read()
 logical, cur = [], ""
 for line in text.split("\n"):
     if re.match(r"^\s*#", line):
+        continue
+    # A blank line inside an open join (after a trailing && || |) does not
+    # end the command in bash, so it does not end the joined line either.
+    if cur and not line.strip():
         continue
     cur += line + " "
     if re.search(r"(&&|\|\||\|)\s*(#.*)?$", line) or re.search(r"\\$", line):
