@@ -860,6 +860,17 @@ PY
     case $OUT in *"$P-$a.tar.zst"*) ;; *) echo "swapped $a not named: $OUT" >&2; return 1 ;; esac
     [ ! -e "$W/release-set/MANIFEST.json" ] || { echo "manifest written over a swapped $a" >&2; return 1; }
   done
+  # The engine replaced after prepare by a valid archive with the same
+  # manifest inside and one header changed: only prepare's digest tells.
+  setup_set; prepare; assert_eq 0 "$RC" "$OUT"
+  local x
+  x=$(mktemp -d "$BASE/swap.XXXXXX")
+  zstd -q -dc "$W/release-set/$P-wasm32-wasi.tar.zst" | "$TAR" -xf - -C "$x"
+  echo '// changed' >>"$x/spidermonkey/system_wrappers/stdio.h"
+  (cd "$x" && "$TAR" -cf - spidermonkey) | zstd -q -c >"$W/release-set/$P-wasm32-wasi.tar.zst"
+  printf '%s  %s\n' "$(digest "$W/release-set/$P-wasm32-wasi.tar.zst")" "$P-wasm32-wasi.tar.zst" >"$W/release-set/$P-wasm32-wasi.tar.zst.sha256"
+  finalize; assert_eq 1 "$RC" "engine re-made after prepare: $OUT"
+  case $OUT in *"$P-wasm32-wasi.tar.zst: sha256 is not prepare's"*) ;; *) echo "engine swap not named: $OUT" >&2; return 1 ;; esac
   setup_set; prepare; FIN_ENGINE='' finalize; assert_eq 2 "$RC" "no engine digest: $OUT"
 }
 
@@ -929,6 +940,18 @@ PY
     verify "$(digest "$D/MANIFEST.json")"; assert_eq 1 "$RC" "swapped $a, manifest trusted: $OUT"
     case $OUT in *"$P-$a.tar.zst"*) ;; *) echo "swapped $a not named: $OUT" >&2; return 1 ;; esac
   done
+  # A mirror_of other than the URL the build recorded.
+  setup_final
+  python3 - "$D/MANIFEST.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+for a in m["release"]["assets"]:
+    if "mirror_of" in a:
+        a["mirror_of"] = "https://mirror.example.invalid/" + a["name"]
+json.dump(m, open(sys.argv[1], "w"), indent=2, sort_keys=True)
+PY
+  verify "$(digest "$D/MANIFEST.json")"; assert_eq 1 "$RC" "mirror_of changed: $OUT"
+  case $OUT in *"mirror_of"*) ;; *) echo "mirror_of not named: $OUT" >&2; return 1 ;; esac
 }
 
 # --- scripts/release-publish.sh ----------------------------------------------
