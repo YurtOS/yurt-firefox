@@ -31,18 +31,26 @@
 #     package=, testsrc=, toolchain_root=, sysroot= (also to $GITHUB_OUTPUT).
 #     <work> must not exist or be empty.
 #
-#   release-set.sh finalize --work DIR --tag TAG
+#   release-set.sh finalize --work DIR --tag TAG --engine-sha256 H
 #     accept job, after the acceptance run: writes <work>/release-set/
 #     MANIFEST.json, package-out's manifest plus release: {tag, assets: [{name,
 #     sha256, size, mirror_of (toolchains)}]}, and prints manifest_sha256=
 #     (also to $GITHUB_OUTPUT), which publish checks against. TAG must be
-#     engine-v<package_version>.
+#     engine-v<package_version>. Nothing in <work> is trusted on its own: the
+#     engine archive must have digest H (prepare's engine_sha256 step output,
+#     outside <work>), and the manifest inside it is the record the others
+#     are held to: the toolchain assets must have its toolchain[] digests,
+#     the bundles its test_sources digests. An asset swapped after prepare,
+#     .sha256 regenerated or not, is refused.
 #
-#   release-set.sh verify --dir DIR --manifest-sha256 H --version V --revision N
+#   release-set.sh verify --dir DIR --manifest-sha256 H --version V --revision N --tag TAG
 #     publish job: DIR holds exactly the ten asset files and MANIFEST.json;
 #     MANIFEST.json's sha256 is H (accept's job output, so an artifact swapped
-#     after accept is caught even with a self-consistent manifest); every
-#     asset's digest and size are the manifest's and its .sha256 agrees.
+#     after accept is caught even with a self-consistent manifest); its
+#     release.tag is TAG; every asset's digest and size are the manifest's and
+#     its .sha256 agrees; and the toolchain assets and bundles have the
+#     digests the build recorded (toolchain[], test_sources), mirror_of the
+#     recorded URL.
 #
 # Needs GNU tar (tar or gtar), zstd, curl (prepare) and python3.
 # Exit codes: 0 ok; 1 refused or failed (the message names the file); 2 usage.
@@ -57,8 +65,8 @@ CAP_DEFAULT=2040109465
 usage() {
   [ $# -eq 0 ] || echo "release-set: $*" >&2
   echo "usage: release-set.sh prepare --package-out DIR --version V --revision N --work DIR" >&2
-  echo "       release-set.sh finalize --work DIR --tag TAG" >&2
-  echo "       release-set.sh verify --dir DIR --manifest-sha256 H --version V --revision N" >&2
+  echo "       release-set.sh finalize --work DIR --tag TAG --engine-sha256 H" >&2
+  echo "       release-set.sh verify --dir DIR --manifest-sha256 H --version V --revision N --tag TAG" >&2
   exit 2
 }
 die() { echo "release-set: $*" >&2; exit 1; }
@@ -77,10 +85,10 @@ emit() {
 [ $# -ge 1 ] || usage
 cmd=$1
 shift
-package_out= version= revision= work= tag= dir= expected=
+package_out= version= revision= work= tag= dir= expected= engine_sha=
 while [ $# -gt 0 ]; do
   case $1 in
-    --package-out | --version | --revision | --work | --tag | --dir | --manifest-sha256)
+    --package-out | --version | --revision | --work | --tag | --dir | --manifest-sha256 | --engine-sha256)
       [ $# -ge 2 ] || usage "$1 needs a value"
       case $1 in
         --package-out) package_out=$2 ;;
@@ -90,6 +98,7 @@ while [ $# -gt 0 ]; do
         --tag) tag=$2 ;;
         --dir) dir=$2 ;;
         --manifest-sha256) expected=$2 ;;
+        --engine-sha256) engine_sha=$2 ;;
       esac
       shift 2 ;;
     *) usage "unknown argument: $1" ;;
@@ -243,7 +252,9 @@ PY
     digest=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[int(sys.argv[2])]["sha256"])' "$work/toolchains.json" "$i")
     asset=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[int(sys.argv[2])]["asset"])' "$work/toolchains.json" "$i")
     i=$((i + 1))
-    if ! curl --retry 3 -fsSL -o "$work/download/$name" "$url"; then
+    # https only, redirects included, and never more than the asset cap.
+    if ! curl --retry 3 -fsSL --proto =https --proto-redir =https --max-filesize "$cap" \
+      -o "$work/download/$name" "$url"; then
       die "$name: download failed from $url"
     fi
     got=$(pc_sha256_line "$work/download/$name")
@@ -252,12 +263,27 @@ PY
     size=$(wc -c <"$work/download/$name" | tr -d ' ')
     [ "$size" -le "$cap" ] || die "$name: $size bytes exceeds the $cap-byte release asset cap"
     top=$(zstd -q -dc "$work/download/$name" | python3 -I -c '
-import sys, tarfile
+import posixpath, re, sys, tarfile
 tops, dirs = set(), set()
+def inside(path, top_):
+    p = posixpath.normpath(path)
+    return not p.startswith("/") and (p == top_ or p.startswith(top_ + "/"))
 for m in tarfile.open(fileobj=sys.stdin.buffer, mode="r|"):
     parts = [x for x in m.name.split("/") if x not in ("", ".")]
     if not parts or m.name.startswith("/") or ".." in parts:
         sys.exit("bad member %r" % m.name)
+    name = "/".join(parts)
+    # Regular files, directories, and links that stay inside the top-level
+    # directory (clang ships clang++ as a link); nothing else.
+    if m.issym():
+        target = posixpath.join(posixpath.dirname(name), m.linkname)
+        if m.linkname.startswith("/") or not inside(target, parts[0]):
+            sys.exit("symlink %r -> %r leaves %s/" % (name, m.linkname, parts[0]))
+    elif m.islnk():
+        if not inside(m.linkname, parts[0]):
+            sys.exit("hardlink %r -> %r leaves %s/" % (name, m.linkname, parts[0]))
+    elif not (m.isfile() or m.isdir()):
+        sys.exit("member %r is not a regular file, directory or link" % name)
     tops.add(parts[0])
     if len(parts) == 1 and m.isdir():
         dirs.add(parts[0])
@@ -268,6 +294,9 @@ if len(tops) != 1:
 top = tops.pop()
 if top not in dirs:
     sys.exit("top-level entry %r is not a directory" % top)
+# It becomes a path in the step outputs: one plain component.
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", top):
+    sys.exit("top-level directory name %r is not a plain name" % top)
 print(top)
 ') || die "$name: layout: $top"
     [ -n "$top" ] || die "$name: no top-level directory"
@@ -295,22 +324,58 @@ print(top)
   cp "$package_out/MANIFEST.json" "$work/package-manifest.json"
   mv "$work/set.tmp" "$work/release-set"
   rm -rf "$work/download"
-  emit "package=$work/package" "testsrc=$work/testsrc" "toolchain_root=$toolchain_root" "sysroot=$sysroot"
+  local engine
+  engine=$(pc_sha256_line "$work/release-set/$p-wasm32-wasi.tar.zst")
+  emit "package=$work/package" "testsrc=$work/testsrc" "toolchain_root=$toolchain_root" "sysroot=$sysroot" \
+    "engine_sha256=${engine%% *}"
 }
 
 finalize() {
   [ -n "$work" ] && [ -n "$tag" ] || usage "finalize needs --work and --tag"
+  [[ $engine_sha =~ ^[0-9a-f]{64}$ ]] || usage "--engine-sha256 must be a sha256, got '$engine_sha'"
   [ -d "$work/release-set" ] && [ -f "$work/package-manifest.json" ] && [ -f "$work/toolchains.json" ] ||
     die "$work is not a prepared work directory (run prepare first)"
   [ ! -e "$work/release-set/MANIFEST.json" ] || die "$work/release-set/MANIFEST.json exists; finalize runs once"
-  python3 -I - "$work" "$tag" <<'PY' || exit 1
-import hashlib, json, os, sys
-work, tag = sys.argv[1:]
+  python3 -I - "$work" "$tag" "$engine_sha" <<'PY' || exit 1
+import hashlib, io, json, os, sys, tarfile, zlib
+work, tag, engine_sha = sys.argv[1:]
 d = os.path.join(work, "release-set")
+def sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 m = json.load(open(os.path.join(work, "package-manifest.json")))
-if tag != "engine-v" + str(m.get("package_version")):
-    sys.exit("release-set: tag %r is not engine-v%s" % (tag, m.get("package_version")))
-mirrors = {t["asset"]: t["url"] for t in json.load(open(os.path.join(work, "toolchains.json")))}
+pv = str(m.get("package_version"))
+p = "spidermonkey_" + pv
+if tag != "engine-v" + pv:
+    sys.exit("release-set: tag %r is not engine-v%s" % (tag, pv))
+engine = p + "-wasm32-wasi.tar.zst"
+if sha(os.path.join(d, engine)) != engine_sha:
+    sys.exit("release-set: %s: sha256 is not prepare's %s; it changed after prepare" % (engine, engine_sha))
+# The record: the manifest inside the (anchored) engine archive.
+import subprocess
+raw = subprocess.run(["zstd", "-q", "-dc", os.path.join(d, engine)], check=True, capture_output=True).stdout
+with tarfile.open(fileobj=io.BytesIO(raw)) as t:
+    rec = json.load(t.extractfile("spidermonkey/MANIFEST.json"))
+if rec != m:
+    sys.exit("release-set: package-manifest.json is not the engine archive's MANIFEST.json")
+mapping = {"clang.tar.zst": "toolchain-clang", "sysroot-wasm32-wasi.tar.zst": "toolchain-sysroot"}
+want = {"%s-%s.tar.zst" % (p, mapping[t["name"]]): t["sha256"] for t in rec.get("toolchain", []) if t.get("name") in mapping}
+mirrors = {"%s-%s.tar.zst" % (p, mapping[t["name"]]): t["url"] for t in rec.get("toolchain", []) if t.get("name") in mapping}
+for kind in ("testsrc", "jstests"):
+    e = (rec.get("test_sources") or {}).get(kind) or {}
+    want["%s-%s.tar.zst" % (p, kind)] = e.get("sha256")
+bad = []
+for name, digest in sorted(want.items()):
+    path = os.path.join(d, name)
+    if not os.path.isfile(path) or sha(path) != digest:
+        bad.append("%s: sha256 is not the build's record %s; it changed after prepare" % (name, digest))
+if len(want) != 4:
+    bad.append("MANIFEST.json: toolchain/test_sources record is incomplete")
+if bad:
+    sys.exit("release-set: " + "\nrelease-set: ".join(bad))
 assets = []
 for name in sorted(os.listdir(d)):
     if not name.endswith(".tar.zst"):
@@ -331,13 +396,13 @@ PY
 }
 
 verify() {
-  [ -n "$dir" ] || usage "verify needs --dir"
+  [ -n "$dir" ] && [ -n "$tag" ] || usage "verify needs --dir and --tag"
   [[ $expected =~ ^[0-9a-f]{64}$ ]] || usage "--manifest-sha256 must be a sha256, got '$expected'"
   check_version
   [ -d "$dir" ] || usage "no such directory: $dir"
-  python3 -I - "$dir" "$expected" "spidermonkey_$version-$revision" "$version-$revision" <<'PY'
+  python3 -I - "$dir" "$expected" "spidermonkey_$version-$revision" "$version-$revision" "$tag" <<'PY'
 import hashlib, json, os, re, sys
-d, expected, p, pv = sys.argv[1:]
+d, expected, p, pv, tag = sys.argv[1:]
 kinds = ("wasm32-wasi", "testsrc", "jstests", "toolchain-clang", "toolchain-sysroot")
 archives = ["%s-%s.tar.zst" % (p, k) for k in kinds]
 want = sorted(archives + [a + ".sha256" for a in archives] + ["MANIFEST.json"])
@@ -356,6 +421,8 @@ if got != expected:
 m = json.load(open(os.path.join(d, "MANIFEST.json")))
 if m.get("package_version") != pv:
     sys.exit("release-set: MANIFEST.json: package_version %r is not %r" % (m.get("package_version"), pv))
+if (m.get("release") or {}).get("tag") != tag:
+    sys.exit("release-set: MANIFEST.json: release.tag %r is not %r" % ((m.get("release") or {}).get("tag"), tag))
 recorded = {a.get("name"): a for a in (m.get("release") or {}).get("assets", [])}
 if sorted(recorded) != sorted(archives):
     sys.exit("release-set: MANIFEST.json: release.assets %s is not %s" % (sorted(recorded), sorted(archives)))
@@ -368,6 +435,22 @@ for name in archives:
         bad.append("%s: sha256 %s / %d bytes, MANIFEST.json says %s / %s" % (name, digest, size, a.get("sha256"), a.get("size")))
     if open(path + ".sha256").read() != "%s  %s\n" % (digest, name):
         bad.append("%s.sha256: does not hold %s" % (name, digest))
+# The build-time record in the same manifest: toolchain[] and test_sources.
+mapping = {"clang.tar.zst": "toolchain-clang", "sysroot-wasm32-wasi.tar.zst": "toolchain-sysroot"}
+build = {}
+for t in m.get("toolchain") or []:
+    if t.get("name") in mapping:
+        n = "%s-%s.tar.zst" % (p, mapping[t["name"]])
+        build[n] = t.get("sha256")
+        if recorded.get(n, {}).get("mirror_of") != t.get("url"):
+            bad.append("%s: mirror_of is not the recorded %s" % (n, t.get("url")))
+for kind in ("testsrc", "jstests"):
+    build["%s-%s.tar.zst" % (p, kind)] = ((m.get("test_sources") or {}).get(kind) or {}).get("sha256")
+if len(build) != 4:
+    bad.append("MANIFEST.json: toolchain/test_sources record is incomplete")
+for n, digest in sorted(build.items()):
+    if sha(os.path.join(d, n)) != digest:
+        bad.append("%s: sha256 is not the build's record %s" % (n, digest))
 if bad:
     sys.exit("release-set: " + "\nrelease-set: ".join(bad))
 print("release-set: verified %d assets against MANIFEST.json %s" % (len(archives), expected))

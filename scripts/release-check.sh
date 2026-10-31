@@ -5,6 +5,12 @@
 #     ... without leading zeros) and <version> UPSTREAM's Firefox version
 #     (FIREFOX_147_0_4_RELEASE -> 147.0.4). Prints version=, revision= and
 #     tag= lines, also to $GITHUB_OUTPUT when set (only on success).
+#   release-check.sh tag-commit <tag> <commit>
+#     publish: fetches the tag from origin (forced, so a stale local tag is
+#     replaced; three tries) and requires it, peeled to a commit, to be
+#     <commit> (the run's GITHUB_SHA). A tag moved or deleted after the run
+#     started is refused: gh release create --verify-tag only checks that the
+#     tag exists, not what it names. Runs in the repository root.
 #   release-check.sh nightmonkey <dir>
 #     <dir> is a full-history NightMonkey clone with yurt checked out.
 #     RELEASE_REQUIRES_NIGHTMONKEY (the NightMonkey commit that can consume
@@ -23,7 +29,7 @@ ROOT=${PQ_ROOT:-$SELF}
 . "$SELF/scripts/lib/package-contract.sh"
 
 usage() {
-  echo "usage: release-check.sh tag <tag> | nightmonkey <dir>" >&2
+  echo "usage: release-check.sh tag <tag> | tag-commit <tag> <commit> | nightmonkey <dir>" >&2
   exit 2
 }
 die() { echo "release-check: $*" >&2; exit 1; }
@@ -57,6 +63,23 @@ check_tag() {
   fi
 }
 
+check_tag_commit() {
+  local tag=$1 commit=$2 got fetched=0 attempt
+  [[ $tag =~ ^engine-v[0-9]+(\.[0-9]+)+-[1-9][0-9]*$ ]] || die "tag '$tag' is not engine-v<version>-<n>"
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "commit '$commit' is not a full 40-hex SHA"
+  for attempt in 1 2 3; do
+    if pq_git -C "$ROOT" fetch --quiet --force --no-tags origin "+refs/tags/$tag:refs/tags/$tag"; then
+      fetched=1
+      break
+    fi
+    [ "$attempt" -eq 3 ] || sleep "$attempt"
+  done
+  [ "$fetched" = 1 ] || die "cannot fetch tag $tag from origin (deleted, or origin unreachable); refusing"
+  got=$(pq_git -C "$ROOT" rev-parse --verify --quiet "refs/tags/$tag^{commit}") || die "tag $tag does not name a commit"
+  [ "$got" = "$commit" ] || die "tag $tag now names $got, not this run's commit $commit; refusing"
+  echo "release-check: tag $tag names $commit"
+}
+
 # ancestor <dir> <a> <b> <what>: <a> is an ancestor of <b> in <dir>, or fail
 # with <what> (status 1 is "not an ancestor"; anything else, an unknown commit).
 ancestor() {
@@ -82,9 +105,10 @@ check_nightmonkey() {
   echo "release-check: NIGHTMONKEY_PIN $pin contains RELEASE_REQUIRES_NIGHTMONKEY $required and is on yurt"
 }
 
-[ $# -eq 2 ] || usage
-case $1 in
-  tag) check_tag "$2" ;;
-  nightmonkey) check_nightmonkey "$2" ;;
+[ $# -ge 1 ] || usage
+case $1:$# in
+  tag:2) check_tag "$2" ;;
+  tag-commit:3) check_tag_commit "$2" "$3" ;;
+  nightmonkey:2) check_nightmonkey "$2" ;;
   *) usage ;;
 esac

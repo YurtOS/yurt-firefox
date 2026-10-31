@@ -99,6 +99,9 @@ jobs:
     timeout-minutes: 200
     outputs:
       manifest-sha256: ${{ steps.finalize.outputs.manifest_sha256 }}
+      # Names carry the run attempt: a re-run never collides with an earlier
+      # attempt's upload, and a re-run of publish reads this attempt's set.
+      release-set-artifact: release-set-${{ github.run_attempt }}
     env:
       # engine.yml's pin (tests/test-release-workflow.sh keeps them equal).
       WASMTIME_VERSION: v50.0.0
@@ -177,16 +180,22 @@ jobs:
           SYSROOT: ${{ steps.prepare.outputs.sysroot }}
         run: scripts/accept-engine.sh --package "$RUNNER_TEMP/release/package" --testsrc "$RUNNER_TEMP/release/testsrc" --toolchain "$TOOLCHAIN_ROOT" --sysroot "$SYSROOT" --nightmonkey nightmonkey --require-clean-runner
 
+      # The engine digest is prepare's step output, not a file in the work dir:
+      # an asset changed there after prepare is refused.
       - name: Finalize the release manifest
         id: finalize
-        run: scripts/release-set.sh finalize --work "$RUNNER_TEMP/release" --tag "$TAG"
+        env:
+          ENGINE_SHA256: ${{ steps.prepare.outputs.engine_sha256 }}
+        run: scripts/release-set.sh finalize --work "$RUNNER_TEMP/release" --tag "$TAG" --engine-sha256 "$ENGINE_SHA256"
 
       - name: Upload the release set
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release-set
+          name: release-set-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release/release-set/
           if-no-files-found: error
+          # The archives are zstd already.
+          compression-level: 0
 
       - name: Upload acceptance logs
         if: always()
@@ -216,13 +225,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # --verify-tag only checks that the tag exists; a tag moved or deleted
+      # during the hours this run took must not publish what was built here.
+      - name: Require the tag to still name this commit
+        run: scripts/release-check.sh tag-commit "$TAG" "$GITHUB_SHA"
+
       - name: Require the tag's commit on main
         run: scripts/require-ref-on-main.sh "$GITHUB_SHA"
 
       - name: Download the release set
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: release-set
+          name: ${{ needs.accept.outputs.release-set-artifact }}
           path: ${{ runner.temp }}/release-set
 
       # The manifest travels in the same artifact, so it alone proves only
@@ -230,7 +244,7 @@ jobs:
       - name: Verify the release set
         env:
           MANIFEST_SHA256: ${{ needs.accept.outputs.manifest-sha256 }}
-        run: scripts/release-set.sh verify --dir "$RUNNER_TEMP/release-set" --manifest-sha256 "$MANIFEST_SHA256" --version "$VERSION" --revision "$REVISION"
+        run: scripts/release-set.sh verify --dir "$RUNNER_TEMP/release-set" --manifest-sha256 "$MANIFEST_SHA256" --version "$VERSION" --revision "$REVISION" --tag "$TAG"
 
       - name: Publish the release
         env:
