@@ -842,6 +842,15 @@ for l in logical:
 PY
 }
 
+# lint_flags_shape <workflow>: lint_runs fails on <workflow> (nonzero status)
+# and reports the SC2015 shape; either alone is not enough.
+lint_flags_shape() {
+  local out rc=0
+  out=$(lint_runs "$1" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || return 1
+  case $out in *"has the SC2015 shape"*) return 0 ;; *) return 1 ;; esac
+}
+
 # lint_runs <workflow>: every run: script is free of the SC2015 shape (which
 # CI's actionlint + shellcheck 0.9 report as info and fail on, while a newer
 # local shellcheck does not) and passes shellcheck -S info. If shellcheck is
@@ -896,6 +905,8 @@ t_run_scripts_lint() {
     '[ -n "$A" ] &&\n  [ -n "$B" ] || exit 1' \
     '[ -n "$A" ] &&\n  # B must be set too\n  [ -n "$B" ] || exit 1' \
     '[ -n "$A" ] && # A first\n  [ -n "$B" ] || exit 1' \
+    '[ -n "$A" ] &&\n\n  [ -n "$B" ] || exit 1' \
+    'printf x |\n\n  grep -q x && echo y || echo n' \
     '[ -n "$A" ] && { [ -n "$B" ]; } || exit 1' \
     'echo "<<EOF"\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
     'echo hi # <<EOF\n[ -n "$A" ] && [ -n "$B" ] || exit 1' \
@@ -906,8 +917,7 @@ t_run_scripts_lint() {
     'echo "$(a && b || c)"'; do
     printf 'jobs:\n  j:\n    steps:\n      - name: case\n        run: |\n' >"$d/w.yml"
     printf '%b\n' "$body" | sed 's/^/          /' >>"$d/w.yml"
-    case $(lint_runs "$d/w.yml" 2>&1) in *"has the SC2015 shape"*) ;;
-      *) printf 'not flagged:\n%b\n' "$body" >&2; rm -rf "$d"; return 1 ;; esac
+    lint_flags_shape "$d/w.yml" || { printf 'not flagged:\n%b\n' "$body" >&2; rm -rf "$d"; return 1; }
   done
   # Intentionally over-flagged (not SC2015, but && and || share a joined
   # line): && inside [[ ]], a quoted heredoc body, `a && b; c || d`, a
@@ -921,14 +931,12 @@ t_run_scripts_lint() {
     'echo "a && b || c"'; do
     printf 'jobs:\n  j:\n    steps:\n      - name: case\n        run: |\n' >"$d/w.yml"
     printf '%b\n' "$body" | sed 's/^/          /' >>"$d/w.yml"
-    case $(lint_runs "$d/w.yml" 2>&1) in *"has the SC2015 shape"*) ;;
-      *) printf 'expected to be over-flagged:\n%b\n' "$body" >&2; rm -rf "$d"; return 1 ;; esac
+    lint_flags_shape "$d/w.yml" || { printf 'expected to be over-flagged:\n%b\n' "$body" >&2; rm -rf "$d"; return 1; }
   done
   # Every YAML block scalar header is a multi-line script (|+, >-, |2, ...).
   for hdr in '|+' '>-' '|2' '|2-' '|-2' '>+'; do
     printf 'jobs:\n  j:\n    steps:\n      - name: bad\n        run: %s\n          [ -n "$A" ] && [ -n "$B" ] || exit 1\n' "$hdr" >"$d/bad5.yml"
-    case $(lint_runs "$d/bad5.yml" 2>&1) in *"has the SC2015 shape"*) ;;
-      *) echo "block scalar run: $hdr is not read as a script" >&2; rm -rf "$d"; return 1 ;; esac
+    lint_flags_shape "$d/bad5.yml" || { echo "block scalar run: $hdr is not read as a script" >&2; rm -rf "$d"; return 1; }
   done
   # Accepted: the if/then form, and || alone or && alone on a line.
   printf 'jobs:\n  j:\n    steps:\n      - name: good\n        run: |\n          if [ -z "$A" ] || [ -z "$B" ]; then exit 1; fi\n          cmd || { echo no >&2; exit 1; }\n          test -n "$A" && echo a\n' >"$d/good.yml"
