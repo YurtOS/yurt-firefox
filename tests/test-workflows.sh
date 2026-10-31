@@ -815,39 +815,29 @@ print(n)
 PY
 }
 
-# sc2015_shape <script>: print the logical lines holding a command of the
-# form `A && B || C` (shellcheck SC2015: C also runs when B fails). Lines
-# ending in && || | or \ continue onto the next; comment-only lines are
-# skipped without ending the logical line; heredoc bodies (<<WORD, <<-WORD,
-# quoted or not) are skipped. Quoted strings, comments and [[ ]] are blanked,
-# and the line is split into commands at ';' (`a && b; c || d` is fine).
+# sc2015_shape <script>: print the joined logical lines holding both && and
+# || (shellcheck SC2015 is `A && B || C`: C also runs when B fails). This is a
+# conservative backstop for CI's shellcheck 0.9 (the hosted actionlint is the
+# real gate): quotes, heredocs, `;`, $( ) and [[ ]] are not parsed, so it may
+# over-flag; a flagged line is rewritten as an explicit if/then. A line ending
+# in && || | or \ (an inline comment after && || | allowed) continues onto the
+# next; comment-only lines are skipped without ending the joined line.
 sc2015_shape() {
   python3 -I - "$1" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
-logical, cur, heredoc = [], "", None
+logical, cur = [], ""
 for line in text.split("\n"):
-    if heredoc is not None:
-        if line.strip() == heredoc:
-            heredoc = None
-        continue
     if re.match(r"^\s*#", line):
         continue
     cur += line + " "
-    m = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line)
-    if m:
-        heredoc = m.group(2)
-    if re.search(r"(&&|\|\||\||\\)\s*$", line):
+    if re.search(r"(&&|\|\||\|)\s*(#.*)?$", line) or re.search(r"\\$", line):
         continue
     logical.append(cur)
     cur = ""
 logical.append(cur)
 for l in logical:
-    s = re.sub(r"'[^']*'", "''", l)
-    s = re.sub(r'"(?:[^"\\]|\\.)*"', '""', s)
-    s = re.sub(r"(^|\s)#.*$", "", s)
-    s = re.sub(r"\[\[.*?\]\]", "[[ ]]", s)
-    if any(re.search(r"&&.*\|\|", c) for c in s.split(";")):
+    if "&&" in l and "||" in l:
         print(l.strip())
 PY
 }
