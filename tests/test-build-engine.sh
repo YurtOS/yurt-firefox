@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for scripts/build-engine.sh (--dry-run only; a real build runs on EC2/CI)
-# and scripts/check-mozconfig-drift.sh. JSON validity is checked with python3.
+# JSON validity is checked with python3.
 set -euo pipefail
 
 unset PQ_YURT_REPO PQ_YURT_REF PQ_DOM_COUNT PQ_LISTS_DIR PQ_DIFF_REPO GITHUB_WORKSPACE NM_REPO
@@ -12,7 +12,6 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$ROOT/tests/fixture-upstream.sh"
 
 BUILD="$ROOT/scripts/build-engine.sh"
-DRIFT="$ROOT/scripts/check-mozconfig-drift.sh"
 export PQ_ICS_PATH=js/ics
 
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
@@ -120,18 +119,6 @@ queue_hash_tracks_patch_set() {
   assert_eq 0 "$RC" "$OUT"
   b=$(grep queue_sha256 "$BASE/wd6/build-manifest.json")
   [ "$a" != "$b" ]
-}
-
-drift_rejects_short_or_malformed_pin() {
-  local head bad
-  new_nm
-  head=$(git -C "$NM" rev-parse HEAD)
-  for bad in abc123 "$(printf '%s' "$head" | cut -c1-39)Z" "$(printf '%s' "$head" | tr a-f A-F)"; do
-    printf '%s\n' "$bad" >"$R/NIGHTMONKEY_PIN"
-    run_drift
-    [ "$RC" -ne 0 ] || { echo "accepted pin $bad"; return 1; }
-    case $OUT in *"40-hex"*) ;; *) echo "wrong reason for pin $bad: $OUT"; return 1 ;; esac
-  done
 }
 
 # hash_of <manifest> <key>: one value from a manifest.
@@ -287,63 +274,10 @@ defaults_workdir_to_workspace() {
   [ -f "$BASE/ws/build-manifest.json" ]
 }
 
-mozconfig_matches_pin_in_repo() {
+mozconfig_and_pin_in_repo() {
   [ -f "$ROOT/mozconfig" ]
   [ "$(wc -l <"$ROOT/NIGHTMONKEY_PIN" | tr -d ' ')" = 1 ]
   grep -Eq '^[0-9a-f]{40}$' "$ROOT/NIGHTMONKEY_PIN"
-}
-
-# new_nm: a fake NightMonkey checkout NM at a pinned SHA holding spidermonkey/mozconfig.
-new_nm() {
-  new_root
-  NM=$BASE/nm.$$.$RANDOM
-  mkdir -p "$NM/spidermonkey"
-  git -C "$NM" init -q .
-  cp "$R/mozconfig" "$NM/spidermonkey/mozconfig"
-  git -C "$NM" add -A
-  git -C "$NM" commit -q -m nm
-  git -C "$NM" rev-parse HEAD >"$R/NIGHTMONKEY_PIN"
-}
-
-run_drift() {
-  RC=0
-  OUT=$(PQ_ROOT=$R NM_REPO=$NM "$DRIFT" 2>&1) || RC=$?
-}
-
-drift_passes_when_equal() {
-  new_nm
-  run_drift
-  assert_eq 0 "$RC" "$OUT"
-}
-
-drift_fails_when_different() {
-  new_nm
-  echo '# local edit' >>"$R/mozconfig"
-  run_drift
-  [ "$RC" -ne 0 ]
-  case $OUT in *"mozconfig drift"*) ;; *) echo "wrong message: $OUT"; return 1 ;; esac
-}
-
-drift_reads_the_pinned_sha_not_head() {
-  new_nm
-  echo '# later nm edit' >>"$NM/spidermonkey/mozconfig"
-  git -C "$NM" commit -q -am later
-  run_drift
-  assert_eq 0 "$RC" "$OUT"
-}
-
-# Exported GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE (hooks and dotfile setups export
-# them) neither change the verdict nor touch the repository they name: the pinned
-# mozconfig is read from NM_REPO.
-drift_ignores_repository_env() {
-  local before
-  new_nm
-  make_decoy "$R.decoy"
-  before=$(repo_state "$R.decoy")
-  RC=0
-  OUT=$(with_git_env "$R.decoy" "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE" env PQ_ROOT="$R" NM_REPO="$NM" "$DRIFT" 2>&1) || RC=$?
-  assert_eq 0 "$RC" "$OUT"
-  assert_eq "$before" "$(repo_state "$R.decoy")" "decoy untouched"
 }
 
 # The applied tree must be the one UPSTREAM pins; the run fails before writing
@@ -431,12 +365,7 @@ run_test real_path_runs_mach real_path_runs_mach
 run_test real_path_cleans_git_env_for_mach real_path_cleans_git_env_for_mach
 run_test refuses_non_empty_workdir refuses_non_empty_workdir
 run_test defaults_workdir_to_workspace defaults_workdir_to_workspace
-run_test mozconfig_matches_pin_in_repo mozconfig_matches_pin_in_repo
-run_test drift_passes_when_equal drift_passes_when_equal
-run_test drift_fails_when_different drift_fails_when_different
-run_test drift_reads_the_pinned_sha_not_head drift_reads_the_pinned_sha_not_head
-run_test drift_rejects_short_or_malformed_pin drift_rejects_short_or_malformed_pin
-run_test drift_ignores_repository_env drift_ignores_repository_env
+run_test mozconfig_and_pin_in_repo mozconfig_and_pin_in_repo
 run_test refuses_tree_mismatch refuses_tree_mismatch
 run_test refuses_placeholder_upstream refuses_placeholder_upstream
 run_test manifest_records_tree_and_ics_path manifest_records_tree_and_ics_path

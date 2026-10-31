@@ -1,9 +1,11 @@
 # SpiderMonkey for NightMonkey: the JS shell built for wasm32-wasi with the
 # external compiler hook surface, private-header export and the `jsshell`
-# static library enabled, and wizer snapshot support in the shell. Build from
-# the SpiderMonkey checkout:
+# static library enabled, and wizer snapshot support in the shell. This is the
+# only copy: NightMonkey builds against this repository's engine releases and
+# no longer keeps its own spidermonkey/mozconfig. scripts/build-engine.sh
+# builds with it:
 #
-#   MOZCONFIG=/path/to/nightmonkey/spidermonkey/mozconfig ./mach build
+#   MOZCONFIG=/path/to/yurt-firefox/mozconfig ./mach build
 #
 # Everything NightMonkey consumes lands under obj-nightmonkey-sm/dist:
 # include/ and include-private/ (headers, js-build-config.json), lib/ (the
