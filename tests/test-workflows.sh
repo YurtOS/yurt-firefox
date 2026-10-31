@@ -46,6 +46,7 @@ t_exist() {
   [ -f "$WF/queue.yml" ] || { echo "missing queue.yml" >&2; return 1; }
   [ -f "$WF/engine.yml" ] || { echo "missing engine.yml" >&2; return 1; }
   [ -f "$WF/gate.yml" ] || { echo "missing gate.yml" >&2; return 1; }
+  [ -f "$WF/release.yml" ] || { echo "missing release.yml" >&2; return 1; }
 }
 
 t_actionlint() {
@@ -57,22 +58,48 @@ t_actionlint() {
     echo "SKIP: actionlint not installed" >&2
     return 0
   fi
-  actionlint "$WF/queue.yml" "$WF/engine.yml" "$WF/gate.yml"
+  actionlint "$WF/queue.yml" "$WF/engine.yml" "$WF/gate.yml" "$WF/release.yml"
+}
+
+# pinned_ok <workflow> <allow-local-engine 0|1>: every `uses:` names a remote
+# action or workflow by a full 40-hex SHA. With 1, the one exception is a
+# job-level call of exactly ./.github/workflows/engine.yml (release.yml's
+# build job); any other local or unpinned `uses:` fails.
+pinned_ok() {
+  local f=$1 local_ok=$2 bad
+  [ -f "$f" ] || { echo "missing $f" >&2; return 1; }
+  bad=$(body "$f" | grep -E '^[[:space:]-]*uses:' | grep -Ev 'uses:[[:space:]]+[^@[:space:]./][^@[:space:]]*@[0-9a-f]{40}([[:space:]]+#.*)?$' || true)
+  if [ "$local_ok" = 1 ]; then
+    bad=$(printf '%s\n' "$bad" | grep -vx '    uses: ./.github/workflows/engine.yml' || true)
+  fi
+  [ -z "$bad" ] || { printf '%s: unpinned or local uses:\n%s\n' "${f##*/}" "$bad" >&2; return 1; }
+  body "$f" | grep -Eq '^[[:space:]-]*uses:' || { echo "${f##*/} has no uses:" >&2; return 1; }
 }
 
 t_pinned() {
-  local f bad
+  local f d
   for f in queue.yml engine.yml gate.yml; do
-    [ -f "$WF/$f" ] || { echo "missing $f" >&2; return 1; }
-    bad=$(body "$WF/$f" | grep -E '^[[:space:]-]*uses:' | grep -Ev 'uses:[[:space:]]+[^@[:space:]]+@[0-9a-f]{40}([[:space:]]+#.*)?$' || true)
-    [ -z "$bad" ] || { printf '%s: unpinned uses:\n%s\n' "$f" "$bad" >&2; return 1; }
-    body "$WF/$f" | grep -Eq '^[[:space:]-]*uses:' || { echo "$f has no uses:" >&2; return 1; }
+    pinned_ok "$WF/$f" 0 || return 1
   done
+  pinned_ok "$WF/release.yml" 1 || return 1
+  has_line "$WF/release.yml" 'uses: ./.github/workflows/engine.yml' || { echo "release.yml does not call engine.yml" >&2; return 1; }
+  # The exception is that exact call in release.yml only: an unpinned remote
+  # action, a tag-pinned one, another local workflow, and the engine call in
+  # another workflow all still fail.
+  d=$(mktemp -d)
+  for bad in '      - uses: actions/checkout@v4' '      - uses: actions/checkout@3d3c42e5' \
+    '    uses: ./.github/workflows/gate.yml' '    uses: ./.github/workflows/engine.yml@main' \
+    '    uses: YurtOS/yurt-firefox/.github/workflows/engine.yml@main'; do
+    { cat "$WF/release.yml"; printf '%s\n' "$bad"; } >"$d/w.yml"
+    if pinned_ok "$d/w.yml" 1 2>/dev/null; then echo "accepted: $bad" >&2; rm -rf "$d"; return 1; fi
+  done
+  if pinned_ok "$WF/release.yml" 0 2>/dev/null; then echo "the local engine call passes without the exception" >&2; rm -rf "$d"; return 1; fi
+  rm -rf "$d"
 }
 
 t_credentials() {
   local f n p
-  for f in queue.yml engine.yml gate.yml; do
+  for f in queue.yml engine.yml gate.yml release.yml; do
     n=$(body "$WF/$f" | grep -cE 'uses: actions/checkout@')
     p=$(body "$WF/$f" | grep -cE '^[[:space:]]+persist-credentials: false$')
     [ "$n" -gt 0 ] && [ "$n" = "$p" ] ||
@@ -82,7 +109,7 @@ t_credentials() {
 
 t_permissions() {
   local f top block
-  for f in queue.yml engine.yml gate.yml; do
+  for f in queue.yml engine.yml gate.yml release.yml; do
     # The top-level block is exactly `permissions:` + `contents: read`, and no job
     # or step widens it with its own permissions.
     top=$(body "$WF/$f" | grep -E '^permissions:' || true)
@@ -97,6 +124,11 @@ t_permissions() {
       assert_eq "contents: read
 pull-requests: read
 actions: read" "$block" "gate.yml tier job permissions"
+    elif [ "$f" = release.yml ]; then
+      # One exception: release.yml's publish job, and only it, may write.
+      assert_eq 1 "$(body "$WF/$f" | grep -cE '^[[:space:]]+permissions:')" "release.yml job-level permissions blocks"
+      block=$(body "$WF/$f" | awk '/^  publish:$/{j=1} j && /^    permissions:/{f=1; next} f && !/^      /{exit} f{print}' | sed 's/^[[:space:]]*//')
+      assert_eq "contents: write" "$block" "release.yml publish job permissions"
     else
       ! body "$WF/$f" | grep -Eq '^[[:space:]]+permissions:' || { echo "$f has job-level permissions" >&2; return 1; }
     fi
@@ -612,7 +644,7 @@ t_engine_call_concurrency() {
 
 t_run_scripts_lint() {
   local f d n
-  for f in queue.yml engine.yml gate.yml; do
+  for f in queue.yml engine.yml gate.yml release.yml; do
     lint_runs "$WF/$f" || return 1
   done
   d=$(mktemp -d)
