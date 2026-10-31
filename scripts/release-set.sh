@@ -275,10 +275,15 @@ for m in tarfile.open(fileobj=sys.stdin.buffer, mode="r|"):
     name = "/".join(parts)
     # Regular files, directories, and links that stay inside the top-level
     # directory (clang ships clang++ as a link); nothing else.
+    # A symlink target is resolved on disk through other links, so a text
+    # check is not enough (d -> . then esc -> d/d/../.. escapes): targets may
+    # not contain "..", which keeps a link in or below its own directory
+    # (clang ships clang++ -> clang-NN, a sibling).
     if m.issym():
         target = posixpath.join(posixpath.dirname(name), m.linkname)
-        if m.linkname.startswith("/") or not inside(target, parts[0]):
-            sys.exit("symlink %r -> %r leaves %s/" % (name, m.linkname, parts[0]))
+        if (m.linkname.startswith("/") or ".." in m.linkname.split("/")
+                or not inside(target, parts[0])):
+            sys.exit("symlink %r -> %r may leave %s/" % (name, m.linkname, parts[0]))
     elif m.islnk():
         if not inside(m.linkname, parts[0]):
             sys.exit("hardlink %r -> %r leaves %s/" % (name, m.linkname, parts[0]))
@@ -380,8 +385,15 @@ assets = []
 for name in sorted(os.listdir(d)):
     if not name.endswith(".tar.zst"):
         continue
-    data = open(os.path.join(d, name), "rb").read()
-    a = {"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    # Digest and size from one read, and from the bytes just checked above.
+    h, size = hashlib.sha256(), 0
+    with open(os.path.join(d, name), "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+            size += len(chunk)
+    a = {"name": name, "sha256": h.hexdigest(), "size": size}
+    if (name in want and want[name] != a["sha256"]) or (name == engine and engine_sha != a["sha256"]):
+        sys.exit("release-set: %s changed while being recorded" % name)
     if name in mirrors:
         a["mirror_of"] = mirrors[name]
     assets.append(a)
