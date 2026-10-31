@@ -14,7 +14,7 @@
 
 - Linux x86_64 only for the release assets (CI and EC2).
 - Every red test is committed before the fix it targets; a failure-injection or mutation step proves each check can fail. Follow-up commits only; never amend or force-push an open PR branch.
-- Firefox builds run on CI or on EC2 via `/Users/sunny/work/yurtos/bin/ec2slot`, never on the laptop. Packager and bundle tests use a **fixture dist/tree**, not a real build.
+- Firefox builds run on CI or on a Linux x86_64 build host, never on the laptop. Packager and bundle tests use a **fixture dist/tree**, not a real build.
 - Workflows: top-level `permissions: contents: read`, every action pinned by full SHA with a version comment, `persist-credentials: false`, no `pull_request_target`/`workflow_run`, no `secrets.`. Only the `publish` job of `release.yml` may have `contents: write`.
 - No consumer pins an `engine-v*` tag before the packager, relocation and acceptance red tests exist and pass.
 - Merge authority is the user's (`docs/agents/org.md`). Open PRs as drafts; dual Claude + Codex review each round.
