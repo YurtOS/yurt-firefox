@@ -599,6 +599,21 @@ json.dump(m, open(sys.argv[1], "w"), indent=2, sort_keys=True)
 PY
 }
 
+# repack <python on m> [<sh on the extracted tree>]: change the package as
+# a producer would have built it: the edit applies to package-out's
+# MANIFEST.json and to the copy inside the engine archive, the archive is
+# re-made and its .sha256 rewritten, so only the deeper checks can tell.
+repack() {
+  local x
+  edit_manifest "$1"
+  x=$(mktemp -d "$BASE/repack.XXXXXX")
+  zstd -q -dc "$PO/$P-wasm32-wasi.tar.zst" | "$TAR" -xf - -C "$x"
+  cp "$PO/MANIFEST.json" "$x/spidermonkey/MANIFEST.json"
+  [ -z "${2:-}" ] || (cd "$x/spidermonkey" && sh -c "$2")
+  (cd "$x" && "$TAR" -cf - spidermonkey) | zstd -q -c >"$PO/$P-wasm32-wasi.tar.zst"
+  printf '%s  %s\n' "$(digest "$PO/$P-wasm32-wasi.tar.zst")" "$P-wasm32-wasi.tar.zst" >"$PO/$P-wasm32-wasi.tar.zst.sha256"
+}
+
 # The toolchain mapping is explicit: exactly clang.tar.zst and
 # sysroot-wasm32-wasi.tar.zst, https URLs.
 t_prepare_toolchain_mapping() {
@@ -642,7 +657,7 @@ t_prepare_toolchain_layout() {
       no-clang) rm "$s/clang/bin/clang++"; (cd "$s" && "$TAR" -cf - clang) | zstd -q -c >"$TC/clang.tar.zst" ;;
       file-top) echo x >"$s/README"; (cd "$s" && "$TAR" -cf - README) | zstd -q -c >"$TC/clang.tar.zst" ;;
     esac
-    edit_manifest "import hashlib; m['toolchain'][0]['sha256'] = hashlib.sha256(open('$TC/clang.tar.zst','rb').read()).hexdigest()"
+    repack "import hashlib; m['toolchain'][0]['sha256'] = hashlib.sha256(open('$TC/clang.tar.zst','rb').read()).hexdigest()"
     prepare
     expect_prepare_fails "clang.tar.zst"
   done
@@ -657,7 +672,10 @@ t_prepare_package_consistency() {
   setup_set; rm "$PO/$P-jstests.tar.zst" "$PO/$P-jstests.tar.zst.sha256"; prepare; expect_prepare_fails "jstests"
   setup_set; edit_manifest 'm["test_sources"]["testsrc"]["sha256"] = "0" * 64'; prepare; expect_prepare_fails "testsrc"
   setup_set; edit_manifest 'm["package_version"] = "147.0.4-2"'; prepare; expect_prepare_fails "package_version"
-  setup_set; edit_manifest 'm["dist_files"]["count"] += 1'; prepare; expect_prepare_fails "dist_files"
+  # A file changed inside a re-made archive (manifests and .sha256 consistent).
+  setup_set; repack 'pass' 'echo "// changed" >>system_wrappers/stdio.h'; prepare; expect_prepare_fails "dist_files"
+  # package-out's MANIFEST.json edited alone: it no longer is the archive's.
+  setup_set; edit_manifest 'm["rust_version"] = "other"'; prepare; expect_prepare_fails "differs from package-out's"
   setup_set; run_set prepare --package-out "$PO" --version 147.0.5 --revision 1 --work "$W"; expect_prepare_fails "147.0.5"
 }
 
@@ -720,7 +738,7 @@ setup_final() {
   H=$(digest "$D/MANIFEST.json")
 }
 
-verify() { run_set verify --dir "$D" --manifest-sha256 "${1:-$H}" --version "$V" --revision "$N"; }
+verify() { run_set verify --dir "$D" --manifest-sha256 "${1-$H}" --version "$V" --revision "$N"; }
 
 t_verify() {
   setup_final
