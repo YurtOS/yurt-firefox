@@ -41,8 +41,10 @@ never the bare tag.
   queue PR that bumps `NIGHTMONKEY_PIN` alongside the patch.
 - **Pin bump.** A PR that changes `NIGHTMONKEY_PIN` runs the full gate without a
   label (the tier job promotes it) and must show it green before merge. An
-  engine change that should reach NightMonkey is followed by a NightMonkey PR
-  bumping its queue-commit pin.
+  engine change that should reach NightMonkey is followed by an engine release
+  (`release.yml`, tag `engine-v<version>-<n>`) and a NightMonkey PR that pins
+  it (`scripts/update-engine-release.sh <tag>` there). This repository's
+  `mozconfig` is the only copy; NightMonkey no longer keeps one.
 
 ## Worktree hygiene
 

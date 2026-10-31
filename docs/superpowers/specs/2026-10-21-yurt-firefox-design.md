@@ -295,6 +295,9 @@ identity and those configs; the supported WASI lane does not necessarily
 execute them. The migration records the SHA-256 of NightMonkey's
 `spidermonkey/mozconfig` at the pinned NightMonkey SHA, and CI fails if this
 repo's `mozconfig` differs from it until slice B deletes NightMonkey's copy.
+(Done: NightMonkey removed its copy when it moved to engine releases, and the
+drift check, `scripts/check-mozconfig-drift.sh`, was removed with it; this
+repo's `mozconfig` is the only copy.)
 
 ## Queue changes after cutover
 

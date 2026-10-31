@@ -143,6 +143,8 @@ Runs on the EC2 box with `YurtOS/firefox` and `FIREFOX_147_0_4_RELEASE` fetched.
 
 ### Task 8: `build-engine.sh`, `mozconfig`, drift check
 
+> Later: the drift check was removed once NightMonkey built against engine releases and dropped its `spidermonkey/mozconfig` (this repo's `mozconfig` is the only copy).
+
 **Files:** Create `mozconfig`, `scripts/build-engine.sh`, `scripts/check-mozconfig-drift.sh`; Test: `tests/test-build-engine.sh` (dry-run mode).
 
 **Creates `NIGHTMONKEY_PIN`** (one line: the NightMonkey SHA used for qualification; Task 11 reuses it).
