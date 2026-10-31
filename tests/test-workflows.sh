@@ -181,13 +181,16 @@ t_queue() {
   [ -f "$f" ] || { echo "missing queue.yml" >&2; return 1; }
   body "$f" | grep -Eq 'scripts/check-queue\.sh --fixtures' || { echo "queue.yml lacks fixtures run" >&2; return 1; }
   body "$f" | grep -Eq 'scripts/check-queue\.sh$' || { echo "queue.yml lacks the real check-queue run" >&2; return 1; }
-  body "$f" | grep -q 'scripts/check-mozconfig-drift.sh' || { echo "queue.yml lacks the drift check" >&2; return 1; }
   body "$f" | grep -Eq '^  pull_request:' || { echo "queue.yml lacks pull_request" >&2; return 1; }
-  body "$f" | grep -q 'NIGHTMONKEY_PIN' || { echo "queue.yml does not use NIGHTMONKEY_PIN" >&2; return 1; }
-  body "$f" | grep -q 'steps.pin.outputs.sha' || { echo "drift checkout does not use the pin" >&2; return 1; }
-  # the pin is validated where it is read, before it reaches the checkout
-  step "$f" "Read NIGHTMONKEY_PIN" | grep -q 'id: pin' || { echo "no 'Read NIGHTMONKEY_PIN' step with id pin" >&2; return 1; }
-  check_pin_step "$f" "Read NIGHTMONKEY_PIN"
+  # The mozconfig drift check against NightMonkey is gone: this repository's
+  # mozconfig is the only copy (NightMonkey builds against the engine
+  # release). It, its NightMonkey checkout and pin read must not come back.
+  ! body "$f" | grep -Eq 'check-mozconfig-drift|NM_REPO|repository: YurtOS/nightmonkey|NIGHTMONKEY_PIN|steps\.pin' ||
+    { echo "queue.yml still checks the mozconfig against NightMonkey" >&2; return 1; }
+  [ ! -e "$ROOT/scripts/check-mozconfig-drift.sh" ] || { echo "scripts/check-mozconfig-drift.sh still exists" >&2; return 1; }
+  ! grep -q 'nightmonkey/spidermonkey/mozconfig' "$ROOT/mozconfig" ||
+    { echo "mozconfig still points at NightMonkey's copy" >&2; return 1; }
+  grep -q 'only copy' "$ROOT/mozconfig" || { echo "mozconfig does not say it is the only copy" >&2; return 1; }
   body "$f" | grep -q 'rhysd/actionlint/releases/download' || { echo "queue.yml does not install actionlint" >&2; return 1; }
   body "$f" | grep -q 'sha256sum -c' || { echo "queue.yml does not verify actionlint" >&2; return 1; }
   has_line "$f" 'echo "${ACTIONLINT_SHA256}  $tgz" | sha256sum -c -' ||
@@ -815,7 +818,7 @@ run_test "engine.yml: a release call has its own concurrency group" t_engine_cal
 run_test "engine.yml: the manifest is uploaded after a failed packaging" t_engine_manifest_upload
 run_test "run: scripts have no SC2015 shape and pass shellcheck -S info" t_run_scripts_lint
 run_test "run: lint is FATAL without shellcheck under CI" t_run_scripts_lint_needs_shellcheck
-run_test "queue.yml: fixtures, real check, drift" t_queue
+run_test "queue.yml: fixtures, real check, no mozconfig drift check" t_queue
 run_test "engine.yml, queue.yml: a Markdown-only pull request skips them" t_docs_only
 run_test "gate.yml: triggers, tiers, linked test tree, caches" t_gate
 run_test "gate.yml: the subset and each shard reach the harness and failures fail" t_gate_lanes
