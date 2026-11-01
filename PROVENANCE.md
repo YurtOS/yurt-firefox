@@ -110,12 +110,17 @@ NightMonkey branches that still name it (2026-10-22): `ci/project-gates`
 | Base tag | `FIREFOX_159_0_RELEASE` = `9a2dc53c369c7ae5172018b35988e1d2ffeff402` |
 | Queue tree | `dd0c671f0e78fa0a4ba0fb09d76c65ee246f65d6` (`UPSTREAM` `tree`, computed with `scripts/lib/patch-queue.sh` `pq_apply`/`pq_tree` over this queue plus `data/ics`) |
 | NightMonkey | `YurtOS/nightmonkey` `yurt` = `9d51f6430ef3ccaa16c51782f8e4a0a1afdafda5` (merge of #23, the `ff159` engine version) |
-| Design | `docs/superpowers/specs/2026-11-01-slice-c-firefox-159-design.md` (PR #32); issue #29 |
-| Gate evidence | run 41325722684 on PR #33: all four shards, both lanes, 0 failures, with NightMonkey `ff159` |
+| Design | `docs/superpowers/specs/2026-11-01-slice-c-firefox-159-design.md` (YurtOS/yurt-firefox PR #32, not merged at the time of writing); issue #29 |
+| Gate evidence | run 41325722684 on PR #33: all four shards, both lanes, 0 failures, with NightMonkey `ff159` pinned at `3ccefb0` (the runtime code is identical to the pinned `9d51f64`; the difference between them is test code in `compiler/src/wasm/translate.rs` only). The gate on the final head of PR #33 re-runs it at `9d51f64`. |
 
-The twelve patches were rebased with their intent unchanged; nine of them had rejected hunks on 159
-and three applied as they were. What moved, and what was added to keep behaviour:
+The twelve patches were rebased with their intent unchanged. Nine of them had rejected hunks on 159
+(0001, 0004 and 0008 applied as they were, but 0001 later needed API fixes, below). What moved, and
+what was added to keep behaviour:
 
+- **0001** streams: 159 removed `NewTenuredBuiltinClassInstance` and the iter-result template
+  `GlobalObject::getOrCreateIterResultWithoutPrototypeTemplateObject`; the code now uses
+  `NewBuiltinClassInstance<PipeToState>(cx, {.newKind = TenuredObject})` and builds the
+  prototype-less result object directly.
 - **0002** streams: re-added the `byteLength` atom 159 deleted; adapted to the removed
   `ShadowRealm.h`, `weakCaches_` and the `JSAPIRuntimeTest` rename.
 - **0003** `HasJobsPending` now answers `JS::HasAnyMicroTasks(cx)` (159 removed `JobQueue::empty`).
@@ -130,15 +135,20 @@ and three applied as they were. What moved, and what was added to keep behaviour
   interpreter's `JSOp::Resume`), with recursion and Debugger no-execute checks and module
   generators excluded; `JSOP_SEMANTICS_VERSION` is 2; the private-header exporter joins the
   list-valued `CC`/`CXX` of 159 back into one command string.
-- **0010** `PermutedSlots` moved from `ObjectFlag` bit 18 to 19 (159 took 18); two spread guards in
+- **0010** `PermutedSlots` moved from `ObjectFlag` bit 18 to 19 (159 took 18); the test helpers call
+  `NewPlainObjectWithProto(cx, proto, {.allocKind = ...})` and
+  `tryOptimizeConstantProperty(key, prop)`, which changed in 159; two spread guards in
   `CopyDataPropertiesNative` (159 added a copy fast path); `NativeObjectSlotSpanForTracing` is
   permuted-slot aware with a tracing-safe walk.
 - **0011** shrank: 159 already fixes the expected-error status upstream.
-- **0012** only the arc4random condition is kept.
+- **0012** same changes as on 147 (the `JSONPrinter` `size_t` overload condition and the `RandomNum` arc4random condition); 159 dropped an `#include <stdlib.h>` next to the arc4random hunk, which is the only context difference.
 
-Reviewed in three rounds by Claude and Codex (each read-only), which found, among others, the
-`ReturnFromIC` reader end pointer, the async-resume hook bypass, module generators reaching the
-hook, and an unsafe flag read on the concurrent marking thread. `data/ics` is still the corpus from
+Reviewed by Claude and Codex (each read-only); the findings and their dispositions are in the
+comments of PR #33 (and the commit messages of the follow-up commits). Among them: the async-resume
+hook bypass, module generators reaching the hook, and an unsafe flag read on the concurrent marking
+thread; the `CacheIRReader` end pointer in 0006 was verified correct in review. Not fixed and
+tracked: `NativeObject::setNeverGCThingFixedSlot` (new in 159, used by `Date`) skips the external
+store check, which matters only if the external tier tags `Date` objects. `data/ics` is still the corpus from
 the 147 era; it is not built into this engine (no `--enable-aot-ics`) and is carried only so the
 tree hash stays byte-identical.
 

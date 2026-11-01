@@ -176,16 +176,24 @@ build=$nm/build
 # the jit-test exclude lists. It is forced with -D so a reused build dir's
 # CMakeCache.txt cannot keep another version, and an engine it has no table for
 # stops at configure. (The gate derives it the same way; see gate.yml.)
-engine=
+# The tag is read the way pq_read_pin does (CR tolerated, a last line without a
+# newline kept, the last tag= line wins). This script does not source the queue
+# library: that checks for git when loaded, and this script runs with a minimal
+# PATH in its tests.
+PQ_TAG=
 if [ -f "$ROOT/UPSTREAM" ]; then
-  while IFS= read -r line; do
-    case $line in
-      tag=FIREFOX_*) engine=${line#tag=FIREFOX_}; engine=${engine%%_*} ;;
-    esac
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    case $line in tag=*) PQ_TAG=${line#tag=} ;; esac
   done <"$ROOT/UPSTREAM"
 fi
+if [ -z "$PQ_TAG" ]; then
+  fail build "cannot derive NightMonkey's engine version: no tag in $ROOT/UPSTREAM"
+fi
+engine=${PQ_TAG#FIREFOX_}
+engine=${engine%%_*}
 case $engine in
-  '' | *[!0-9]*) fail build "cannot derive NightMonkey's engine version from the tag in $ROOT/UPSTREAM" ;;
+  '' | *[!0-9]*) fail build "cannot derive NightMonkey's engine version from the tag '$PQ_TAG' in $ROOT/UPSTREAM" ;;
 esac
 
 step "build: NightMonkey ($engine) in $build against $package/spidermonkey"

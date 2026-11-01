@@ -209,7 +209,8 @@ jobs:
       - name: Select the NightMonkey engine version
         id: engine
         run: |
-          tag=$(sed -n 's/^tag=//p' UPSTREAM)
+          # The last tag= line wins, as in scripts/lib/patch-queue.sh pq_read_pin.
+          tag=$(sed -n 's/^tag=//p' UPSTREAM | tail -n 1)
           major=${tag#FIREFOX_}
           major=${major%%_*}
           case $major in

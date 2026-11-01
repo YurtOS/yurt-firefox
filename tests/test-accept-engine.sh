@@ -37,6 +37,12 @@ trap 'rm -rf "$BASE"' EXIT
 # (default 20000), STUB_<L>_LINE=none|twice|nolog|nul|trailing (nolog: no log
 # written; nul: a NUL byte before the line; trailing: text after "verified").
 # NIGHT_*/SPIDERMONKEY_* variables seen by cmake and the lanes go to $D/envlog.
+# write_upstream <tag>: a valid UPSTREAM (url, tag, 40-hex commit and tree) in the fixture root.
+write_upstream() {
+  printf 'url=https://h.test/r\ntag=%s\ncommit=%s\ntree=%s\n' "$1" \
+    0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef >"$D/root/UPSTREAM"
+}
+
 setup() {
   D=$(mktemp -d "$BASE/case.XXXXXX")
   mkdir -p "$D/pkg/spidermonkey/include-private" "$D/testsrc/js/src/jit-test" "$D/tc/bin" "$D/sysroot" \
@@ -50,7 +56,7 @@ setup() {
   cp "$ROOT/baseline/jit-floor.txt" "$D/root/baseline/jit-floor.txt"
   # A fixed UPSTREAM (not the repository's): the engine version the script
   # derives from it is part of the expected cmake call below.
-  printf 'url=https://h.test/r\ntag=FIREFOX_159_0_RELEASE\n' >"$D/root/UPSTREAM"
+  write_upstream FIREFOX_159_0_RELEASE
   : >"$D/calls"
 
   cat >"$D/stubs/cmake" <<'SH'
@@ -425,19 +431,50 @@ engine_version_from_upstream() {
   for pair in FIREFOX_147_0_4_RELEASE:ff147 FIREFOX_160_0_RELEASE:ff160 FIREFOX_159_0_BUILD1:ff159; do
     tag=${pair%%:*}; want=${pair#*:}
     setup
-    printf 'url=https://h.test/r\ntag=%s\n' "$tag" >"$D/root/UPSTREAM"
+    write_upstream "$tag"
     run_accept
     assert_eq 0 "$RC" "$tag: $OUT"
     called "^cmake -S .* -DNIGHT_ENGINE_VERSION=$want \\| cwd=" || { echo "$tag: no -DNIGHT_ENGINE_VERSION=$want" >&2; return 1; }
   done
   local bad
-  for bad in 'tag=V1' 'tag=' 'tag=FIREFOX__RELEASE' 'tag=FIREFOX_x_RELEASE' 'url=only'; do
+  # Tags the derivation refuses (a valid file, an unusable tag) ...
+  for bad in V1 FIREFOX__RELEASE FIREFOX_x_RELEASE nightly; do
+    setup
+    write_upstream "$bad"
+    run_accept
+    expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
+    ! called '^cmake ' || { echo "cmake ran for tag '$bad'" >&2; return 1; }
+  done
+  # ... and files with no tag at all.
+  for bad in 'url=only' 'tag=' ''; do
     setup
     printf '%s\n' "$bad" >"$D/root/UPSTREAM"
     run_accept
     expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
-    ! called '^cmake ' || { echo "cmake ran for '$bad'" >&2; return 1; }
+    ! called '^cmake ' || { echo "cmake ran for UPSTREAM '$bad'" >&2; return 1; }
   done
+  # A CRLF file and a last line without a newline are read like pq_read_pin does.
+  setup
+  printf 'url=x\r\ntag=FIREFOX_159_0_RELEASE' >"$D/root/UPSTREAM"
+  run_accept
+  assert_eq 0 "$RC" "$OUT"
+  called "^cmake -S .* -DNIGHT_ENGINE_VERSION=ff159 \\| cwd=" || { echo "CRLF/no-newline file not read" >&2; return 1; }
+  # The effective (last) tag is the one validated: a good tag followed by a bad or empty one is refused.
+  for bad in V1 ''; do
+    setup
+    printf 'url=https://h.test/r\ntag=FIREFOX_159_0_RELEASE\ntag=%s\ncommit=%s\ntree=%s\n' "$bad" \
+      0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef >"$D/root/UPSTREAM"
+    run_accept
+    expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
+    ! called '^cmake ' || { echo "cmake ran for a later bad tag '$bad'" >&2; return 1; }
+  done
+  # The last tag= line wins, as for pq_read_pin everywhere else.
+  setup
+  printf 'url=https://h.test/r\ntag=FIREFOX_147_0_4_RELEASE\ntag=FIREFOX_159_0_RELEASE\ncommit=%s\ntree=%s\n' \
+    0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef >"$D/root/UPSTREAM"
+  run_accept
+  assert_eq 0 "$RC" "$OUT"
+  called "^cmake -S .* -DNIGHT_ENGINE_VERSION=ff159 \\| cwd=" || { echo "last tag line did not win" >&2; return 1; }
   setup; rm "$D/root/UPSTREAM"
   run_accept
   expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
