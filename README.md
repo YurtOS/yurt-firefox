@@ -37,8 +37,9 @@ into the engine tree.
 [NightMonkey](https://github.com/YurtOS/nightmonkey) is an ahead-of-time and
 in-process JavaScript-to-WebAssembly compiler layered on SpiderMonkey. It links
 against the engine this queue builds and uses the external-compiler hooks the
-queue adds. NightMonkey pins a commit of this repository (`engine/QUEUE_PIN`
-there), and this repository pins a NightMonkey commit
+queue adds. NightMonkey pins an engine release of this repository
+(`engine/ENGINE_RELEASE` there: the tag and the digest of every asset), and
+this repository pins a NightMonkey commit
 ([`NIGHTMONKEY_PIN`](NIGHTMONKEY_PIN)): CI builds the queue engine, builds
 NightMonkey against it and runs SpiderMonkey's jit-tests, so a patch that breaks
 NightMonkey fails here first.
