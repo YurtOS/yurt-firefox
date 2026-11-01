@@ -9,6 +9,10 @@ unset PQ_YURT_REPO PQ_YURT_REF PQ_DOM_COUNT PQ_LISTS_DIR PQ_DIFF_REPO GITHUB_WOR
 unset WASMTIME WASMTIME_FLAGS NIGHT_FIREFOX_TESTS
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The repository's own floors (baseline/jit-floor.txt): these tests follow a floor
+# update instead of pinning one Firefox version's numbers.
+AOT_F=$(sed -n 's/^aot_verified=//p' "$ROOT/baseline/jit-floor.txt")
+INT_F=$(sed -n 's/^interpreter_verified=//p' "$ROOT/baseline/jit-floor.txt")
 # shellcheck source=lib.sh
 . "$ROOT/tests/lib.sh"
 
@@ -144,7 +148,7 @@ snapshot-roundtrip.sh $D/nm/build | WASMTIME_FLAGS= | cwd=$D/nm
 ci-suite.sh jit aot | NIGHT_FIREFOX_TESTS=$D/testsrc | cwd=$D/nm
 ci-suite.sh jit interpreter | NIGHT_FIREFOX_TESTS=$D/testsrc | cwd=$D/nm"
   assert_eq "$want" "$(cat "$D/calls")" "calls"
-  case $OUT in *"aot: 20000 verified (floor 12307)"*"interpreter: 20000 verified (floor 12494)"*) ;;
+  case $OUT in *"aot: 20000 verified (floor $AOT_F)"*"interpreter: 20000 verified (floor $INT_F)"*) ;;
     *) echo "counts not reported: $OUT" >&2; return 1 ;; esac
   [ -f "$D/runner/nightmonkey-logs/jit-aot.log" ] && [ -f "$D/runner/nightmonkey-logs/jit-interpreter.log" ]
 }
@@ -185,18 +189,18 @@ interpreter_lane_failure_fails() {
 # Exactly at the floor passes; one below fails, for each lane.
 floor_comparison() {
   setup
-  run_accept STUB_AOT_COUNT=12307 STUB_INTERPRETER_COUNT=12494
+  run_accept STUB_AOT_COUNT=$AOT_F STUB_INTERPRETER_COUNT=$INT_F
   assert_eq 0 "$RC" "$OUT"
   setup
-  run_accept STUB_AOT_COUNT=12306
-  expect_fail 1 "FAIL at jit aot: 12306 verified is below the floor aot_verified=12307"
+  run_accept STUB_AOT_COUNT=$((AOT_F - 1))
+  expect_fail 1 "FAIL at jit aot: $((AOT_F - 1)) verified is below the floor aot_verified=$AOT_F"
   setup
-  run_accept STUB_INTERPRETER_COUNT=12493
-  expect_fail 1 "FAIL at jit interpreter: 12493 verified is below the floor interpreter_verified=12494"
+  run_accept STUB_INTERPRETER_COUNT=$((INT_F - 1))
+  expect_fail 1 "FAIL at jit interpreter: $((INT_F - 1)) verified is below the floor interpreter_verified=$INT_F"
   # Counts with fewer and more digits than the floor.
   setup
   run_accept STUB_AOT_COUNT=9999
-  expect_fail 1 "FAIL at jit aot: 9999 verified is below the floor aot_verified=12307"
+  expect_fail 1 "FAIL at jit aot: 9999 verified is below the floor aot_verified=$AOT_F"
   setup
   run_accept STUB_AOT_COUNT=100000 STUB_INTERPRETER_COUNT=100000
   assert_eq 0 "$RC" "$OUT"

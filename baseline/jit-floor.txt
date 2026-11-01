@@ -5,5 +5,15 @@
 # both the Firefox version of the test-source bundle (which tests exist) and
 # NIGHTMONKEY_PIN (which of them NightMonkey runs and excludes), so a Firefox
 # version bump or a pin bump may move them too.
-aot_verified=12307
-interpreter_verified=12494
+#
+# Firefox 147.0.4 (engine-v147.0.4-1): aot 12307, interpreter 12494.
+# Firefox 159.0 (slice C, NightMonkey ff159 from nightmonkey#23): sums of the
+# per-shard "night: jit: N passing execution results verified" lines of the
+# full-tier gate run 41325722684 on the PR (4 shards; AOT 2198 + 2202 + 2166 +
+# 6885, interpreter 2246 + 2250 + 2214 + 6931), with the 18 version-scoped
+# exclusions in NightMonkey's tests/*-ff159.txt applied. 159 ships about 1150
+# more verified tests per lane than 147 even with those exclusions. The first
+# release dry run on main re-measures these through accept-engine.sh; if it
+# reports different counts, fix this file before pushing the tag.
+aot_verified=13451
+interpreter_verified=13641
