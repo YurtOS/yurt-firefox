@@ -42,23 +42,23 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/ExternalCompilerHooks.cpp           |  36 +++
  js/src/vm/JSContext.h                         |   5 +
  js/src/vm/NativeObject.cpp                    |  13 +
- js/src/vm/NativeObject.h                      |  17 ++
+ js/src/vm/NativeObject.h                      |  18 ++
  js/src/vm/ObjectFlags-inl.h                   |   6 +
  js/src/vm/ObjectFlags.h                       |  10 +
  js/src/vm/ObjectFuse.cpp                      |  13 +
  js/src/vm/ObjectFuse.h                        |   4 +
  js/src/vm/PlainObject.cpp                     |   4 +-
- js/src/vm/PropMap.cpp                         |  93 ++++++-
- js/src/vm/PropMap.h                           |  30 ++-
+ js/src/vm/PropMap.cpp                         | 126 ++++++++-
+ js/src/vm/PropMap.h                           |  38 ++-
  js/src/vm/Shape.cpp                           | 125 ++++++++-
  js/src/vm/Shape.h                             |  39 +++
- 21 files changed, 947 insertions(+), 12 deletions(-)
+ 21 files changed, 989 insertions(+), 12 deletions(-)
  create mode 100644 js/src/jit-test/tests/external-compiler/assign-slot-policy.js
  create mode 100644 js/src/jit-test/tests/external-compiler/object-fuse-notifications.js
  create mode 100644 js/src/jit-test/tests/external-compiler/permuted-slots.js
 
 diff --git a/js/public/ExternalCompilerHooks.h b/js/public/ExternalCompilerHooks.h
-index 741ff49a52f1..c349ab8ad5ed 100644
+index b8006e1c9472..d2bb1ccf202a 100644
 --- a/js/public/ExternalCompilerHooks.h
 +++ b/js/public/ExternalCompilerHooks.h
 @@ -37,6 +37,8 @@
@@ -107,7 +107,7 @@ index 741ff49a52f1..c349ab8ad5ed 100644
    // Script entry. Every script carries a pointer-sized external word, zero
    // at birth; the engine consults these only for scripts whose word is
    // nonzero.
-@@ -153,6 +178,26 @@ extern JS_PUBLIC_API void ExternalPropertyAdded(JSContext* cx,
+@@ -158,6 +183,26 @@ extern JS_PUBLIC_API void ExternalPropertyAdded(JSContext* cx,
                                                  NativeObject* obj,
                                                  JS::PropertyKey id,
                                                  uint32_t slot);
@@ -843,25 +843,26 @@ index fc7d75f6de8b..b729154d4f4f 100644
    if (!excludedItems) {
      const PlainObjectCopyPropsCache& cache =
 diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
-index 254777b01fd4..7c7fd18b930f 100644
+index 254777b01fd4..ece5a8e62a6f 100644
 --- a/js/src/vm/NativeObject.h
 +++ b/js/src/vm/NativeObject.h
-@@ -689,6 +689,14 @@ inline size_t NativeObjectSlotSpanForTracing(Shape* shape,
+@@ -689,6 +689,15 @@ inline size_t NativeObjectSlotSpanForTracing(Shape* shape,
  
    uint32_t propMapLength = shapeFlags & Shape::MAP_LENGTH_MASK;
  
 +  // With permuted slots (ObjectFlag::PermutedSlots, mirrored in the immutable
 +  // flags word) the last property need not hold the top slot; as in
-+  // SharedShape::slotSpanSlow, take the highest slot instead. The maps are
-+  // immutable, so this doesn't need to be atomic either.
++  // SharedShape::slotSpanSlow, take the highest slot instead, with a walk
++  // that reads the map header flags and links the tracing-safe way.
 +  if (MOZ_UNLIKELY(shapeFlags & Shape::PERMUTED_SLOTS_BIT)) {
-+    return SharedPropMap::permutedSlotSpan(clasp, propMap, propMapLength);
++    return SharedPropMap::permutedSlotSpanForTracing(clasp, propMap,
++                                                     propMapLength);
 +  }
 +
    // The data read by SharedPropMap::lastUsedSlot is immutable so this doesn't
    // need to be atomic.
    return SharedPropMap::slotSpan(clasp, propMap, propMapLength);
-@@ -1298,6 +1306,15 @@ class NativeObject : public JSObject {
+@@ -1298,6 +1307,15 @@ class NativeObject : public JSObject {
      return addProperty(cx, obj, id, flags, slotOut);
    }
  
@@ -992,10 +993,10 @@ index 95eab93ecd4e..0c2c4012a9cd 100644
      MOZ_ASSERT(obj->slotSpan() == properties.length());
      cache.add(obj->sharedShape());
 diff --git a/js/src/vm/PropMap.cpp b/js/src/vm/PropMap.cpp
-index 5090478511b0..7a261fa2742c 100644
+index 5090478511b0..16eab8020c86 100644
 --- a/js/src/vm/PropMap.cpp
 +++ b/js/src/vm/PropMap.cpp
-@@ -236,15 +236,62 @@ bool SharedPropMap::addChild(JSContext* cx, SharedPropMapAndIndex child,
+@@ -236,15 +236,95 @@ bool SharedPropMap::addChild(JSContext* cx, SharedPropMapAndIndex child,
    return true;
  }
  
@@ -1018,6 +1019,39 @@ index 5090478511b0..7a261fa2742c 100644
 +      break;
 +    }
 +    cur = cur->asNormal()->previous();
++    len = PropMap::Capacity;
++  }
++  return span;
++}
++
++// static
++uint32_t SharedPropMap::permutedSlotSpanForTracing(const JSClass* clasp,
++                                                   const SharedPropMap* map,
++                                                   uint32_t mapLength) {
++  MOZ_ASSERT(clasp->isNativeObject());
++  uint32_t span = JSCLASS_RESERVED_SLOTS(clasp);
++  const SharedPropMap* cur = map;
++  uint32_t len = mapLength;
++  while (cur) {
++    uintptr_t flags = cur->getFlagsForTracing();
++    bool isCompact = flags & IsCompactFlag;
++    for (uint32_t i = 0; i < len; i++) {
++      PropertyInfo prop =
++          isCompact
++              ? PropertyInfo(
++                    static_cast<const CompactPropMap*>(cur)->propInfos_[i])
++              : static_cast<const NormalPropMap*>(cur)
++                    ->linkedData_.propInfos[i];
++      if (prop.hasSlot()) {
++        span = std::max(span, prop.slot() + 1);
++      }
++    }
++    if (isCompact || !(flags & HasPrevFlag)) {
++      break;
++    }
++    cur = static_cast<const SharedPropMap*>(
++        static_cast<const NormalPropMap*>(cur)
++            ->linkedData_.previous.getForTracing());
 +    len = PropMap::Capacity;
 +  }
 +  return span;
@@ -1061,7 +1095,7 @@ index 5090478511b0..7a261fa2742c 100644
  
    if (MOZ_UNLIKELY(*slot > SHAPE_MAXIMUM_SLOT)) {
      ReportAllocationOverflow(cx);
-@@ -258,6 +305,40 @@ bool SharedPropMap::addProperty(JSContext* cx, const JSClass* clasp,
+@@ -258,6 +338,40 @@ bool SharedPropMap::addProperty(JSContext* cx, const JSClass* clasp,
    return addPropertyInternal(cx, map, mapLength, id, prop);
  }
  
@@ -1102,7 +1136,7 @@ index 5090478511b0..7a261fa2742c 100644
  // static
  bool SharedPropMap::addPropertyInReservedSlot(
      JSContext* cx, const JSClass* clasp, MutableHandle<SharedPropMap*> map,
-@@ -289,7 +370,8 @@ bool SharedPropMap::addPropertyWithKnownSlot(JSContext* cx,
+@@ -289,7 +403,8 @@ bool SharedPropMap::addPropertyWithKnownSlot(JSContext* cx,
                                       objectFlags);
    }
  
@@ -1112,7 +1146,7 @@ index 5090478511b0..7a261fa2742c 100644
    MOZ_RELEASE_ASSERT(slot <= SHAPE_MAXIMUM_SLOT);
  
    *objectFlags =
-@@ -1307,7 +1389,8 @@ void PropMap::checkConsistency(NativeObject* obj) const {
+@@ -1307,7 +1422,8 @@ void PropMap::checkConsistency(NativeObject* obj) const {
        if (prop.hasSlot()) {
          MOZ_ASSERT_IF((curMap != this || index < mapLength),
                        prop.slot() < obj->slotSpan());
@@ -1123,10 +1157,10 @@ index 5090478511b0..7a261fa2742c 100644
        }
  
 diff --git a/js/src/vm/PropMap.h b/js/src/vm/PropMap.h
-index 1f0db8fc1807..531ac769d483 100644
+index 1f0db8fc1807..2c28fbaa2e7a 100644
 --- a/js/src/vm/PropMap.h
 +++ b/js/src/vm/PropMap.h
-@@ -698,6 +698,18 @@ class SharedPropMap : public PropMap {
+@@ -698,6 +698,26 @@ class SharedPropMap : public PropMap {
      return std::max(lastSlot + 1, numReserved);
    }
  
@@ -1137,6 +1171,14 @@ index 1f0db8fc1807..531ac769d483 100644
 +                                   const SharedPropMap* map,
 +                                   uint32_t mapLength);
 +
++  // permutedSlotSpan for GC tracing, which may run concurrently with the
++  // mutator: the map header flags (which also hold mutable bits such as
++  // HasChildrenSetFlag) are read with getFlagsForTracing and the previous
++  // links with getForTracing. The property infos are immutable.
++  static uint32_t permutedSlotSpanForTracing(const JSClass* clasp,
++                                             const SharedPropMap* map,
++                                             uint32_t mapLength);
++
 +  // Whether no property of map/mapLength has slot `slot`. Linear in the number
 +  // of properties.
 +  static bool slotIsUnused(const SharedPropMap* map, uint32_t mapLength,
@@ -1145,7 +1187,7 @@ index 1f0db8fc1807..531ac769d483 100644
    static uint32_t indexOfNextProperty(uint32_t index) {
      MOZ_ASSERT(index < PropMap::Capacity);
      return (index + 1) % PropMap::Capacity;
-@@ -705,10 +717,26 @@ class SharedPropMap : public PropMap {
+@@ -705,10 +725,26 @@ class SharedPropMap : public PropMap {
  
    // Add a new property to this map. Returns the new map/mapLength, slot number,
    // and object flags.

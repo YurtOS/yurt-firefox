@@ -15,9 +15,9 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
     (all included paths)
 ---
  js/moz.configure                       |  23 ++++
- js/public/ExternalCompilerHooks.h      | 161 ++++++++++++++++++++++
+ js/public/ExternalCompilerHooks.h      | 166 +++++++++++++++++++++++
  js/public/shadow/Object.h              |   5 +-
- js/src/build/export_private_headers.py | 119 +++++++++++++++++
+ js/src/build/export_private_headers.py | 132 +++++++++++++++++++
  js/src/builtin/RegExp.cpp              |  22 +++-
  js/src/builtin/RegExp.h                |  13 ++
  js/src/builtin/String.cpp              |  15 ++-
@@ -38,7 +38,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/CommonPropertyNames.h        |   3 +
  js/src/vm/EnvironmentObject.cpp        |  10 ++
  js/src/vm/ExternalCompilerHooks.cpp    |  92 +++++++++++++
- js/src/vm/GeneratorObject.cpp          |  18 +++
+ js/src/vm/GeneratorObject.cpp          |  33 +++++
  js/src/vm/Interpreter.cpp              |  64 +++++++++
  js/src/vm/JSContext.cpp                |  15 +++
  js/src/vm/JSContext.h                  |  25 +++-
@@ -64,7 +64,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/StaticStrings.h              |   7 +
  js/src/vm/Watchtower.cpp               |  30 +++++
  js/src/vm/moz.build                    |   4 +-
- 50 files changed, 1388 insertions(+), 98 deletions(-)
+ 50 files changed, 1421 insertions(+), 98 deletions(-)
  create mode 100644 js/public/ExternalCompilerHooks.h
  create mode 100644 js/src/build/export_private_headers.py
  create mode 100644 js/src/shell/CommonShellGlobals.cpp
@@ -127,10 +127,10 @@ index e5f20807f2a1..063c923d4f85 100644
  @depends(target, "--enable-portable-baseline-interp")
 diff --git a/js/public/ExternalCompilerHooks.h b/js/public/ExternalCompilerHooks.h
 new file mode 100644
-index 000000000000..741ff49a52f1
+index 000000000000..b8006e1c9472
 --- /dev/null
 +++ b/js/public/ExternalCompilerHooks.h
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,166 @@
 +/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
 + * vim: set ts=8 sts=2 et sw=2 tw=80:
 + * This Source Code Form is subject to the terms of the Mozilla Public
@@ -236,7 +236,12 @@ index 000000000000..741ff49a52f1
 +  ExternalEnterStatus (*enterCall)(JSContext* cx, const JS::CallArgs& args,
 +                                   JSScript* script, bool constructing);
 +  // A generator whose frame belongs to the external tier cannot be resumed
-+  // by the interpreter.
++  // by the interpreter. Consulted at JSOp::Resume and in js::ResumeGenerator
++  // (async functions, async generators, and resumes from the portable
++  // baseline interpreter). Neither hook is consulted for module (top-level
++  // await) generators: `gen` is never a module generator, so gen->callee()
++  // is always a JSFunction. resumeGenerator must run the generator (Ok, with
++  // the result in rval, or Error); it must not return NotEntered.
 +  bool (*isForeignGenerator)(JSContext* cx, js::AbstractGeneratorObject* gen);
 +  ExternalEnterStatus (*resumeGenerator)(
 +      JSContext* cx, JS::Handle<js::AbstractGeneratorObject*> gen,
@@ -310,10 +315,10 @@ index 8e48059faac5..dec6aa5ce56d 100644
    Value* slots;
 diff --git a/js/src/build/export_private_headers.py b/js/src/build/export_private_headers.py
 new file mode 100644
-index 000000000000..b87bb7861fa0
+index 000000000000..d1f948c6d9bf
 --- /dev/null
 +++ b/js/src/build/export_private_headers.py
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,132 @@
 +# This Source Code Form is subject to the terms of the Mozilla Public
 +# License, v. 2.0. If a copy of the MPL was not distributed with this
 +# file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -373,6 +378,19 @@ index 000000000000..b87bb7861fa0
 +    return default if value is None else value
 +
 +
++def subst_command(name):
++    # CC/CXX are one shell-quoted command-line string (wrapper, compiler and
++    # flags), as configure substituted them before it switched to a list
++    # (`mozshellutil.quote(*wrapper, compiler, *flags)`); consumers split it
++    # as a command line. Keep emitting that string for a list value.
++    value = subst(name, "")
++    if isinstance(value, (list, tuple)):
++        from mozshellutil import quote
++
++        return quote(*value) if value else ""
++    return value
++
++
 +def main(output, *inputs):
 +    topsrcdir = buildconfig.topsrcdir
 +    topobjdir = buildconfig.topobjdir
@@ -396,8 +414,8 @@ index 000000000000..b87bb7861fa0
 +    config = {
 +        "topsrcdir": topsrcdir,
 +        "topobjdir": topobjdir,
-+        "cxx": subst("CXX", []),
-+        "cc": subst("CC", []),
++        "cxx": subst_command("CXX"),
++        "cc": subst_command("CC"),
 +        "ar": subst("AR", ""),
 +        "cxx_base_flags": subst("CXX_BASE_FLAGS", []),
 +        "os_cxxflags": subst("OS_CXXFLAGS", []),
@@ -1482,41 +1500,56 @@ index 000000000000..6c79aa7df56c
 +  }
 +}
 diff --git a/js/src/vm/GeneratorObject.cpp b/js/src/vm/GeneratorObject.cpp
-index 70d3365a7224..782e41bc6d39 100644
+index 70d3365a7224..40a8dff7abe8 100644
 --- a/js/src/vm/GeneratorObject.cpp
 +++ b/js/src/vm/GeneratorObject.cpp
-@@ -5,6 +5,9 @@
+@@ -5,6 +5,10 @@
  #include "vm/GeneratorObject.h"
  
  #include "frontend/ParserAtom.h"
 +#ifdef JS_EXTERNAL_COMPILER_HOOKS
 +#  include "js/ExternalCompilerHooks.h"
++#  include "js/friend/StackLimits.h"  // js::AutoCheckRecursionLimit
 +#endif
  #ifdef DEBUG
  #  include "js/friend/DumpFunctions.h"  // js::DumpObject, js::DumpValue
  #endif
-@@ -295,6 +298,21 @@ void AbstractGeneratorObject::resume(JSContext* cx,
- bool js::ResumeGenerator(JSContext* cx, Handle<AbstractGeneratorObject*> genObj,
-                          HandleValue value, GeneratorResumeKind kind,
-                          MutableHandleValue result) {
+@@ -298,6 +302,35 @@ bool js::ResumeGenerator(JSContext* cx, Handle<AbstractGeneratorObject*> genObj,
+   MOZ_ASSERT(genObj->isSuspended());
+   MOZ_ASSERT(cx->realm() == genObj->script()->realm());
+ 
 +#ifdef JS_EXTERNAL_COMPILER_HOOKS
 +  // A generator whose frame belongs to the external tier cannot be resumed
 +  // here either: as in the interpreter's JSOp::Resume, the tier runs it to
 +  // its next suspend point or completion and yields the result value. Async
 +  // functions and async generators resume through here, not JSOp::Resume.
-+  if (cx->externalCompilerHooks() &&
-+      cx->externalCompilerHooks()->isForeignGenerator &&
-+      cx->externalCompilerHooks()->isForeignGenerator(cx, genObj)) {
++  // Module (top-level await) generators have no JSFunction callee and are
++  // never offered to the tier (see js/ExternalCompilerHooks.h).
++  JS::ExternalCompilerHooks* hooks = cx->externalCompilerHooks();
++  if (hooks && hooks->isForeignGenerator && hooks->resumeGenerator &&
++      !genObj->isModuleGenerator() && hooks->isForeignGenerator(cx, genObj)) {
++    // What RunScript checks before running a script, in the same order.
++    AutoCheckRecursionLimit recursion(cx);
++    if (!recursion.check(cx)) {
++      return false;
++    }
++    RootedScript script(cx, genObj->script());
++    if (!DebugAPI::checkNoExecute(cx, script)) {
++      return false;
++    }
++
 +    RootedValue resumeKindVal(cx, Int32Value(int32_t(kind)));
-+    return cx->externalCompilerHooks()->resumeGenerator(
-+               cx, genObj, value, resumeKindVal, result) ==
-+           JS::ExternalEnterStatus::Ok;
++    JS::ExternalEnterStatus status =
++        hooks->resumeGenerator(cx, genObj, value, resumeKindVal, result);
++    MOZ_ASSERT(status != JS::ExternalEnterStatus::NotEntered,
++               "resumeGenerator must run a foreign generator");
++    return status == JS::ExternalEnterStatus::Ok;
 +  }
 +#endif
 +
-   MOZ_ASSERT(genObj->isSuspended());
-   MOZ_ASSERT(cx->realm() == genObj->script()->realm());
- 
+   GeneratorResumeState state(cx, genObj, value, kind, result);
+   return RunScript(cx, state);
+ }
 diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
 index 89ad5d219a14..50609a0a29fd 100644
 --- a/js/src/vm/Interpreter.cpp
