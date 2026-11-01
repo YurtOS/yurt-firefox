@@ -48,6 +48,9 @@ setup() {
   chmod +x "$D/tc/bin/clang" "$D/tc/bin/clang++"
   echo 'project(nightmonkey)' >"$D/nm/CMakeLists.txt"
   cp "$ROOT/baseline/jit-floor.txt" "$D/root/baseline/jit-floor.txt"
+  # A fixed UPSTREAM (not the repository's): the engine version the script
+  # derives from it is part of the expected cmake call below.
+  printf 'url=https://h.test/r\ntag=FIREFOX_159_0_RELEASE\n' >"$D/root/UPSTREAM"
   : >"$D/calls"
 
   cat >"$D/stubs/cmake" <<'SH'
@@ -142,7 +145,7 @@ all_green_runs_every_step_in_order() {
   run_accept
   assert_eq 0 "$RC" "$OUT"
   local want
-  want="cmake -S $D/nm -B $D/nm/build -DSPIDERMONKEY_DIST=$D/pkg/spidermonkey -DNIGHT_TOOLCHAIN_ROOT=$D/tc -DNIGHT_SYSROOT=$D/sysroot -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF | cwd=$D/nm
+  want="cmake -S $D/nm -B $D/nm/build -DSPIDERMONKEY_DIST=$D/pkg/spidermonkey -DNIGHT_TOOLCHAIN_ROOT=$D/tc -DNIGHT_SYSROOT=$D/sysroot -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF -DNIGHT_ENGINE_VERSION=ff159 | cwd=$D/nm
 cmake --build $D/nm/build | cwd=$D/nm
 snapshot-roundtrip.sh $D/nm/build | WASMTIME_FLAGS= | cwd=$D/nm
 ci-suite.sh jit aot | NIGHT_FIREFOX_TESTS=$D/testsrc | cwd=$D/nm
@@ -415,12 +418,38 @@ default_runner_temp_kept_on_failure() {
   rm -rf "$kept"
 }
 
+# The NightMonkey engine version comes from UPSTREAM's tag and is forced with -D;
+# a tag it cannot read stops the run before any cmake call.
+engine_version_from_upstream() {
+  local pair tag want
+  for pair in FIREFOX_147_0_4_RELEASE:ff147 FIREFOX_160_0_RELEASE:ff160 FIREFOX_159_0_BUILD1:ff159; do
+    tag=${pair%%:*}; want=${pair#*:}
+    setup
+    printf 'url=https://h.test/r\ntag=%s\n' "$tag" >"$D/root/UPSTREAM"
+    run_accept
+    assert_eq 0 "$RC" "$tag: $OUT"
+    called "^cmake -S .* -DNIGHT_ENGINE_VERSION=$want \\| cwd=" || { echo "$tag: no -DNIGHT_ENGINE_VERSION=$want" >&2; return 1; }
+  done
+  local bad
+  for bad in 'tag=V1' 'tag=' 'tag=FIREFOX__RELEASE' 'tag=FIREFOX_x_RELEASE' 'url=only'; do
+    setup
+    printf '%s\n' "$bad" >"$D/root/UPSTREAM"
+    run_accept
+    expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
+    ! called '^cmake ' || { echo "cmake ran for '$bad'" >&2; return 1; }
+  done
+  setup; rm "$D/root/UPSTREAM"
+  run_accept
+  expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
+}
+
 run_test "all green runs every step in order" all_green_runs_every_step_in_order
 run_test "configure failure fails" configure_failure_fails
 run_test "build failure fails" build_failure_fails
 run_test "aot lane failure fails" aot_lane_failure_fails
 run_test "interpreter lane failure fails" interpreter_lane_failure_fails
 run_test "floor comparison (>=)" floor_comparison
+run_test "engine version comes from UPSTREAM's tag" engine_version_from_upstream
 run_test "verified line required" verified_line_required
 run_test "snapshot failure fails" snapshot_failure_fails
 run_test "snapshot gets WASMTIME_FLAGS" snapshot_gets_wasmtime_flags

@@ -238,7 +238,7 @@ t_checkouts() {
     { echo "check-tag does not clone NightMonkey's yurt" >&2; return 1; }
 }
 
-RRN=76adea3a6764cbcafa50ea4bf7e7608ca4e054bb
+RRN=9d51f6430ef3ccaa16c51782f8e4a0a1afdafda5
 t_requires_file() {
   assert_eq "$RRN" "$(cat "$ROOT/RELEASE_REQUIRES_NIGHTMONKEY")" "RELEASE_REQUIRES_NIGHTMONKEY"
   assert_eq 1 "$(wc -l <"$ROOT/RELEASE_REQUIRES_NIGHTMONKEY" | tr -d ' ')" "one line"

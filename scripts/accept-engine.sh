@@ -18,6 +18,7 @@
 #                  -DSPIDERMONKEY_DIST=<package>/spidermonkey
 #                  -DNIGHT_TOOLCHAIN_ROOT=<toolchain> -DNIGHT_SYSROOT=<sysroot>
 #                  -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF
+#                  -DNIGHT_ENGINE_VERSION=ff<major of UPSTREAM's tag>
 #                cmake --build <nm>/build; then bin/nightmonkey, bin/js,
 #                bin/js-inproc, bin/wasm-jit-runner and bin/inproc-shell.sh
 #                must exist. The in-process options are forced because a
@@ -170,10 +171,28 @@ logs=$RUNNER_TEMP/nightmonkey-logs
 mkdir -p "$logs"
 
 build=$nm/build
-step "build: NightMonkey in $build against $package/spidermonkey"
+# NightMonkey's engine version is the Firefox major of UPSTREAM's tag
+# (FIREFOX_159_0_RELEASE -> ff159): it selects the opcode table, the lowerings and
+# the jit-test exclude lists. It is forced with -D so a reused build dir's
+# CMakeCache.txt cannot keep another version, and an engine it has no table for
+# stops at configure. (The gate derives it the same way; see gate.yml.)
+engine=
+if [ -f "$ROOT/UPSTREAM" ]; then
+  while IFS= read -r line; do
+    case $line in
+      tag=FIREFOX_*) engine=${line#tag=FIREFOX_}; engine=${engine%%_*} ;;
+    esac
+  done <"$ROOT/UPSTREAM"
+fi
+case $engine in
+  '' | *[!0-9]*) fail build "cannot derive NightMonkey's engine version from the tag in $ROOT/UPSTREAM" ;;
+esac
+
+step "build: NightMonkey ($engine) in $build against $package/spidermonkey"
 (cd "$nm" && cmake -S "$nm" -B "$build" -DSPIDERMONKEY_DIST="$package/spidermonkey" \
   -DNIGHT_TOOLCHAIN_ROOT="$toolchain" -DNIGHT_SYSROOT="$sysroot" \
-  -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF) ||
+  -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF \
+  -DNIGHT_ENGINE_VERSION="ff$engine") ||
   fail build "cmake configure failed"
 (cd "$nm" && cmake --build "$build") || fail build "cmake --build failed"
 for f in nightmonkey js js-inproc wasm-jit-runner inproc-shell.sh; do

@@ -633,7 +633,7 @@ refuses_bad_test_sources() {
   setup; d=$BASE/bad3.$$; fake_bundles "$d"; echo "not-a-digest  $f" >"$d/$f.sha256"
   run_pkg_ts "$d"; expect_violation "$f.sha256"
   setup; d=$BASE/bad4.$$; fake_bundles "$d"
-  printf '%s  spidermonkey_$FXV-2-testsrc.tar.zst\n' "$(cut -d' ' -f1 <"$d/$f.sha256")" >"$d/$f.sha256"
+  printf '%s  spidermonkey_%s-2-testsrc.tar.zst\n' "$(cut -d' ' -f1 <"$d/$f.sha256")" "$FXV" >"$d/$f.sha256"
   run_pkg_ts "$d"; expect_violation "$f.sha256"
   setup; d=$BASE/bad5.$$; fake_bundles "$d"; rm "$d/$f"
   run_pkg_ts "$d"; expect_violation "$f"
