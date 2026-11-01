@@ -459,6 +459,12 @@ engine_version_from_upstream() {
   run_accept
   assert_eq 0 "$RC" "$OUT"
   called "^cmake -S .* -DNIGHT_ENGINE_VERSION=ff159 \\| cwd=" || { echo "CRLF/no-newline file not read" >&2; return 1; }
+  # A CRLF tag line with no suffix after the major is read like pq_read_pin does.
+  setup
+  printf 'url=x\r\ntag=FIREFOX_159\r\n' >"$D/root/UPSTREAM"
+  run_accept
+  assert_eq 0 "$RC" "$OUT"
+  called "^cmake -S .* -DNIGHT_ENGINE_VERSION=ff159 \\| cwd=" || { echo "CRLF tag without suffix not read" >&2; return 1; }
   # The effective (last) tag is the one validated: a good tag followed by a bad or empty one is refused.
   for bad in V1 ''; do
     setup

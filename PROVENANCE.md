@@ -147,7 +147,7 @@ Reviewed by Claude and Codex (each read-only); the findings and their dispositio
 comments of PR #33 (and the commit messages of the follow-up commits). Among them: the async-resume
 hook bypass, module generators reaching the hook, and an unsafe flag read on the concurrent marking
 thread; the `CacheIRReader` end pointer in 0006 was verified correct in review. Not fixed and
-tracked: `NativeObject::setNeverGCThingFixedSlot` (new in 159, used by `Date`) skips the external
+tracked (YurtOS/yurt-firefox#34): `NativeObject::setNeverGCThingFixedSlot` (new in 159, used by `Date`) skips the external
 store check, which matters only if the external tier tags `Date` objects. `data/ics` is still the corpus from
 the 147 era; it is not built into this engine (no `--enable-aot-ics`) and is carried only so the
 tree hash stays byte-identical.

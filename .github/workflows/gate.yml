@@ -210,7 +210,7 @@ jobs:
         id: engine
         run: |
           # The last tag= line wins, as in scripts/lib/patch-queue.sh pq_read_pin.
-          tag=$(sed -n 's/^tag=//p' UPSTREAM | tail -n 1)
+          tag=$(sed -n 's/^tag=//p' UPSTREAM | tail -n 1 | tr -d '\r')
           major=${tag#FIREFOX_}
           major=${major%%_*}
           case $major in

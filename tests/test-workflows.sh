@@ -775,6 +775,24 @@ t_gate_engine_version() {
     out=$(cat "$d/out")
     [ "$out" = "version=$want" ] || { echo "tag $tag: wanted version=$want, got '$out'" >&2; rm -rf "$d"; return 1; }
   done
+  # Same effective tag as accept-engine.sh and pq_read_pin: the last tag= line wins
+  # (a good tag followed by a bad one is refused, a bad one followed by a good one is
+  # accepted) and a CRLF file is read like an LF one.
+  printf 'url=https://h.test/r\ntag=FIREFOX_147_0_4_RELEASE\ntag=FIREFOX_159_0_RELEASE\n' >"$d/UPSTREAM"
+  : >"$d/out"
+  exec_step "$f" "Select the NightMonkey engine version" "$d" GITHUB_OUTPUT="$d/out" >/dev/null 2>&1 &&
+    [ "$(cat "$d/out")" = "version=ff159" ] ||
+    { echo "engine version step: the last tag= line did not win" >&2; rm -rf "$d"; return 1; }
+  printf 'url=https://h.test/r\r\ntag=FIREFOX_159\r\n' >"$d/UPSTREAM"
+  : >"$d/out"
+  exec_step "$f" "Select the NightMonkey engine version" "$d" GITHUB_OUTPUT="$d/out" >/dev/null 2>&1 &&
+    [ "$(cat "$d/out")" = "version=ff159" ] ||
+    { echo "engine version step: a CRLF tag line was not read" >&2; rm -rf "$d"; return 1; }
+  printf 'url=https://h.test/r\ntag=FIREFOX_159_0_RELEASE\ntag=V1\n' >"$d/UPSTREAM"
+  : >"$d/out"
+  if exec_step "$f" "Select the NightMonkey engine version" "$d" GITHUB_OUTPUT="$d/out" >/dev/null 2>&1; then
+    echo "engine version step accepted a later bad tag" >&2; rm -rf "$d"; return 1
+  fi
   for tag in V1 '' FIREFOX__RELEASE FIREFOX_x_RELEASE nightly; do
     printf 'url=https://h.test/r\ntag=%s\n' "$tag" >"$d/UPSTREAM"
     : >"$d/out"
