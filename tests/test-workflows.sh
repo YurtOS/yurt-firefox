@@ -227,6 +227,10 @@ t_gate() {
     { echo "gate.yml does not build NightMonkey against the queue dist" >&2; return 1; }
   has_line "$f" '-DNIGHT_ENGINE_VERSION="${{ steps.engine.outputs.version }}"' ||
     { echo "gate.yml does not pass the engine version to NightMonkey" >&2; return 1; }
+  # The shards pick the engine version's exclude lists from the build's
+  # CMakeCache.txt; a shard without it silently runs the unscoped lists.
+  has_line "$f" 'tar -C nightmonkey -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin build/CMakeCache.txt' ||
+    { echo "gate.yml shard inputs do not carry build/CMakeCache.txt" >&2; return 1; }
   body "$f" | grep -Eq 'timeout-minutes: 125' || { echo "gate.yml lacks the 125 minute jit-test timeout" >&2; return 1; }
   body "$f" | grep -q 'Free disk space' || { echo "gate.yml lacks the free-disk step" >&2; return 1; }
   # the test tree is never the fork or a bare tag checkout

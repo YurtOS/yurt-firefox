@@ -335,12 +335,15 @@ jobs:
       # The shards' inputs: the built shell (build/bin is self-contained:
       # inproc-shell.sh runs js-inproc under wasm-jit-runner, both next to it)
       # and the testsrc members package-test-sources.sh names (non262 whole,
-      # for the shell.js files jit-tests load from it). A tar, because an
-      # artifact does not keep the executable bit.
+      # for the shell.js files jit-tests load from it). build/CMakeCache.txt
+      # rides along: run-jit-tests.sh reads NIGHT_ENGINE_VERSION from it to pick
+      # the engine version's exclude lists, and without it a shard silently runs
+      # the unscoped lists. A tar, because an artifact does not keep the
+      # executable bit.
       - name: Package the shard inputs
         if: env.MODE == 'full'
         run: |
-          tar -C nightmonkey -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin
+          tar -C nightmonkey -cf "$RUNNER_TEMP/shard-inputs.tar" build/bin build/CMakeCache.txt
           tar -C firefox -rf "$RUNNER_TEMP/shard-inputs.tar" \
             js/src/jit-test js/src/tests/lib js/src/tests/non262 js/src/jsapi.h
           zstd -q -T0 --rm "$RUNNER_TEMP/shard-inputs.tar"
