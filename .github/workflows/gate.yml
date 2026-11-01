@@ -203,6 +203,20 @@ jobs:
             { echo "NIGHTMONKEY_PIN must hold one full 40-hex SHA, got '$pin'" >&2; exit 1; }
           echo "sha=$pin" >> "$GITHUB_OUTPUT"
 
+      # NightMonkey's engine version is the Firefox major of UPSTREAM's tag
+      # (FIREFOX_159_0_RELEASE -> ff159); it picks the opcode table and the
+      # engine-specific lowerings, and fails the build for an engine it has none for.
+      - name: Select the NightMonkey engine version
+        id: engine
+        run: |
+          tag=$(sed -n 's/^tag=//p' UPSTREAM)
+          major=${tag#FIREFOX_}
+          major=${major%%_*}
+          case $major in
+            ''|*[!0-9]*) echo "cannot derive an engine version from UPSTREAM tag '$tag'" >&2; exit 1 ;;
+          esac
+          echo "version=ff$major" >> "$GITHUB_OUTPUT"
+
       # Restore only: engine.yml seeds this cache from main.
       - name: Restore ~/.mozbuild
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -303,7 +317,8 @@ jobs:
       - name: Build NightMonkey
         working-directory: nightmonkey
         run: |
-          cmake -S . -B build -DSPIDERMONKEY_DIST="$GITHUB_WORKSPACE/firefox/obj-nightmonkey-sm/dist"
+          cmake -S . -B build -DSPIDERMONKEY_DIST="$GITHUB_WORKSPACE/firefox/obj-nightmonkey-sm/dist" \
+            -DNIGHT_ENGINE_VERSION="${{ steps.engine.outputs.version }}"
           cmake --build build
           test -x build/bin/inproc-shell.sh
 

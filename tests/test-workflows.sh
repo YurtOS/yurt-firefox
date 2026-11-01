@@ -223,8 +223,10 @@ t_gate() {
   has_line "$f" 'test ! -e nightmonkey/firefox' || { echo "gate.yml does not check the link target is free" >&2; return 1; }
   has_line "$f" 'ln -s "$GITHUB_WORKSPACE/firefox" nightmonkey/firefox' ||
     { echo "gate.yml does not link the engine tree at nightmonkey/firefox" >&2; return 1; }
-  has_line "$f" 'cmake -S . -B build -DSPIDERMONKEY_DIST="$GITHUB_WORKSPACE/firefox/obj-nightmonkey-sm/dist"' ||
+  has_line "$f" 'cmake -S . -B build -DSPIDERMONKEY_DIST="$GITHUB_WORKSPACE/firefox/obj-nightmonkey-sm/dist" \' ||
     { echo "gate.yml does not build NightMonkey against the queue dist" >&2; return 1; }
+  has_line "$f" '-DNIGHT_ENGINE_VERSION="${{ steps.engine.outputs.version }}"' ||
+    { echo "gate.yml does not pass the engine version to NightMonkey" >&2; return 1; }
   body "$f" | grep -Eq 'timeout-minutes: 125' || { echo "gate.yml lacks the 125 minute jit-test timeout" >&2; return 1; }
   body "$f" | grep -q 'Free disk space' || { echo "gate.yml lacks the free-disk step" >&2; return 1; }
   # the test tree is never the fork or a bare tag checkout
@@ -755,6 +757,31 @@ t_gate_pin() {
   check_pin_step "$WF/gate.yml" "Read the shard pin"
 }
 
+# The NightMonkey engine version is UPSTREAM's Firefox major: executed with
+# release tags (the version) and with tags it cannot read (fails, no output).
+t_gate_engine_version() {
+  local f="$WF/gate.yml" d tag want out
+  d=$(mktemp -d)
+  for tag_want in FIREFOX_159_0_RELEASE:ff159 FIREFOX_147_0_4_RELEASE:ff147 FIREFOX_160_0b1_RELEASE:ff160; do
+    tag=${tag_want%%:*}; want=${tag_want#*:}
+    printf 'url=https://h.test/r\ntag=%s\n' "$tag" >"$d/UPSTREAM"
+    : >"$d/out"
+    exec_step "$f" "Select the NightMonkey engine version" "$d" GITHUB_OUTPUT="$d/out" >/dev/null 2>&1 ||
+      { echo "engine version step rejected tag $tag" >&2; rm -rf "$d"; return 1; }
+    out=$(cat "$d/out")
+    [ "$out" = "version=$want" ] || { echo "tag $tag: wanted version=$want, got '$out'" >&2; rm -rf "$d"; return 1; }
+  done
+  for tag in V1 '' FIREFOX__RELEASE FIREFOX_x_RELEASE nightly; do
+    printf 'url=https://h.test/r\ntag=%s\n' "$tag" >"$d/UPSTREAM"
+    : >"$d/out"
+    if exec_step "$f" "Select the NightMonkey engine version" "$d" GITHUB_OUTPUT="$d/out" >/dev/null 2>&1; then
+      echo "engine version step accepted tag '$tag'" >&2; rm -rf "$d"; return 1
+    fi
+    [ ! -s "$d/out" ] || { echo "output written for tag '$tag'" >&2; rm -rf "$d"; return 1; }
+  done
+  rm -rf "$d"
+}
+
 # The logs artifact carries provenance: the logs dir is created (with the pin)
 # before anything can fail, and the engine's build-manifest.json is copied in
 # and shown in the step summary after the build.
@@ -825,6 +852,7 @@ run_test "gate.yml: the subset and each shard reach the harness and failures fai
 run_test "gate.yml: the tier comes from the labels and the changed files" t_gate_tier
 run_test "gate.yml: a nightly with no engine input changed since the last one skips" t_gate_nightly_skip
 run_test "gate.yml: the pin step rejects bad pins" t_gate_pin
+run_test "gate.yml: the engine version comes from UPSTREAM's tag" t_gate_engine_version
 run_test "gate.yml: an unrelated label does not cancel the gate" t_gate_concurrency
 run_test "gate.yml: shard inputs survive a rerun of failed shards" t_gate_shard_inputs
 run_test "gate.yml: logs carry the pin and the build manifest" t_gate_provenance
