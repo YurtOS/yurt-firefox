@@ -10,19 +10,19 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
   1e77c0d2599e JS shell on WASI: add basic Wizer integration for standalone testing.
     (all included paths except third_party/wizer)
 ---
- js/moz.configure       | 16 +++++++++
- js/src/shell/js.cpp    | 81 +++++++++++++++++++++++++++++-------------
+ js/moz.configure       | 16 ++++++++
+ js/src/shell/js.cpp    | 83 +++++++++++++++++++++++++++++-------------
  js/src/shell/jsshell.h | 15 ++++++++
- js/src/shell/moz.build |  2 ++
+ js/src/shell/moz.build |  2 +
  js/src/shell/wizer.cpp | 59 ++++++++++++++++++++++++++++++
- 5 files changed, 148 insertions(+), 25 deletions(-)
+ 5 files changed, 149 insertions(+), 26 deletions(-)
  create mode 100644 js/src/shell/wizer.cpp
 
 diff --git a/js/moz.configure b/js/moz.configure
-index a363235983ab..1c92f37e74f6 100644
+index 1327388db4a7..a78399f88b37 100644
 --- a/js/moz.configure
 +++ b/js/moz.configure
-@@ -57,6 +57,22 @@ def js_disable_shell(value):
+@@ -55,6 +55,22 @@ def js_disable_shell(value):
  
  set_config("JS_DISABLE_SHELL", js_disable_shell)
  
@@ -46,10 +46,10 @@ index a363235983ab..1c92f37e74f6 100644
  
  set_define("JS_PUNBOX64", depends(target)(lambda t: t.bitness == 64 or None))
 diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
-index bcaba8febee8..b4193feef5f3 100644
+index 84fd91e1cf60..5390df52d769 100644
 --- a/js/src/shell/js.cpp
 +++ b/js/src/shell/js.cpp
-@@ -44,6 +44,7 @@
+@@ -41,6 +41,7 @@
  #endif
  #include <ctime>
  #include <math.h>
@@ -57,7 +57,7 @@ index bcaba8febee8..b4193feef5f3 100644
  #ifndef __wasi__
  #  include <signal.h>
  #endif
-@@ -12361,7 +12362,8 @@ ShellContext::~ShellContext() {
+@@ -12577,7 +12578,8 @@ ShellContext::~ShellContext() {
    MOZ_ASSERT(offThreadJobs.empty());
  }
  
@@ -67,7 +67,7 @@ index bcaba8febee8..b4193feef5f3 100644
  #ifdef JS_STRUCTURED_SPEW
    cx->spewer().enableSpewing();
  #endif
-@@ -12413,6 +12415,7 @@ static int Shell(JSContext* cx, OptionParser* op) {
+@@ -12629,6 +12631,7 @@ static int Shell(JSContext* cx, OptionParser* op) {
      if (!glob) {
        return 1;
      }
@@ -75,7 +75,7 @@ index bcaba8febee8..b4193feef5f3 100644
  
      JSAutoRealm ar(cx, glob);
  
-@@ -12660,7 +12663,13 @@ static bool SetGCParameterFromArg(JSContext* cx, char* arg) {
+@@ -12884,7 +12887,13 @@ static bool SetGCParameterFromArg(JSContext* cx, char* arg) {
    return true;
  }
  
@@ -90,7 +90,7 @@ index bcaba8febee8..b4193feef5f3 100644
    PreInit();
  
    sArgc = argc;
-@@ -12670,13 +12679,8 @@ int main(int argc, char** argv) {
+@@ -12894,13 +12903,8 @@ int main(int argc, char** argv) {
  
    setlocale(LC_ALL, "");
  
@@ -104,7 +104,7 @@ index bcaba8febee8..b4193feef5f3 100644
    SetOutputFile("JS_STDOUT", &rcStdout, &gOutFile);
    SetOutputFile("JS_STDERR", &rcStderr, &gErrFile);
  
-@@ -12688,27 +12692,27 @@ int main(int argc, char** argv) {
+@@ -12912,27 +12916,27 @@ int main(int argc, char** argv) {
  
    OptionParser op("Usage: {progname} [options] [[script] scriptArgs*]");
    if (!InitOptionParser(op)) {
@@ -138,7 +138,7 @@ index bcaba8febee8..b4193feef5f3 100644
    }
  
    if (!JS::SetLoggingInterface(shellLoggingInterface)) {
-@@ -12719,7 +12723,7 @@ int main(int argc, char** argv) {
+@@ -12946,7 +12950,7 @@ int main(int argc, char** argv) {
    // Start the engine.
    if (const char* message = JS_InitWithFailureDiagnostic()) {
      fprintf(gErrFile->fp, "JS_Init failed: %s\n", message);
@@ -147,7 +147,7 @@ index bcaba8febee8..b4193feef5f3 100644
    }
  
    // `selfHostedXDRBuffer` contains XDR buffer of the self-hosted JS.
-@@ -12731,11 +12735,11 @@ int main(int argc, char** argv) {
+@@ -12958,11 +12962,11 @@ int main(int argc, char** argv) {
    auto shutdownEngine = MakeScopeExit([] { JS_ShutDown(); });
  
    if (!SetGlobalOptionsPostJSInit(op)) {
@@ -161,7 +161,7 @@ index bcaba8febee8..b4193feef5f3 100644
    }
  
    JS::SetProcessBuildIdOp(ShellBuildId);
-@@ -12743,7 +12747,7 @@ int main(int argc, char** argv) {
+@@ -12970,7 +12974,7 @@ int main(int argc, char** argv) {
    /* Use the same parameters as the browser in xpcjsruntime.cpp. */
    JSContext* const cx = JS_NewContext(JS::DefaultHeapMaxBytes);
    if (!cx) {
@@ -170,7 +170,7 @@ index bcaba8febee8..b4193feef5f3 100644
    }
  
    // Register telemetry callbacks.
-@@ -12755,11 +12759,11 @@ int main(int argc, char** argv) {
+@@ -12982,15 +12986,15 @@ int main(int argc, char** argv) {
    UniquePtr<ShellContext> sc =
        MakeUnique<ShellContext>(cx, ShellContext::MainThread);
    if (!sc || !sc->registerWithCx(cx)) {
@@ -183,8 +183,13 @@ index bcaba8febee8..b4193feef5f3 100644
 +    return AsVariant(1);
    }
  
+   if (!ApplyBenchmarkMode(cx, op)) {
+-    return 1;
++    return AsVariant(1);
+   }
+ 
    JS_SetTrustedPrincipals(cx, &ShellPrincipals::fullyTrusted);
-@@ -12772,7 +12776,7 @@ int main(int argc, char** argv) {
+@@ -13005,7 +13009,7 @@ int main(int argc, char** argv) {
    bufferStreamState = js_new<ExclusiveWaitableData<BufferStreamState>>(
        mutexid::BufferStreamState);
    if (!bufferStreamState) {
@@ -193,7 +198,7 @@ index bcaba8febee8..b4193feef5f3 100644
    }
    auto shutdownBufferStreams = MakeScopeExit([] {
      ShutdownBufferStreams();
-@@ -12814,7 +12818,7 @@ int main(int argc, char** argv) {
+@@ -13047,7 +13051,7 @@ int main(int argc, char** argv) {
    }
  
    if (!JS::InitSelfHostedCode(cx, xdrSpan, xdrWriter)) {
@@ -202,7 +207,7 @@ index bcaba8febee8..b4193feef5f3 100644
    }
  
    EnvironmentPreparer environmentPreparer(cx);
-@@ -12828,13 +12832,14 @@ int main(int argc, char** argv) {
+@@ -13061,13 +13065,14 @@ int main(int argc, char** argv) {
      if (!WasmCompileAndSerialize(cx)) {
        // Errors have been printed directly to stderr.
        MOZ_ASSERT(!cx->isExceptionPending());
@@ -220,7 +225,7 @@ index bcaba8febee8..b4193feef5f3 100644
  
  #ifdef DEBUG
    if (OOM_printAllocationCount) {
-@@ -12842,9 +12847,29 @@ int main(int argc, char** argv) {
+@@ -13075,9 +13080,29 @@ int main(int argc, char** argv) {
    }
  #endif
  
@@ -237,21 +242,21 @@ index bcaba8febee8..b4193feef5f3 100644
 +  } else {
 +    return AsVariant(result);
 +  }
- }
- 
++}
++
 +// N.B.: When Wizer support is enabled, a separate main() is used.
 +#ifndef JS_SHELL_WIZER
 +
 +int main(int argc, char** argv) {
 +  return ShellMain(argc, argv, /* returnContext = */ false).as<int>();
-+}
-+
+ }
+ 
 +#endif  // !JS_SHELL_WIZER
 +
  bool InitOptionParser(OptionParser& op) {
    op.setDescription(
        "The SpiderMonkey shell provides a command line interface to the "
-@@ -13620,6 +13645,12 @@ bool SetGlobalOptionsPostJSInit(const OptionParser& op) {
+@@ -13949,6 +13974,12 @@ bool SetGlobalOptionsPostJSInit(const OptionParser& op) {
          JS::DelazificationOption::ParseEverythingEagerly;
    }
  
@@ -262,13 +267,13 @@ index bcaba8febee8..b4193feef5f3 100644
 +#endif
 +
    if (const char* xdr = op.getStringOption("selfhosted-xdr-path")) {
-     shell::selfHostedXDRPath = xdr;
-   }
+     if (fuzzingSafe) {
+       fprintf(stderr,
 diff --git a/js/src/shell/jsshell.h b/js/src/shell/jsshell.h
-index 85174e25a9d1..35e04fae1a8d 100644
+index 6caa4d93dcbb..0480cddb5147 100644
 --- a/js/src/shell/jsshell.h
 +++ b/js/src/shell/jsshell.h
-@@ -19,6 +19,7 @@
+@@ -17,6 +17,7 @@
  #include "threading/LockGuard.h"
  #include "threading/Mutex.h"
  #include "threading/Thread.h"
@@ -276,7 +281,7 @@ index 85174e25a9d1..35e04fae1a8d 100644
  #include "vm/GeckoProfiler.h"
  #include "vm/Monitor.h"
  
-@@ -259,11 +260,25 @@ struct ShellContext {
+@@ -261,11 +262,25 @@ struct ShellContext {
    JS::PersistentRooted<ObjectVector> taskCallbacks;
  };
  
@@ -303,10 +308,10 @@ index 85174e25a9d1..35e04fae1a8d 100644
  } /* namespace js */
  
 diff --git a/js/src/shell/moz.build b/js/src/shell/moz.build
-index d7fa408fc38f..e8ca9e67a1e2 100644
+index 93f6373a48c4..510e094d7596 100644
 --- a/js/src/shell/moz.build
 +++ b/js/src/shell/moz.build
-@@ -22,6 +22,7 @@ UNIFIED_SOURCES += [
+@@ -21,6 +21,7 @@ UNIFIED_SOURCES += [
      "OSObject.cpp",
      "ShellModuleObjectWrapper.cpp",
      "WasmTesting.cpp",
@@ -314,7 +319,7 @@ index d7fa408fc38f..e8ca9e67a1e2 100644
  ]
  
  if CONFIG["FUZZING_INTERFACES"]:
-@@ -39,6 +40,7 @@ DEFINES["EXPORT_JS_API"] = True
+@@ -38,6 +39,7 @@ DEFINES["EXPORT_JS_API"] = True
  LOCAL_INCLUDES += [
      "!..",
      "..",

@@ -13,17 +13,34 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
   51f29d2cfcf6 Add JS::HasJobsPending as a way to query the status of the internal Jobs queue
     (all included paths)
 ---
+ js/src/builtin/Math.cpp |  6 ++++++
  js/src/jsfriendapi.h    | 10 ++++++++++
- js/src/jsmath.cpp       |  6 ++++++
  js/src/vm/JSContext.cpp | 10 ++++++++++
  js/src/vm/Realm.h       |  4 ++++
  4 files changed, 30 insertions(+)
 
+diff --git a/js/src/builtin/Math.cpp b/js/src/builtin/Math.cpp
+index 7fd0c2716d8f..7e918d281b67 100644
+--- a/js/src/builtin/Math.cpp
++++ b/js/src/builtin/Math.cpp
+@@ -571,6 +571,12 @@ Realm::getOrCreateRandomNumberGenerator() {
+   return randomNumberGenerator_.ref();
+ }
+ 
++void Realm::resetRandomNumberGenerator() {
++  if (randomNumberGenerator_.isSome()) {
++    randomNumberGenerator_.reset();
++  }
++}
++
+ double js::math_random_impl(JSContext* cx) {
+   return cx->realm()->getOrCreateRandomNumberGenerator().nextDouble();
+ }
 diff --git a/js/src/jsfriendapi.h b/js/src/jsfriendapi.h
-index ae31440a0877..f4ccd258338d 100644
+index e94ed82c130a..c35672fa7bc0 100644
 --- a/js/src/jsfriendapi.h
 +++ b/js/src/jsfriendapi.h
-@@ -226,6 +226,16 @@ extern JS_PUBLIC_API void RestartDrainingJobQueue(JSContext* cx);
+@@ -188,6 +188,16 @@ extern JS_PUBLIC_API void RestartDrainingJobQueue(JSContext* cx);
  
  extern JS_PUBLIC_API void RunJobs(JSContext* cx);
  
@@ -39,41 +56,24 @@ index ae31440a0877..f4ccd258338d 100644
 +
  extern JS_PUBLIC_API JS::Zone* GetRealmZone(JS::Realm* realm);
  
- using PreserveWrapperCallback = bool (*)(JSContext*, JS::HandleObject);
-diff --git a/js/src/jsmath.cpp b/js/src/jsmath.cpp
-index 70aa4dbab83c..25ff66b9fef9 100644
---- a/js/src/jsmath.cpp
-+++ b/js/src/jsmath.cpp
-@@ -566,6 +566,12 @@ Realm::getOrCreateRandomNumberGenerator() {
-   return randomNumberGenerator_.ref();
- }
- 
-+void Realm::resetRandomNumberGenerator() {
-+  if (randomNumberGenerator_.isSome()) {
-+    randomNumberGenerator_.reset();
-+  }
-+}
-+
- double js::math_random_impl(JSContext* cx) {
-   return cx->realm()->getOrCreateRandomNumberGenerator().nextDouble();
- }
+ using PreserveWrapperCallback = void (*)(JSContext*, JS::HandleObject);
 diff --git a/js/src/vm/JSContext.cpp b/js/src/vm/JSContext.cpp
-index 4f64086696b0..9e8eadd80104 100644
+index 707d0901edee..2be76488662a 100644
 --- a/js/src/vm/JSContext.cpp
 +++ b/js/src/vm/JSContext.cpp
-@@ -841,6 +841,11 @@ JS_PUBLIC_API void js::RestartDrainingJobQueue(JSContext* cx) {
+@@ -833,6 +833,11 @@ JS_PUBLIC_API void js::RestartDrainingJobQueue(JSContext* cx) {
    cx->internalJobQueue->uninterrupt();
  }
  
 +JS_PUBLIC_API bool js::HasJobsPending(JSContext* cx) {
 +  MOZ_ASSERT(cx->jobQueue);
-+  return !cx->jobQueue->empty();
++  return JS::HasAnyMicroTasks(cx);
 +}
 +
  JS_PUBLIC_API void js::RunJobs(JSContext* cx) {
    MOZ_ASSERT(cx->jobQueue);
    MOZ_ASSERT(cx->isEvaluatingModule == 0);
-@@ -859,6 +864,11 @@ bool InternalJobQueue::getHostDefinedData(
+@@ -853,6 +858,11 @@ bool InternalJobQueue::getHostDefinedData(
    return true;
  }
  
@@ -82,14 +82,14 @@ index 4f64086696b0..9e8eadd80104 100644
 +  cx->realm()->resetRandomNumberGenerator();
 +}
 +
- bool InternalJobQueue::enqueuePromiseJob(JSContext* cx,
-                                          JS::HandleObject promise,
-                                          JS::HandleObject job,
+ void InternalJobQueue::runJobs(JSContext* cx) {
+   if (draining_ || interrupted_) {
+     return;
 diff --git a/js/src/vm/Realm.h b/js/src/vm/Realm.h
-index d4229a952ffa..342be128f26d 100644
+index 6caac71cbb20..9084c3fec982 100644
 --- a/js/src/vm/Realm.h
 +++ b/js/src/vm/Realm.h
-@@ -828,6 +828,10 @@ class JS::Realm : public JS::shadow::Realm {
+@@ -848,6 +848,10 @@ class JS::Realm : public JS::shadow::Realm {
    // Initializes randomNumberGenerator if needed.
    mozilla::non_crypto::XorShift128PlusRNG& getOrCreateRandomNumberGenerator();
  

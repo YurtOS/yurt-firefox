@@ -18,10 +18,10 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  3 files changed, 14 insertions(+), 5 deletions(-)
 
 diff --git a/js/src/vm/JSONPrinter.cpp b/js/src/vm/JSONPrinter.cpp
-index 035024a210e1..d90930a2e6cd 100644
+index 717f4b324f8b..dfdb307b4876 100644
 --- a/js/src/vm/JSONPrinter.cpp
 +++ b/js/src/vm/JSONPrinter.cpp
-@@ -199,7 +199,7 @@ void JSONPrinter::property(const char* name, uint64_t value) {
+@@ -197,7 +197,7 @@ void JSONPrinter::property(const char* name, uint64_t value) {
    out_.printf("%" PRIu64, value);
  }
  
@@ -31,10 +31,10 @@ index 035024a210e1..d90930a2e6cd 100644
    propertyName(name);
    out_.printf("%zu", value);
 diff --git a/js/src/vm/JSONPrinter.h b/js/src/vm/JSONPrinter.h
-index 511f2a48332e..82f5cb2be9ab 100644
+index 5bb6441023a6..a2319431e138 100644
 --- a/js/src/vm/JSONPrinter.h
 +++ b/js/src/vm/JSONPrinter.h
-@@ -53,10 +53,11 @@ class JSONPrinter {
+@@ -51,10 +51,11 @@ class JSONPrinter {
    void property(const char* name, uint32_t value);
    void property(const char* name, int64_t value);
    void property(const char* name, uint64_t value);
@@ -49,10 +49,10 @@ index 511f2a48332e..82f5cb2be9ab 100644
  #endif
  
 diff --git a/mfbt/RandomNum.cpp b/mfbt/RandomNum.cpp
-index 46b61394a023..614d24a4080e 100644
+index c5e1d9b454ef..efc83da54bab 100644
 --- a/mfbt/RandomNum.cpp
 +++ b/mfbt/RandomNum.cpp
-@@ -29,13 +29,21 @@ extern "C" BOOLEAN NTAPI RtlGenRandom(PVOID RandomBuffer,
+@@ -16,12 +16,20 @@
  
  #if defined(ANDROID) || defined(XP_DARWIN) || defined(__DragonFly__) ||    \
      defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
@@ -60,7 +60,6 @@ index 46b61394a023..614d24a4080e 100644
 +    (defined(__wasi__) && !defined(__linux__))
 +// Yurt (wasm32-yurt-linux-musl) builds as WASI but defines __linux__ too: its
 +// musl has no arc4random, so it takes the getrandom path below.
- #  include <stdlib.h>
  #  define USE_ARC4RANDOM
  #endif
  
