@@ -33,7 +33,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
 ---
  js/public/ExternalCompilerHooks.h             |  45 ++++
  js/src/builtin/Object.cpp                     |  14 +-
- js/src/builtin/TestingFunctions.cpp           | 238 ++++++++++++++++++
+ js/src/builtin/TestingFunctions.cpp           | 240 ++++++++++++++++++
  .../external-compiler/assign-slot-policy.js   |  20 ++
  .../object-fuse-notifications.js              |  32 +++
  .../tests/external-compiler/permuted-slots.js | 205 +++++++++++++++
@@ -52,7 +52,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/PropMap.h                           |  30 ++-
  js/src/vm/Shape.cpp                           | 125 ++++++++-
  js/src/vm/Shape.h                             |  39 +++
- 21 files changed, 937 insertions(+), 12 deletions(-)
+ 21 files changed, 939 insertions(+), 12 deletions(-)
  create mode 100644 js/src/jit-test/tests/external-compiler/assign-slot-policy.js
  create mode 100644 js/src/jit-test/tests/external-compiler/object-fuse-notifications.js
  create mode 100644 js/src/jit-test/tests/external-compiler/permuted-slots.js
@@ -174,7 +174,7 @@ index 2de3f5cb19b9..aed88116e950 100644
      cache.fill(&origToShape->asShared(), fromPlain->sharedShape(),
                 toPlain->sharedShape());
 diff --git a/js/src/builtin/TestingFunctions.cpp b/js/src/builtin/TestingFunctions.cpp
-index c3e10f21c624..3a7952a3535a 100644
+index c3e10f21c624..8fde7871d139 100644
 --- a/js/src/builtin/TestingFunctions.cpp
 +++ b/js/src/builtin/TestingFunctions.cpp
 @@ -80,6 +80,7 @@
@@ -193,7 +193,7 @@ index c3e10f21c624..3a7952a3535a 100644
  #include "vm/StringType-inl.h"
  #include "wasm/WasmInstance-inl.h"
  
-@@ -8824,6 +8826,215 @@ static bool NumAllocSitesPretenured(JSContext* cx, unsigned argc, Value* vp) {
+@@ -8824,6 +8826,217 @@ static bool NumAllocSitesPretenured(JSContext* cx, unsigned argc, Value* vp) {
    return true;
  }
  
@@ -256,8 +256,9 @@ index c3e10f21c624..3a7952a3535a 100644
 +  }
 +  Rooted<PlainObject*> src(cx, &args[0].toObject().as<PlainObject>());
 +  RootedObject proto(cx, nullptr);
-+  Rooted<PlainObject*> dst(cx, NewPlainObjectWithProtoAndAllocKind(
-+                                   cx, proto, src->allocKindForTenure()));
++  Rooted<PlainObject*> dst(
++      cx, NewPlainObjectWithProto(cx, proto,
++                                  {.allocKind = src->allocKindForTenure()}));
 +  if (!dst ||
 +      !JS_InitializePropertiesFromCompatibleNativeObject(cx, dst, src)) {
 +    return false;
@@ -286,7 +287,8 @@ index c3e10f21c624..3a7952a3535a 100644
 +    return false;
 +  }
 +  for (ShapePropertyIter<NoGC> iter(obj->shape()); !iter.done(); iter++) {
-+    if (iter->hasSlot() && !fuse->tryOptimizeConstantProperty(*iter)) {
++    if (iter->hasSlot() &&
++        !fuse->tryOptimizeConstantProperty(iter->key(), *iter)) {
 +      JS_ReportErrorASCII(cx, "unable to mark property constant");
 +      return false;
 +    }
@@ -409,7 +411,7 @@ index c3e10f21c624..3a7952a3535a 100644
  static bool GetLcovInfo(JSContext* cx, unsigned argc, Value* vp) {
    CallArgs args = CallArgsFromVp(argc, vp);
  
-@@ -11438,6 +11649,33 @@ JS_FOR_WASM_FEATURES(WASM_FEATURE)
+@@ -11438,6 +11651,33 @@ JS_FOR_WASM_FEATURES(WASM_FEATURE)
  "  Return the number of allocation sites that were pretenured for the current\n"
  "  global\n"),
  

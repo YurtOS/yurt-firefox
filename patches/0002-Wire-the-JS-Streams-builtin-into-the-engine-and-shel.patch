@@ -334,7 +334,7 @@ index bfadc461891b..b4d6e0680573 100644
      UNIFIED_SOURCES += [
 diff --git a/js/src/jsapi-tests/testReadableStream.cpp b/js/src/jsapi-tests/testReadableStream.cpp
 new file mode 100644
-index 000000000000..ea987915d3b9
+index 000000000000..bcda99bf8975
 --- /dev/null
 +++ b/js/src/jsapi-tests/testReadableStream.cpp
 @@ -0,0 +1,1195 @@
@@ -501,7 +501,7 @@ index 000000000000..ea987915d3b9
 +  return &chunkVal.toObject();
 +}
 +
-+struct StreamTestFixture : public JSAPIRuntimeTest {
++struct StreamTestFixture : public jsapitest::RuntimeTest {
 +  virtual ~StreamTestFixture() {}
 +};
 +

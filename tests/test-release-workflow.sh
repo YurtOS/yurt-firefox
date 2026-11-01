@@ -394,22 +394,26 @@ run_check() {
 }
 
 t_check_tag() {
-  run_check tag engine-v147.0.4-1
+  # The version is UPSTREAM's own (FIREFOX_159_0_RELEASE -> 159.0), so this test
+  # follows an upstream bump instead of pinning one.
+  local UV
+  UV=$(sed -n 's/^tag=FIREFOX_\(.*\)_RELEASE$/\1/p' "$ROOT/UPSTREAM" | tr _ .)
+  run_check tag engine-v$UV-1
   assert_eq 0 "$RC" "$OUT"
-  assert_eq "version=147.0.4
+  assert_eq "version=$UV
 revision=1
-tag=engine-v147.0.4-1" "$(cat "$BASE/gh-out")" "outputs"
-  run_check tag engine-v147.0.4-12
+tag=engine-v$UV-1" "$(cat "$BASE/gh-out")" "outputs"
+  run_check tag engine-v$UV-12
   assert_eq 0 "$RC" "$OUT"
   grep -qx 'revision=12' "$BASE/gh-out"
   local t
-  for t in engine-v147.0.4 engine-v147.0.4-0 engine-v147.0.5-1 v147.0.4-1 engine-v147.0.4-1x \
-    engine-v147.0.4-01 'engine-v147.0.4-1 ' "$(printf 'engine-v147.0.4-1\nx')" engine-v147-1 ''; do
+  for t in engine-v$UV engine-v$UV-0 engine-v$UV.9-1 v$UV-1 engine-v$UV-1x \
+    engine-v$UV-01 "engine-v$UV-1 " "$(printf 'engine-v%s-1\nx' "$UV")" engine-v${UV%%.*}-1 ''; do
     run_check tag "$t"
     assert_eq 1 "$RC" "tag '$t': $OUT"
     [ ! -s "$BASE/gh-out" ] || { echo "outputs written for '$t'" >&2; return 1; }
   done
-  case $(run_check tag engine-v147.0.5-1; echo "$OUT") in *"UPSTREAM"*) ;; *) echo "version mismatch not named" >&2; return 1 ;; esac
+  case $(run_check tag engine-v$UV.9-1; echo "$OUT") in *"UPSTREAM"*) ;; *) echo "version mismatch not named" >&2; return 1 ;; esac
   run_check; assert_eq 2 "$RC" "no subcommand"
   run_check bogus x; assert_eq 2 "$RC" "unknown subcommand"
 }
