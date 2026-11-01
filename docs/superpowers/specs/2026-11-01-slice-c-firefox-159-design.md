@@ -16,11 +16,18 @@ every month makes the eventual rebase larger.
 Upstream `FIREFOX_159_0_RELEASE` exists (`FIREFOX_159_0_BUILD1` is the same
 release's build tag; the RELEASE tag is the one `UPSTREAM` uses).
 
-- **Patches:** all 12 apply to 159.0 with `git apply --reject` and no rejected
-  hunks. Applying cleanly is not building: upstream changed 88 of the files
-  the patches touch (`jit/CacheIR*`, `CacheIRCompiler.cpp`, `shell/js.cpp`,
-  `gc/GC.cpp`, `jsfriendapi.h`, `build/moz.configure/*`). Compile breaks are
-  expected and unassessed.
+- **Patches:** only 0001, 0004 and 0008 apply cleanly to 159.0. The other nine
+  have rejected hunks (checked with `git apply --reject`, applied in order, so
+  some later rejects cascade from earlier ones): 0002 (7 files, e.g.
+  `shell/js.cpp`, `moz.build`, `vm/GlobalObject.cpp`, `vm/Runtime.h`), 0003
+  (`jsfriendapi.h`, `vm/JSContext.cpp`), 0005 (`shell/js.cpp`), 0006 (7 files
+  incl. `PortableBaselineInterpret.cpp`, `BaselineCacheIRCompiler.cpp`), 0007
+  (`build/moz.configure/{libraries,toolchain}.configure`), 0009 (18 files incl.
+  `Shape.cpp`, `NativeObject.*`, `RealmFuses.*`, `Interpreter.cpp`), 0010 (6
+  files), 0011 (`tests/lib/jittests.py`), 0012 (`mfbt/RandomNum.cpp`). Upstream
+  changed 88 of the files the patches touch. Compile breaks beyond the rejects
+  are expected and unassessed. (An earlier version of this note said all 12
+  applied cleanly; that was a checking error and is corrected here.)
 - **Layout changes (certain):** opcodes added `CreateSuppressedError`,
   `AddDisposable`, `TakeDisposeCapability`; removed `IsGenClosing`,
   `CheckResumeKind`, `ForceInterpreter`; numbering shifted. CacheIR ops added
