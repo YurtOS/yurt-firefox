@@ -38,6 +38,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/CommonPropertyNames.h        |   3 +
  js/src/vm/EnvironmentObject.cpp        |  10 ++
  js/src/vm/ExternalCompilerHooks.cpp    |  92 +++++++++++++
+ js/src/vm/GeneratorObject.cpp          |  18 +++
  js/src/vm/Interpreter.cpp              |  64 +++++++++
  js/src/vm/JSContext.cpp                |  15 +++
  js/src/vm/JSContext.h                  |  25 +++-
@@ -48,7 +49,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/MatchPairs.h                 |  10 ++
  js/src/vm/NativeObject.cpp             |  21 +++
  js/src/vm/NativeObject.h               |  22 +++-
- js/src/vm/Opcodes.h                    |  12 ++
+ js/src/vm/Opcodes.h                    |  21 +++
  js/src/vm/ProxyObject.cpp              |  12 ++
  js/src/vm/RealmFuses.cpp               |  25 ++++
  js/src/vm/RealmFuses.h                 |  25 +++-
@@ -63,7 +64,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/StaticStrings.h              |   7 +
  js/src/vm/Watchtower.cpp               |  30 +++++
  js/src/vm/moz.build                    |   4 +-
- 49 files changed, 1361 insertions(+), 98 deletions(-)
+ 50 files changed, 1388 insertions(+), 98 deletions(-)
  create mode 100644 js/public/ExternalCompilerHooks.h
  create mode 100644 js/src/build/export_private_headers.py
  create mode 100644 js/src/shell/CommonShellGlobals.cpp
@@ -1480,6 +1481,42 @@ index 000000000000..6c79aa7df56c
 +    hooks->propertyAdded(cx, obj, id, slot, obj->numFixedSlots());
 +  }
 +}
+diff --git a/js/src/vm/GeneratorObject.cpp b/js/src/vm/GeneratorObject.cpp
+index 70d3365a7224..782e41bc6d39 100644
+--- a/js/src/vm/GeneratorObject.cpp
++++ b/js/src/vm/GeneratorObject.cpp
+@@ -5,6 +5,9 @@
+ #include "vm/GeneratorObject.h"
+ 
+ #include "frontend/ParserAtom.h"
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++#  include "js/ExternalCompilerHooks.h"
++#endif
+ #ifdef DEBUG
+ #  include "js/friend/DumpFunctions.h"  // js::DumpObject, js::DumpValue
+ #endif
+@@ -295,6 +298,21 @@ void AbstractGeneratorObject::resume(JSContext* cx,
+ bool js::ResumeGenerator(JSContext* cx, Handle<AbstractGeneratorObject*> genObj,
+                          HandleValue value, GeneratorResumeKind kind,
+                          MutableHandleValue result) {
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // A generator whose frame belongs to the external tier cannot be resumed
++  // here either: as in the interpreter's JSOp::Resume, the tier runs it to
++  // its next suspend point or completion and yields the result value. Async
++  // functions and async generators resume through here, not JSOp::Resume.
++  if (cx->externalCompilerHooks() &&
++      cx->externalCompilerHooks()->isForeignGenerator &&
++      cx->externalCompilerHooks()->isForeignGenerator(cx, genObj)) {
++    RootedValue resumeKindVal(cx, Int32Value(int32_t(kind)));
++    return cx->externalCompilerHooks()->resumeGenerator(
++               cx, genObj, value, resumeKindVal, result) ==
++           JS::ExternalEnterStatus::Ok;
++  }
++#endif
++
+   MOZ_ASSERT(genObj->isSuspended());
+   MOZ_ASSERT(cx->realm() == genObj->script()->realm());
+ 
 diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
 index 89ad5d219a14..50609a0a29fd 100644
 --- a/js/src/vm/Interpreter.cpp
@@ -1995,10 +2032,10 @@ index 3fd04ca15f10..254777b01fd4 100644
  
  inline void NativeObject::privatePreWriteBarrier(HeapSlot* pprivate) {
 diff --git a/js/src/vm/Opcodes.h b/js/src/vm/Opcodes.h
-index f444dfb6c950..fd6ba307d045 100644
+index f444dfb6c950..0b1a999783ef 100644
 --- a/js/src/vm/Opcodes.h
 +++ b/js/src/vm/Opcodes.h
-@@ -11,6 +11,18 @@
+@@ -11,6 +11,27 @@
  
  #include "js/TypeDecls.h"
  
@@ -2011,8 +2048,17 @@ index f444dfb6c950..fd6ba307d045 100644
 + * even when the FOR_EACH_OPCODE table below keeps the same shape. A consumer
 + * compares it against the version it was written for and refuses to build
 + * on a mismatch, so a bump is the signal that its lowerings need review.
++ *
++ * History:
++ *   1: FIREFOX_147_0_4_RELEASE.
++ *   2: FIREFOX_159_0_RELEASE. Removed CheckResumeKind, IsGenClosing and
++ *      ForceInterpreter (opcode numbers shifted); InitialYield, Yield and
++ *      Await no longer push the generator object (3 -> 2 values defined);
++ *      DynamicImport takes a uint8 ImportPhase operand (length 1 -> 2);
++ *      CreateSuppressedError, AddDisposable and TakeDisposeCapability are
++ *      no longer build-flag gated.
 + */
-+#define JSOP_SEMANTICS_VERSION 1
++#define JSOP_SEMANTICS_VERSION 2
 +
  // clang-format off
  /*

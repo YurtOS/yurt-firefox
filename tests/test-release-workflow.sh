@@ -26,8 +26,11 @@ REQ_ON_MAIN="$ROOT/scripts/require-ref-on-main.sh"
 CHECK="$ROOT/scripts/release-check.sh"
 SET="$ROOT/scripts/release-set.sh"
 PUBLISH="$ROOT/scripts/release-publish.sh"
-V=147.0.4
+# UPSTREAM's own version (FIREFOX_159_0_RELEASE -> 159.0), so these tests follow an
+# upstream bump instead of pinning one.
+V=$(sed -n 's/^tag=FIREFOX_\(.*\)_RELEASE$/\1/p' "$ROOT/UPSTREAM" | tr _ .)
 N=1
+export V
 P=spidermonkey_$V-$N
 
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
@@ -510,8 +513,8 @@ make_package_out() {
   make_fixture_testsrc "$w/ts"
   r=$w/root
   mkdir -p "$r"
-  printf 'url=https://github.com/mozilla-firefox/firefox\ntag=FIREFOX_147_0_4_RELEASE\ncommit=%s\ntree=%s\n' \
-    "$(git -C "$TS_TREE" rev-parse HEAD)" "$(git -C "$TS_TREE" write-tree)" >"$r/UPSTREAM"
+  printf 'url=https://github.com/mozilla-firefox/firefox\ntag=%s\ncommit=%s\ntree=%s\n' \
+    "$(sed -n 's/^tag=//p' "$ROOT/UPSTREAM")" "$(git -C "$TS_TREE" rev-parse HEAD)" "$(git -C "$TS_TREE" write-tree)" >"$r/UPSTREAM"
   cp "$ROOT/mozconfig" "$r/mozconfig"
   git -C "$r" init -q; git -C "$r" add -A; git -C "$r" commit -q -m root
   [ -z "$leak" ] || printf '// from %s/x\n' "$leak" >>"$FX_DIST/system_wrappers/stdio.h"
@@ -873,7 +876,7 @@ t_prepare_contract_recheck() {
 # engine_out: the engine_sha256 prepare printed.
 engine_out() { sed -n 's/^engine_sha256=//p' "$W.prep-out"; }
 finalize() {
-  run_set finalize --work "$W" --tag "${FIN_TAG:-engine-v147.0.4-1}" --engine-sha256 "${FIN_ENGINE-$(engine_out)}"
+  run_set finalize --work "$W" --tag "${FIN_TAG:-engine-v$V-1}" --engine-sha256 "${FIN_ENGINE-$(engine_out)}"
 }
 
 t_finalize() {
@@ -890,27 +893,27 @@ base = json.load(open(y1))
 for k, v in base.items():
     assert m[k] == v, k
 r = m["release"]
-assert r["tag"] == "engine-v147.0.4-1", r
+assert r["tag"] == "engine-v" + os.environ["V"] + "-1", r
 names = sorted(f for f in os.listdir(d) if f.endswith(".tar.zst"))
 assert [a["name"] for a in r["assets"]] == names, r["assets"]
 for a in r["assets"]:
     data = open(os.path.join(d, a["name"]), "rb").read()
     assert a["sha256"] == hashlib.sha256(data).hexdigest() and a["size"] == len(data), a
 mirrors = {a["name"]: a.get("mirror_of") for a in r["assets"]}
-assert mirrors["spidermonkey_147.0.4-1-toolchain-clang.tar.zst"] == uc, mirrors
-assert mirrors["spidermonkey_147.0.4-1-toolchain-sysroot.tar.zst"] == us, mirrors
+assert mirrors["spidermonkey_" + os.environ["V"] + "-1-toolchain-clang.tar.zst"] == uc, mirrors
+assert mirrors["spidermonkey_" + os.environ["V"] + "-1-toolchain-sysroot.tar.zst"] == us, mirrors
 tc = {t["name"]: t["sha256"] for t in m["toolchain"]}
 by = {a["name"]: a["sha256"] for a in r["assets"]}
-assert by["spidermonkey_147.0.4-1-toolchain-clang.tar.zst"] == tc["clang.tar.zst"]
-assert by["spidermonkey_147.0.4-1-toolchain-sysroot.tar.zst"] == tc["sysroot-wasm32-wasi.tar.zst"]
+assert by["spidermonkey_" + os.environ["V"] + "-1-toolchain-clang.tar.zst"] == tc["clang.tar.zst"]
+assert by["spidermonkey_" + os.environ["V"] + "-1-toolchain-sysroot.tar.zst"] == tc["sysroot-wasm32-wasi.tar.zst"]
 PY
   # finalize needs a prepared work dir, and refuses to run twice.
   finalize; assert_eq 1 "$RC" "second finalize: $OUT"
   case $OUT in *"finalize runs once"*) ;; *) echo "second finalize not refused by name: $OUT" >&2; return 1 ;; esac
   setup_set; FIN_ENGINE=$(printf "%064d" 0) finalize; assert_eq 1 "$RC" "finalize without prepare: $OUT"
   # A tag other than engine-v<package_version>.
-  setup_set; prepare; FIN_TAG=engine-v147.0.4-2 finalize; assert_eq 1 "$RC" "other tag: $OUT"
-  case $OUT in *"engine-v147.0.4-1"*) ;; *) echo "tag mismatch not explained: $OUT" >&2; return 1 ;; esac
+  setup_set; prepare; FIN_TAG=engine-v$V-2 finalize; assert_eq 1 "$RC" "other tag: $OUT"
+  case $OUT in *"engine-v$V-1"*) ;; *) echo "tag mismatch not explained: $OUT" >&2; return 1 ;; esac
   # A prepared asset swapped after prepare, its .sha256 regenerated: the
   # build-time record (toolchain[], test_sources) or prepare's engine digest
   # refuses it.
@@ -958,7 +961,7 @@ setup_final() {
   H=$(digest "$D/MANIFEST.json")
 }
 
-verify() { run_set verify --dir "$D" --manifest-sha256 "${1-$H}" --version "$V" --revision "$N" --tag "${VER_TAG:-engine-v147.0.4-1}"; }
+verify() { run_set verify --dir "$D" --manifest-sha256 "${1-$H}" --version "$V" --revision "$N" --tag "${VER_TAG:-engine-v$V-1}"; }
 
 t_verify() {
   setup_final
@@ -990,9 +993,9 @@ PY
   setup_final; echo x >"$D/extra.txt"; verify; assert_eq 1 "$RC" "extra file: $OUT"
   setup_final; verify 0000000000000000000000000000000000000000000000000000000000000000; assert_eq 1 "$RC" "wrong digest: $OUT"
   setup_final; verify ''; assert_eq 2 "$RC" "empty digest: $OUT"
-  setup_final; run_set verify --dir "$D" --manifest-sha256 "$H" --version "$V" --revision 2 --tag engine-v147.0.4-2; assert_eq 1 "$RC" "other revision: $OUT"
+  setup_final; run_set verify --dir "$D" --manifest-sha256 "$H" --version "$V" --revision 2 --tag engine-v$V-2; assert_eq 1 "$RC" "other revision: $OUT"
   # The manifest's release.tag must be the tag being published.
-  setup_final; VER_TAG=engine-v147.0.4-3 verify; assert_eq 1 "$RC" "other tag: $OUT"
+  setup_final; VER_TAG=engine-v$V-3 verify; assert_eq 1 "$RC" "other tag: $OUT"
   case $OUT in *"release.tag"*) ;; *) echo "tag mismatch not named: $OUT" >&2; return 1 ;; esac
   # A swapped toolchain with the manifest rewritten to match and its digest
   # trusted: still refused, the asset is not the toolchain[] recorded at build.
@@ -1057,35 +1060,35 @@ run_publish() {
 t_publish() {
   setup_final
   write_gh_stub "$BASE/ghstub"
-  printf 'engine-v147.0.4-0\nengine-v147.0.4-10\n' >"$BASE/releases"
+  printf 'engine-v%s-0\nengine-v%s-10\n' "$V" "$V" >"$BASE/releases"
   : >"$CALLS"
-  run_publish --tag engine-v147.0.4-1 --dir "$D"
+  run_publish --tag engine-v$V-1 --dir "$D"
   assert_eq 0 "$RC" "$OUT"
   local create
   create=$(grep '^gh release create' "$CALLS")
-  case $create in "gh release create engine-v147.0.4-1 --verify-tag "*) ;; *) echo "create: $create" >&2; return 1 ;; esac
+  case $create in "gh release create engine-v$V-1 --verify-tag "*) ;; *) echo "create: $create" >&2; return 1 ;; esac
   local f
   for f in MANIFEST.json $ASSETS; do
     case " $create " in *" $D/$f "*) ;; *) echo "asset $f not uploaded: $create" >&2; return 1 ;; esac
   done
   grep -q '^gh api .*repos/YurtOS/yurt-firefox/releases' "$CALLS" || { echo "existing releases not listed" >&2; return 1; }
   # An existing release (a draft included: the listing has drafts) is refused.
-  printf 'engine-v147.0.4-1\n' >"$BASE/releases"; : >"$CALLS"
-  run_publish --tag engine-v147.0.4-1 --dir "$D"
+  printf 'engine-v%s-1\n' "$V" >"$BASE/releases"; : >"$CALLS"
+  run_publish --tag engine-v$V-1 --dir "$D"
   assert_eq 1 "$RC" "existing release: $OUT"
   ! grep -q '^gh release create' "$CALLS" || { echo "created over an existing release" >&2; return 1; }
   # The listing failing is not "no release".
   printf '' >"$BASE/releases"; : >"$CALLS"
-  PUB_ENV=GH_API_FAIL=1 run_publish --tag engine-v147.0.4-1 --dir "$D"
+  PUB_ENV=GH_API_FAIL=1 run_publish --tag engine-v$V-1 --dir "$D"
   assert_eq 1 "$RC" "listing failed: $OUT"
   ! grep -q '^gh release create' "$CALLS" || { echo "created after a failed listing" >&2; return 1; }
   # A failing create fails; usage errors exit 2.
   : >"$CALLS"
-  PUB_ENV=GH_CREATE_RC=1 run_publish --tag engine-v147.0.4-1 --dir "$D"
+  PUB_ENV=GH_CREATE_RC=1 run_publish --tag engine-v$V-1 --dir "$D"
   assert_eq 1 "$RC" "create failed: $OUT"
-  run_publish --tag engine-v147.0.4-1; assert_eq 2 "$RC" "no dir: $OUT"
+  run_publish --tag engine-v$V-1; assert_eq 2 "$RC" "no dir: $OUT"
   RC=0; OUT=$(cd "$BASE" && env -u GH_REPO PATH="$BASE/ghstub:$PATH" CALLS="$CALLS" GH_RELEASES="$BASE/releases" \
-    "$PUBLISH" --tag engine-v147.0.4-1 --dir "$D" 2>&1) || RC=$?
+    "$PUBLISH" --tag engine-v$V-1 --dir "$D" 2>&1) || RC=$?
   assert_eq 2 "$RC" "no GH_REPO: $OUT"
 }
 

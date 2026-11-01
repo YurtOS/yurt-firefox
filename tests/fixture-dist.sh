@@ -109,12 +109,15 @@ with open(out, "w") as f:
     json.dump(config, f, indent=2, sort_keys=True)
 PY
 
-  python3 - "$FX_MANIFEST" <<'PY' || return 1
+  # tag, commit and tree come from UPSTREAM itself: the packager requires the
+  # build manifest to name UPSTREAM's tag, so the fixture follows an upstream bump.
+  python3 - "$FX_MANIFEST" "$ROOT/UPSTREAM" <<'PY' || return 1
 import json, sys
+up = dict(l.strip().split("=", 1) for l in open(sys.argv[2]) if "=" in l)
 m = {
-    "tag": "FIREFOX_147_0_4_RELEASE",
-    "commit": "310a0cc30b21a4ddf7f0826a67f73bed6b050349",
-    "tree": "092cc9d0409ebc66acc52def28a2ed8f30a92b5d",
+    "tag": up["tag"],
+    "commit": up["commit"],
+    "tree": up["tree"],
     "ics_path": "js/src/ics",
     "queue_sha256": "1" * 64,
     "data_ics_sha256": "2" * 64,

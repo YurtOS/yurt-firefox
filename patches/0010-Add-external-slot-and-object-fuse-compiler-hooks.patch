@@ -42,7 +42,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/ExternalCompilerHooks.cpp           |  36 +++
  js/src/vm/JSContext.h                         |   5 +
  js/src/vm/NativeObject.cpp                    |  13 +
- js/src/vm/NativeObject.h                      |   9 +
+ js/src/vm/NativeObject.h                      |  17 ++
  js/src/vm/ObjectFlags-inl.h                   |   6 +
  js/src/vm/ObjectFlags.h                       |  10 +
  js/src/vm/ObjectFuse.cpp                      |  13 +
@@ -52,7 +52,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/PropMap.h                           |  30 ++-
  js/src/vm/Shape.cpp                           | 125 ++++++++-
  js/src/vm/Shape.h                             |  39 +++
- 21 files changed, 939 insertions(+), 12 deletions(-)
+ 21 files changed, 947 insertions(+), 12 deletions(-)
  create mode 100644 js/src/jit-test/tests/external-compiler/assign-slot-policy.js
  create mode 100644 js/src/jit-test/tests/external-compiler/object-fuse-notifications.js
  create mode 100644 js/src/jit-test/tests/external-compiler/permuted-slots.js
@@ -843,10 +843,25 @@ index fc7d75f6de8b..b729154d4f4f 100644
    if (!excludedItems) {
      const PlainObjectCopyPropsCache& cache =
 diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
-index 254777b01fd4..05a3d14a614d 100644
+index 254777b01fd4..7c7fd18b930f 100644
 --- a/js/src/vm/NativeObject.h
 +++ b/js/src/vm/NativeObject.h
-@@ -1298,6 +1298,15 @@ class NativeObject : public JSObject {
+@@ -689,6 +689,14 @@ inline size_t NativeObjectSlotSpanForTracing(Shape* shape,
+ 
+   uint32_t propMapLength = shapeFlags & Shape::MAP_LENGTH_MASK;
+ 
++  // With permuted slots (ObjectFlag::PermutedSlots, mirrored in the immutable
++  // flags word) the last property need not hold the top slot; as in
++  // SharedShape::slotSpanSlow, take the highest slot instead. The maps are
++  // immutable, so this doesn't need to be atomic either.
++  if (MOZ_UNLIKELY(shapeFlags & Shape::PERMUTED_SLOTS_BIT)) {
++    return SharedPropMap::permutedSlotSpan(clasp, propMap, propMapLength);
++  }
++
+   // The data read by SharedPropMap::lastUsedSlot is immutable so this doesn't
+   // need to be atomic.
+   return SharedPropMap::slotSpan(clasp, propMap, propMapLength);
+@@ -1298,6 +1306,15 @@ class NativeObject : public JSObject {
      return addProperty(cx, obj, id, flags, slotOut);
    }
  
