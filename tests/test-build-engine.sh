@@ -200,7 +200,13 @@ case " $* " in *" artifact "*)
     case $1 in --from-build) n=$2 ;; --artifact-manifest) m=$2 ;; esac
     shift
   done
-  printf '{"https://h.test/%s.tar.zst": {"sha256": "%s"}}\n' "$n" \
+  # Firefox 147 recorded plain artifact paths; 159 records Taskcluster URLs whose
+  # path is percent-encoded (public%2Fbuild%2F<name>). Emit both shapes.
+  case $n in
+    sysroot-*) u="https://h.test/api/queue/v1/task/AAA/artifacts/public%2Fbuild%2F$n.tar.zst" ;;
+    *) u="https://h.test/$n.tar.zst" ;;
+  esac
+  printf '{"%s": {"sha256": "%s"}}\n' "$u" \
     0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef >"$m" ;;
 esac
 MACH

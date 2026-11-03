@@ -120,13 +120,19 @@ else
   done
   toolchain_json=$(python3 - "$artifacts" <<'PY'
 import glob, json, sys
+from urllib.parse import unquote
 out = []
 for f in sorted(glob.glob(sys.argv[1] + "/*.json")):
     for url, info in sorted(json.load(open(f)).items()):
         digest = info.get("sha256", "")
         if len(digest) != 64:
             sys.exit("build-engine: no sha256 for " + url)
-        out.append({"name": url.rsplit("/", 1)[1], "url": url, "sha256": digest})
+        # The name is the artifact's file name. Firefox 159 records Taskcluster
+        # URLs whose path is percent-encoded (.../artifacts/public%2Fbuild%2Fclang.tar.zst),
+        # 147 plain ones (.../public/build/clang.tar.zst): decode, then take the last
+        # segment. The URL itself is kept as recorded; it is what gets downloaded.
+        name = unquote(url).rsplit("/", 1)[1]
+        out.append({"name": name, "url": url, "sha256": digest})
 if len(out) != 2:
     sys.exit("build-engine: expected 2 toolchain artifacts, mach recorded %d" % len(out))
 print(json.dumps(out))
