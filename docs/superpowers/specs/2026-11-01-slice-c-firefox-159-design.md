@@ -145,10 +145,11 @@ followed step by step:
 - **Tracked, not fixed:** #34 (`setNeverGCThingFixedSlot` and `Date`),
   NightMonkey #24.
 - **Release dry run (2026-11-03):** the first dry run on `main` built and packaged
-  the 159 engine and then failed in `release-set prepare` because 159's mach records
-  percent-encoded toolchain artifact URLs; fixed in #35. The packaged-release
-  acceptance and the snapshot round-trip on 159 had not completed when this was written.
-- **Not done yet (Goal 1):** `engine-v159.0-1` is not tagged. Remaining: the
-  release dry run on `main` (must report 13451 / 13641, or a floor PR comes
-  first), a tag ruleset on `engine-v*` and immutable releases, the tag push,
+  the 159 engine, then failed in `release-set prepare` because 159's mach records
+  percent-encoded toolchain artifact URLs (`public%2Fbuild%2Fclang.tar.zst`); the fix is
+  #35 (open when this was written). Nothing was published; the packaged-release
+  acceptance and the snapshot round-trip on 159 did not run (skipped after the failure).
+- **Not done yet (Goal 1):** `engine-v159.0-1` is not tagged. Remaining: a passing
+  release dry run on `main` after #35 (must report 13451 / 13641, or a floor PR
+  comes first), a tag ruleset on `engine-v*` and immutable releases, the tag push,
   then NightMonkey bumps `engine/ENGINE_RELEASE` and its default engine version.
