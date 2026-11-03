@@ -65,7 +65,11 @@ release's build tag; the RELEASE tag is the one `UPSTREAM` uses).
 
 ## Anti-goals (would make this a failure even if CI is green)
 
-- Silently lowering a floor, or excluding failing tests, to get green.
+- Silently lowering a floor, or excluding failing tests, to get green. A justified
+  exclusion must record its reason, engine version and lane scope, and its effect
+  on the measured floors. (Outcome: NightMonkey #23 added six AOT-only and twelve
+  both-lane `ff159` exclusions, each with its reason, and the floors in #33 are
+  measured with them applied, so green does not mean every upstream test ran.)
 - Regenerated opcode tables landed in NightMonkey out of order with the pin
   (a window where `yurt` and the queue disagree about opcodes).
 - Moving the `UPSTREAM` tag without the matching `commit`/`tree` check.
@@ -77,7 +81,13 @@ release's build tag; the RELEASE tag is the one `UPSTREAM` uses).
    merged. This sizes the rebase.
 2. **Rebase the queue** (one patch per fix, same series structure, regenerate
    `patches/`). Red/green discipline applies to anything with behaviour.
-3. **NightMonkey change first:** regenerate opcode tables and `data/ics`
+3. **NightMonkey change first** (superseded, see Outcome): the plan below was to
+   regenerate opcode tables and `data/ics` against 159 and gate the consumer on
+   `engine/ENGINE_RELEASE` with no dual build. What landed (NightMonkey #23): explicit
+   `ff159` engine-version support (regenerated opcodes, Value-tag and magic-value
+   changes, lowerings, runtime adaptations) with `ff147` still the default;
+   `data/ics` was not regenerated.
+   Original text: regenerate opcode tables and `data/ics`
    against 159; NightMonkey must still build against the 147 release until the
    cutover (my call: gate the consumer on `engine/ENGINE_RELEASE`, no dual
    build).
@@ -134,6 +144,10 @@ followed step by step:
   `typedarray/subarray-scalar-replace.js`, gained Atomics cases in 159).
 - **Tracked, not fixed:** #34 (`setNeverGCThingFixedSlot` and `Date`),
   NightMonkey #24.
+- **Release dry run (2026-11-03):** the first dry run on `main` built and packaged
+  the 159 engine and then failed in `release-set prepare` because 159's mach records
+  percent-encoded toolchain artifact URLs; fixed in #35. The packaged-release
+  acceptance and the snapshot round-trip on 159 had not completed when this was written.
 - **Not done yet (Goal 1):** `engine-v159.0-1` is not tagged. Remaining: the
   release dry run on `main` (must report 13451 / 13641, or a floor PR comes
   first), a tag ruleset on `engine-v*` and immutable releases, the tag push,
