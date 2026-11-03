@@ -17,25 +17,16 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
   04031a147589 fix: fail interrupted jit-test runs
     (only js/src/tests/lib)
 ---
- js/src/tests/lib/jittests.py      |  4 +--
+ js/src/tests/lib/jittests.py      |  2 +-
  js/src/tests/lib/test_jittests.py | 44 +++++++++++++++++++++++++++++++
- 2 files changed, 46 insertions(+), 2 deletions(-)
+ 2 files changed, 45 insertions(+), 1 deletion(-)
  create mode 100644 js/src/tests/lib/test_jittests.py
 
 diff --git a/js/src/tests/lib/jittests.py b/js/src/tests/lib/jittests.py
-index 73ba27976e13..265c825ac7c6 100755
+index 4aac51d32589..b72bfe4ee4c8 100755
 --- a/js/src/tests/lib/jittests.py
 +++ b/js/src/tests/lib/jittests.py
-@@ -487,7 +487,7 @@ def check_output(out, err, rc, timed_out, test, options):
-         if rc != 3:
-             return OutputStatus.FAILED
- 
--        return test.expect_error in err
-+        return OutputStatus.OK if test.expect_error in err else OutputStatus.FAILED
- 
-     for line in out.split("\n"):
-         if line.startswith("Trace stats check failed"):
-@@ -678,7 +678,7 @@ def print_test_summary(num_tests, failures, complete, slow_tests, doing, options
+@@ -668,7 +668,7 @@ def print_test_summary(num_tests, failures, complete, slow_tests, doing, options
          if not any:
              print("None")
  

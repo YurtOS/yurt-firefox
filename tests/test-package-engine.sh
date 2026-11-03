@@ -16,7 +16,16 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 PKG="$ROOT/scripts/package-engine.sh"
 CONTRACT="$ROOT/scripts/lib/package-contract.sh"
-NAME=spidermonkey_147.0.4-1-wasm32-wasi
+# The Firefox version is UPSTREAM's own (FIREFOX_159_0_RELEASE -> 159.0), so these
+# tests follow an upstream bump instead of pinning one.
+# (Pure bash: a test below runs this file with a PATH that lacks sed and tr.)
+FXV=
+while IFS= read -r line; do
+  case $line in tag=FIREFOX_*_RELEASE) FXV=${line#tag=FIREFOX_}; FXV=${FXV%_RELEASE}; FXV=${FXV//_/.} ;; esac
+done <"$ROOT/UPSTREAM"
+[ -n "$FXV" ] || { echo "cannot read UPSTREAM's version" >&2; exit 1; }
+export FXV
+NAME=spidermonkey_$FXV-1-wasm32-wasi
 
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
 
@@ -49,7 +58,7 @@ setup() {
 run_pkg() {
   RC=0
   if [ $# -eq 0 ]; then
-    set -- --dist "$FX_DIST" --manifest "$FX_MANIFEST" --out "$OUTDIR" --version 147.0.4 --revision 1
+    set -- --dist "$FX_DIST" --manifest "$FX_MANIFEST" --out "$OUTDIR" --version $FXV --revision 1
   fi
   OUT=$(cd "$BASE" && HOME=$FX_HOME MOZBUILD_STATE_PATH=$FX_MOZBUILD PQ_ROOT=$R "$PKG" "$@" 2>&1) || RC=$?
 }
@@ -272,7 +281,7 @@ reproducible() {
   RC=0
   OUT=$(cd "$BASE" && umask 077 && HOME=$FX_HOME MOZBUILD_STATE_PATH=$FX_MOZBUILD PQ_ROOT=$R \
     TAR_OPTIONS=--format=v7 ZSTD_CLEVEL=1 ZSTD_NBTHREADS=4 GIT_DIR="$BASE/decoy.$$/.git" \
-    "$PKG" --dist "$FX_DIST" --manifest "$FX_MANIFEST" --out "$OUTDIR" --version 147.0.4 --revision 1 2>&1) || RC=$?
+    "$PKG" --dist "$FX_DIST" --manifest "$FX_MANIFEST" --out "$OUTDIR" --version $FXV --revision 1 2>&1) || RC=$?
   assert_eq 0 "$RC" "$OUT"
   cmp "$first/$NAME.tar.zst.sha256" "$OUTDIR/$NAME.tar.zst.sha256"
   cmp "$first/$NAME.tar.zst" "$OUTDIR/$NAME.tar.zst"
@@ -290,15 +299,15 @@ manifest_fields() {
     printf '%s  %s\n' "$(sha256 <"$f" | cut -d' ' -f1)" "${f#./}"
   done) >"$BASE/listing.$$"
   python3 - "$OUTDIR/MANIFEST.json" "$FX_MANIFEST" "$head" "$BASE/listing.$$" <<'PY'
-import hashlib, json, sys
+import hashlib, json, os, sys
 m = json.load(open(sys.argv[1]))
 bm = json.load(open(sys.argv[2]))
 for k, v in bm.items():
     if k != "toolchain_artifacts":
         assert m[k] == v, k
-assert m["firefox_version"] == "147.0.4", m["firefox_version"]
+assert m["firefox_version"] == os.environ["FXV"], m["firefox_version"]
 assert m["queue_commit"] == sys.argv[3], m["queue_commit"]
-assert m["package_version"] == "147.0.4-1", m["package_version"]
+assert m["package_version"] == os.environ["FXV"] + "-1", m["package_version"]
 listing = open(sys.argv[4], "rb").read()
 assert m["dist_files"] == {"count": listing.count(b"\n"),
                            "sha256": hashlib.sha256(listing).hexdigest()}, m["dist_files"]
@@ -353,13 +362,13 @@ usage_errors() {
   assert_eq 2 "$RC" "no args: $OUT"
   # shellcheck disable=SC2086 # $good is word-split on purpose (no spaces in BASE)
   {
-    run_pkg $good --version 147.0.4; assert_eq 2 "$RC" "no revision: $OUT"
-    run_pkg $good --version 147.0.4 --revision 0; assert_eq 2 "$RC" "revision 0: $OUT"
-    run_pkg $good --version 'v147' --revision 1; assert_eq 2 "$RC" "bad version: $OUT"
-    run_pkg $good --version 147.0.4 --revision 1 --bogus; assert_eq 2 "$RC" "unknown flag: $OUT"
-    run_pkg $good --version 147.0.4 --revision; assert_eq 2 "$RC" "flag without value: $OUT"
+    run_pkg $good --version $FXV; assert_eq 2 "$RC" "no revision: $OUT"
+    run_pkg $good --version $FXV --revision 0; assert_eq 2 "$RC" "revision 0: $OUT"
+    run_pkg $good --version "v${FXV%%.*}" --revision 1; assert_eq 2 "$RC" "bad version: $OUT"
+    run_pkg $good --version $FXV --revision 1 --bogus; assert_eq 2 "$RC" "unknown flag: $OUT"
+    run_pkg $good --version $FXV --revision; assert_eq 2 "$RC" "flag without value: $OUT"
   }
-  run_pkg --dist "$BASE/none" --manifest "$FX_MANIFEST" --out "$OUTDIR" --version 147.0.4 --revision 1
+  run_pkg --dist "$BASE/none" --manifest "$FX_MANIFEST" --out "$OUTDIR" --version $FXV --revision 1
   assert_eq 2 "$RC" "missing dist: $OUT"
 }
 
@@ -572,7 +581,7 @@ fake_bundles() {
   local n f
   mkdir -p "$1"
   for n in testsrc ${2:+jstests}; do
-    f=spidermonkey_147.0.4-1-$n.tar.zst
+    f=spidermonkey_$FXV-1-$n.tar.zst
     printf '%s bundle\n' "$n" >"$1/$f"
     printf '%s  %s\n' "$(sha256 <"$1/$f" | cut -d' ' -f1)" "$f" >"$1/$f.sha256"
   done
@@ -580,7 +589,7 @@ fake_bundles() {
 
 # run_pkg_ts <bundle-dir>: package with --test-sources.
 run_pkg_ts() {
-  run_pkg --dist "$FX_DIST" --manifest "$FX_MANIFEST" --out "$OUTDIR" --version 147.0.4 --revision 1 \
+  run_pkg --dist "$FX_DIST" --manifest "$FX_MANIFEST" --out "$OUTDIR" --version $FXV --revision 1 \
     --test-sources "$1"
 }
 
@@ -592,7 +601,7 @@ test_sources_is() {
 import hashlib, json, os, sys
 out, inner, d, with_js = sys.argv[1:]
 def entry(kind):
-    name = "spidermonkey_147.0.4-1-%s.tar.zst" % kind
+    name = "spidermonkey_%s-1-%s.tar.zst" % (os.environ["FXV"], kind)
     return {"name": name, "sha256": hashlib.sha256(open(os.path.join(d, name), "rb").read()).hexdigest()}
 want = {"testsrc": entry("testsrc"), "jstests": entry("jstests") if with_js == "1" else None}
 for p in (out, inner):
@@ -616,7 +625,7 @@ records_test_sources() {
 
 # Each bad bundle directory is refused (exit 1, names the file), no archive.
 refuses_bad_test_sources() {
-  local d f=spidermonkey_147.0.4-1-testsrc.tar.zst j=spidermonkey_147.0.4-1-jstests.tar.zst
+  local d f=spidermonkey_$FXV-1-testsrc.tar.zst j=spidermonkey_$FXV-1-jstests.tar.zst
   setup; d=$BASE/bad1.$$; mkdir -p "$d"
   run_pkg_ts "$d"; expect_violation "$f.sha256"
   setup; d=$BASE/bad2.$$; fake_bundles "$d"; echo tampered >>"$d/$f"
@@ -624,7 +633,7 @@ refuses_bad_test_sources() {
   setup; d=$BASE/bad3.$$; fake_bundles "$d"; echo "not-a-digest  $f" >"$d/$f.sha256"
   run_pkg_ts "$d"; expect_violation "$f.sha256"
   setup; d=$BASE/bad4.$$; fake_bundles "$d"
-  printf '%s  spidermonkey_147.0.4-2-testsrc.tar.zst\n' "$(cut -d' ' -f1 <"$d/$f.sha256")" >"$d/$f.sha256"
+  printf '%s  spidermonkey_%s-2-testsrc.tar.zst\n' "$(cut -d' ' -f1 <"$d/$f.sha256")" "$FXV" >"$d/$f.sha256"
   run_pkg_ts "$d"; expect_violation "$f.sha256"
   setup; d=$BASE/bad5.$$; fake_bundles "$d"; rm "$d/$f"
   run_pkg_ts "$d"; expect_violation "$f"

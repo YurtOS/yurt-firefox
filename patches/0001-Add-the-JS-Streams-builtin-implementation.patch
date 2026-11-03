@@ -44,7 +44,7 @@ Co-authored-by: Till Schneidereit <till@tillschneidereit.net>
  ...dableStreamDefaultControllerOperations.cpp |  700 +++++++++
  ...eadableStreamDefaultControllerOperations.h |   74 +
  .../streams/ReadableStreamDefaultReader.cpp   |  376 +++++
- .../streams/ReadableStreamInternals.cpp       |  534 +++++++
+ .../streams/ReadableStreamInternals.cpp       |  545 +++++++
  .../builtin/streams/ReadableStreamInternals.h |   62 +
  .../streams/ReadableStreamOperations.cpp      |  693 +++++++++
  .../streams/ReadableStreamOperations.h        |   45 +
@@ -71,7 +71,7 @@ Co-authored-by: Till Schneidereit <till@tillschneidereit.net>
  .../streams/WritableStreamOperations.h        |   76 +
  .../WritableStreamWriterOperations.cpp        |  444 ++++++
  .../streams/WritableStreamWriterOperations.h  |   55 +
- 55 files changed, 16779 insertions(+)
+ 55 files changed, 16790 insertions(+)
  create mode 100644 js/public/Stream.h
  create mode 100644 js/src/builtin/streams/ClassSpecMacro.h
  create mode 100644 js/src/builtin/streams/MiscellaneousOperations-inl.h
@@ -1446,7 +1446,7 @@ index 000000000000..97d1798fdc6b
 +#endif  // builtin_streams_PipeToState_inl_h
 diff --git a/js/src/builtin/streams/PipeToState.cpp b/js/src/builtin/streams/PipeToState.cpp
 new file mode 100644
-index 000000000000..b9d5dd66e3ff
+index 000000000000..022579b273de
 --- /dev/null
 +++ b/js/src/builtin/streams/PipeToState.cpp
 @@ -0,0 +1,1295 @@
@@ -2627,8 +2627,8 @@ index 000000000000..b9d5dd66e3ff
 +  cx->check(promise);
 +  cx->check(signal);
 +
-+  Rooted<PipeToState*> state(cx,
-+                             NewTenuredBuiltinClassInstance<PipeToState>(cx));
++  Rooted<PipeToState*> state(
++      cx, NewBuiltinClassInstance<PipeToState>(cx, {.newKind = TenuredObject}));
 +  if (!state) {
 +    return nullptr;
 +  }
@@ -9716,10 +9716,10 @@ index 000000000000..b2c7b64e511b
 +                      JS_NULL_CLASS_OPS);
 diff --git a/js/src/builtin/streams/ReadableStreamInternals.cpp b/js/src/builtin/streams/ReadableStreamInternals.cpp
 new file mode 100644
-index 000000000000..9fdfb82c81bf
+index 000000000000..66f94c3ad9b3
 --- /dev/null
 +++ b/js/src/builtin/streams/ReadableStreamInternals.cpp
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,545 @@
 +/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
 + * vim: set ts=8 sts=2 et sw=2 tw=80:
 + * This Source Code Form is subject to the terms of the Mozilla Public
@@ -10013,22 +10013,33 @@ index 000000000000..9fdfb82c81bf
 +    ForAuthorCodeBool forAuthorCode) {
 +  // Step 1: Let prototype be null.
 +  // Step 2: If forAuthorCode is true, set prototype to %ObjectPrototype%.
-+  Rooted<PlainObject*> templateObject(
-+      cx,
-+      forAuthorCode == ForAuthorCodeBool::Yes
-+          ? GlobalObject::getOrCreateIterResultTemplateObject(cx)
-+          : GlobalObject::getOrCreateIterResultWithoutPrototypeTemplateObject(
-+                cx));
-+  if (!templateObject) {
-+    return nullptr;
-+  }
-+
 +  // Step 3: Assert: Type(done) is Boolean (implicit).
 +
 +  // Step 4: Let obj be ObjectCreate(prototype).
-+  PlainObject* obj = PlainObject::createWithTemplate(cx, templateObject);
-+  if (!obj) {
-+    return nullptr;
++  PlainObject* obj;
++  if (forAuthorCode == ForAuthorCodeBool::Yes) {
++    Rooted<PlainObject*> templateObject(
++        cx, GlobalObject::getOrCreateIterResultTemplateObject(cx));
++    if (!templateObject) {
++      return nullptr;
++    }
++    obj = PlainObject::createWithTemplate(cx, templateObject);
++    if (!obj) {
++      return nullptr;
++    }
++  } else {
++    // The engine no longer keeps a prototype-less iter-result template
++    // object, so build the object the way that template was built: |value|
++    // then |done|, in the slots the iter-result template uses.
++    Rooted<PlainObject*> protolessObj(cx, NewPlainObjectWithProto(cx, nullptr));
++    if (!protolessObj ||
++        !NativeDefineDataProperty(cx, protolessObj, cx->names().value,
++                                  UndefinedHandleValue, JSPROP_ENUMERATE) ||
++        !NativeDefineDataProperty(cx, protolessObj, cx->names().done,
++                                  JS::TrueHandleValue, JSPROP_ENUMERATE)) {
++      return nullptr;
++    }
++    obj = protolessObj;
 +  }
 +
 +  // Step 5: Perform CreateDataProperty(obj, "value", value).

@@ -15,47 +15,15 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
 
 Co-authored-by: Tomasz Andrzejak <andreiltd@gmail.com>
 ---
- build/moz.configure/init.configure      |  6 ++++++
- build/moz.configure/libraries.configure |  2 +-
  build/moz.configure/rust.configure      |  7 +++++++
- build/moz.configure/toolchain.configure | 18 +++++++++++++-----
- 4 files changed, 27 insertions(+), 6 deletions(-)
+ build/moz.configure/toolchain.configure | 16 ++++++++++++----
+ 2 files changed, 19 insertions(+), 4 deletions(-)
 
-diff --git a/build/moz.configure/init.configure b/build/moz.configure/init.configure
-index 892faaf1a194..44cd66375d19 100644
---- a/build/moz.configure/init.configure
-+++ b/build/moz.configure/init.configure
-@@ -911,6 +911,12 @@ def target_is_linux_or_wasi(target):
-         return True
- 
- 
-+@depends(target)
-+def target_is_wasi(target):
-+    if target.kernel == "WASI":
-+        return True
-+
-+
- @depends(target)
- def target_is_android(target):
-     if target.os == "Android":
-diff --git a/build/moz.configure/libraries.configure b/build/moz.configure/libraries.configure
-index 26ca886f60fb..335e241af28e 100644
---- a/build/moz.configure/libraries.configure
-+++ b/build/moz.configure/libraries.configure
-@@ -93,7 +93,7 @@ moz_use_pthreads = (
-     | check_symbol_in_libs(
-         [None, "pthread"],
-         symbol="pthread_create",
--        when=building_with_gnu_compatible_cc & ~target_is_darwin,
-+        when=building_with_gnu_compatible_cc & ~target_is_darwin & ~target_is_wasi,
-     ).found
- )
- 
 diff --git a/build/moz.configure/rust.configure b/build/moz.configure/rust.configure
-index 6c1c89181713..3e9552819828 100644
+index d65e019619ae..dc8b6c215f06 100644
 --- a/build/moz.configure/rust.configure
 +++ b/build/moz.configure/rust.configure
-@@ -417,6 +417,13 @@ def detect_rustc_target(
+@@ -486,6 +486,13 @@ def detect_rustc_target(host_or_target, arm_target, rust_supported_targets):
          if len(narrowed) == 1:
              return narrowed[0].rust_target
  
@@ -70,10 +38,10 @@ index 6c1c89181713..3e9552819828 100644
  
      rustc_target = find_candidate(candidates)
 diff --git a/build/moz.configure/toolchain.configure b/build/moz.configure/toolchain.configure
-index 0fb4faa59807..27a69e67ab09 100644
+index 96e7ef764ac0..f449505bd1fc 100644
 --- a/build/moz.configure/toolchain.configure
 +++ b/build/moz.configure/toolchain.configure
-@@ -677,6 +677,14 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+@@ -700,6 +700,14 @@ def check_compiler(
      else:
          toolchain = target.toolchain
  
@@ -88,7 +56,7 @@ index 0fb4faa59807..27a69e67ab09 100644
      if info.type == "clang":
          # Add the target explicitly when the target is aarch64 macosx, because
          # the Xcode clang target is named differently, and we need to work around
-@@ -689,7 +697,7 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+@@ -712,7 +720,7 @@ def check_compiler(
                  flags.append("--target=arm64-apple-darwin")
              has_target = True
          elif target.os == "iOS":
@@ -97,7 +65,7 @@ index 0fb4faa59807..27a69e67ab09 100644
              if target_flag not in compiler:
                  flags.append(target_flag)
              has_target = True
-@@ -699,7 +707,7 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+@@ -722,7 +730,7 @@ def check_compiler(
              or not info.endianness
              or info.endianness != target.endianness
          ):
@@ -106,7 +74,7 @@ index 0fb4faa59807..27a69e67ab09 100644
              has_target = True
  
          # Add target flag when there is an OS mismatch (e.g. building for Android on
-@@ -708,7 +716,7 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+@@ -731,7 +739,7 @@ def check_compiler(
          elif target.os in OS_preprocessor_checks and (
              not info.os or info.os != target.os
          ):
@@ -115,13 +83,10 @@ index 0fb4faa59807..27a69e67ab09 100644
              has_target = True
  
      if not has_target and (not info.cpu or info.cpu != target.cpu):
-@@ -718,9 +726,9 @@ def check_compiler(configure_cache, compiler, language, target, android_version)
+@@ -741,7 +749,7 @@ def check_compiler(
          elif (info.cpu, target.cpu) in same_arch:
              flags.append("-m64")
-         elif info.type == "clang-cl" and target.cpu == "aarch64":
--            flags.append("--target=%s" % toolchain)
-+            flags.append("--target=%s" % target_triple)
-         elif info.type == "clang":
+         elif info.type in ("clang", "clang-cl"):
 -            flags.append("--target=%s" % toolchain)
 +            flags.append("--target=%s" % target_triple)
  

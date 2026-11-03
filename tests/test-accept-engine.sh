@@ -9,6 +9,10 @@ unset PQ_YURT_REPO PQ_YURT_REF PQ_DOM_COUNT PQ_LISTS_DIR PQ_DIFF_REPO GITHUB_WOR
 unset WASMTIME WASMTIME_FLAGS NIGHT_FIREFOX_TESTS
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The repository's own floors (baseline/jit-floor.txt): these tests follow a floor
+# update instead of pinning one Firefox version's numbers.
+AOT_F=$(sed -n 's/^aot_verified=//p' "$ROOT/baseline/jit-floor.txt")
+INT_F=$(sed -n 's/^interpreter_verified=//p' "$ROOT/baseline/jit-floor.txt")
 # shellcheck source=lib.sh
 . "$ROOT/tests/lib.sh"
 
@@ -33,6 +37,12 @@ trap 'rm -rf "$BASE"' EXIT
 # (default 20000), STUB_<L>_LINE=none|twice|nolog|nul|trailing (nolog: no log
 # written; nul: a NUL byte before the line; trailing: text after "verified").
 # NIGHT_*/SPIDERMONKEY_* variables seen by cmake and the lanes go to $D/envlog.
+# write_upstream <tag>: a valid UPSTREAM (url, tag, 40-hex commit and tree) in the fixture root.
+write_upstream() {
+  printf 'url=https://h.test/r\ntag=%s\ncommit=%s\ntree=%s\n' "$1" \
+    0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef >"$D/root/UPSTREAM"
+}
+
 setup() {
   D=$(mktemp -d "$BASE/case.XXXXXX")
   mkdir -p "$D/pkg/spidermonkey/include-private" "$D/testsrc/js/src/jit-test" "$D/tc/bin" "$D/sysroot" \
@@ -44,6 +54,9 @@ setup() {
   chmod +x "$D/tc/bin/clang" "$D/tc/bin/clang++"
   echo 'project(nightmonkey)' >"$D/nm/CMakeLists.txt"
   cp "$ROOT/baseline/jit-floor.txt" "$D/root/baseline/jit-floor.txt"
+  # A fixed UPSTREAM (not the repository's): the engine version the script
+  # derives from it is part of the expected cmake call below.
+  write_upstream FIREFOX_159_0_RELEASE
   : >"$D/calls"
 
   cat >"$D/stubs/cmake" <<'SH'
@@ -138,13 +151,13 @@ all_green_runs_every_step_in_order() {
   run_accept
   assert_eq 0 "$RC" "$OUT"
   local want
-  want="cmake -S $D/nm -B $D/nm/build -DSPIDERMONKEY_DIST=$D/pkg/spidermonkey -DNIGHT_TOOLCHAIN_ROOT=$D/tc -DNIGHT_SYSROOT=$D/sysroot -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF | cwd=$D/nm
+  want="cmake -S $D/nm -B $D/nm/build -DSPIDERMONKEY_DIST=$D/pkg/spidermonkey -DNIGHT_TOOLCHAIN_ROOT=$D/tc -DNIGHT_SYSROOT=$D/sysroot -DNIGHT_INPROCESS=ON -DNIGHT_INPROC_HOST=runner -DNIGHT_DEBUG=OFF -DNIGHT_ENGINE_VERSION=ff159 | cwd=$D/nm
 cmake --build $D/nm/build | cwd=$D/nm
 snapshot-roundtrip.sh $D/nm/build | WASMTIME_FLAGS= | cwd=$D/nm
 ci-suite.sh jit aot | NIGHT_FIREFOX_TESTS=$D/testsrc | cwd=$D/nm
 ci-suite.sh jit interpreter | NIGHT_FIREFOX_TESTS=$D/testsrc | cwd=$D/nm"
   assert_eq "$want" "$(cat "$D/calls")" "calls"
-  case $OUT in *"aot: 20000 verified (floor 12307)"*"interpreter: 20000 verified (floor 12494)"*) ;;
+  case $OUT in *"aot: 20000 verified (floor $AOT_F)"*"interpreter: 20000 verified (floor $INT_F)"*) ;;
     *) echo "counts not reported: $OUT" >&2; return 1 ;; esac
   [ -f "$D/runner/nightmonkey-logs/jit-aot.log" ] && [ -f "$D/runner/nightmonkey-logs/jit-interpreter.log" ]
 }
@@ -185,18 +198,18 @@ interpreter_lane_failure_fails() {
 # Exactly at the floor passes; one below fails, for each lane.
 floor_comparison() {
   setup
-  run_accept STUB_AOT_COUNT=12307 STUB_INTERPRETER_COUNT=12494
+  run_accept STUB_AOT_COUNT=$AOT_F STUB_INTERPRETER_COUNT=$INT_F
   assert_eq 0 "$RC" "$OUT"
   setup
-  run_accept STUB_AOT_COUNT=12306
-  expect_fail 1 "FAIL at jit aot: 12306 verified is below the floor aot_verified=12307"
+  run_accept STUB_AOT_COUNT=$((AOT_F - 1))
+  expect_fail 1 "FAIL at jit aot: $((AOT_F - 1)) verified is below the floor aot_verified=$AOT_F"
   setup
-  run_accept STUB_INTERPRETER_COUNT=12493
-  expect_fail 1 "FAIL at jit interpreter: 12493 verified is below the floor interpreter_verified=12494"
+  run_accept STUB_INTERPRETER_COUNT=$((INT_F - 1))
+  expect_fail 1 "FAIL at jit interpreter: $((INT_F - 1)) verified is below the floor interpreter_verified=$INT_F"
   # Counts with fewer and more digits than the floor.
   setup
   run_accept STUB_AOT_COUNT=9999
-  expect_fail 1 "FAIL at jit aot: 9999 verified is below the floor aot_verified=12307"
+  expect_fail 1 "FAIL at jit aot: 9999 verified is below the floor aot_verified=$AOT_F"
   setup
   run_accept STUB_AOT_COUNT=100000 STUB_INTERPRETER_COUNT=100000
   assert_eq 0 "$RC" "$OUT"
@@ -411,12 +424,75 @@ default_runner_temp_kept_on_failure() {
   rm -rf "$kept"
 }
 
+# The NightMonkey engine version comes from UPSTREAM's tag and is forced with -D;
+# a tag it cannot read stops the run before any cmake call.
+engine_version_from_upstream() {
+  local pair tag want
+  for pair in FIREFOX_147_0_4_RELEASE:ff147 FIREFOX_160_0_RELEASE:ff160 FIREFOX_159_0_BUILD1:ff159; do
+    tag=${pair%%:*}; want=${pair#*:}
+    setup
+    write_upstream "$tag"
+    run_accept
+    assert_eq 0 "$RC" "$tag: $OUT"
+    called "^cmake -S .* -DNIGHT_ENGINE_VERSION=$want \\| cwd=" || { echo "$tag: no -DNIGHT_ENGINE_VERSION=$want" >&2; return 1; }
+  done
+  local bad
+  # Tags the derivation refuses (a valid file, an unusable tag) ...
+  for bad in V1 FIREFOX__RELEASE FIREFOX_x_RELEASE nightly; do
+    setup
+    write_upstream "$bad"
+    run_accept
+    expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
+    ! called '^cmake ' || { echo "cmake ran for tag '$bad'" >&2; return 1; }
+  done
+  # ... and files with no tag at all.
+  for bad in 'url=only' 'tag=' ''; do
+    setup
+    printf '%s\n' "$bad" >"$D/root/UPSTREAM"
+    run_accept
+    expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
+    ! called '^cmake ' || { echo "cmake ran for UPSTREAM '$bad'" >&2; return 1; }
+  done
+  # A CRLF file and a last line without a newline are read like pq_read_pin does.
+  setup
+  printf 'url=x\r\ntag=FIREFOX_159_0_RELEASE' >"$D/root/UPSTREAM"
+  run_accept
+  assert_eq 0 "$RC" "$OUT"
+  called "^cmake -S .* -DNIGHT_ENGINE_VERSION=ff159 \\| cwd=" || { echo "CRLF/no-newline file not read" >&2; return 1; }
+  # A CRLF tag line with no suffix after the major is read like pq_read_pin does.
+  setup
+  printf 'url=x\r\ntag=FIREFOX_159\r\n' >"$D/root/UPSTREAM"
+  run_accept
+  assert_eq 0 "$RC" "$OUT"
+  called "^cmake -S .* -DNIGHT_ENGINE_VERSION=ff159 \\| cwd=" || { echo "CRLF tag without suffix not read" >&2; return 1; }
+  # The effective (last) tag is the one validated: a good tag followed by a bad or empty one is refused.
+  for bad in V1 ''; do
+    setup
+    printf 'url=https://h.test/r\ntag=FIREFOX_159_0_RELEASE\ntag=%s\ncommit=%s\ntree=%s\n' "$bad" \
+      0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef >"$D/root/UPSTREAM"
+    run_accept
+    expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
+    ! called '^cmake ' || { echo "cmake ran for a later bad tag '$bad'" >&2; return 1; }
+  done
+  # The last tag= line wins, as for pq_read_pin everywhere else.
+  setup
+  printf 'url=https://h.test/r\ntag=FIREFOX_147_0_4_RELEASE\ntag=FIREFOX_159_0_RELEASE\ncommit=%s\ntree=%s\n' \
+    0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef >"$D/root/UPSTREAM"
+  run_accept
+  assert_eq 0 "$RC" "$OUT"
+  called "^cmake -S .* -DNIGHT_ENGINE_VERSION=ff159 \\| cwd=" || { echo "last tag line did not win" >&2; return 1; }
+  setup; rm "$D/root/UPSTREAM"
+  run_accept
+  expect_fail 1 "FAIL at build: cannot derive NightMonkey's engine version"
+}
+
 run_test "all green runs every step in order" all_green_runs_every_step_in_order
 run_test "configure failure fails" configure_failure_fails
 run_test "build failure fails" build_failure_fails
 run_test "aot lane failure fails" aot_lane_failure_fails
 run_test "interpreter lane failure fails" interpreter_lane_failure_fails
 run_test "floor comparison (>=)" floor_comparison
+run_test "engine version comes from UPSTREAM's tag" engine_version_from_upstream
 run_test "verified line required" verified_line_required
 run_test "snapshot failure fails" snapshot_failure_fails
 run_test "snapshot gets WASMTIME_FLAGS" snapshot_gets_wasmtime_flags

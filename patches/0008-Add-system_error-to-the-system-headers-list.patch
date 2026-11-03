@@ -14,10 +14,10 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  1 file changed, 1 insertion(+)
 
 diff --git a/config/system-headers.mozbuild b/config/system-headers.mozbuild
-index b14afa4c37f0..d974cd9ae714 100644
+index b8c14159a7c5..59277ac3ba6e 100644
 --- a/config/system-headers.mozbuild
 +++ b/config/system-headers.mozbuild
-@@ -835,6 +835,7 @@ system_headers = [
+@@ -829,6 +829,7 @@ system_headers = [
      "sys/link.h",
      "sys/locking.h",
      "syslog.h",

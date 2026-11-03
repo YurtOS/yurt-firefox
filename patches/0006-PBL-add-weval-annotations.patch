@@ -22,26 +22,26 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/jit/CacheIRWriter.h                    |   3 +
  js/src/jit/CompactBuffer.h                    |   8 +-
  js/src/jit/moz.build                          |   5 +
- js/src/moz.build                              |   5 +
  js/src/shell/js.cpp                           |   2 +-
  js/src/vm/JSScript.cpp                        |  11 +
  js/src/vm/JSScript.h                          |  20 +
  js/src/vm/PortableBaselineInterpret-defs.h    |  85 +++
  .../vm/PortableBaselineInterpret-weval-defs.h | 142 ++++
- js/src/vm/PortableBaselineInterpret.cpp       | 658 ++++++++++++------
+ js/src/vm/PortableBaselineInterpret.cpp       | 652 ++++++++++++------
  js/src/vm/PortableBaselineInterpret.h         |  18 +-
  js/src/vm/Weval.h                             |  35 +
- 21 files changed, 860 insertions(+), 247 deletions(-)
+ js/src/vm/moz.build                           |   5 +
+ 21 files changed, 857 insertions(+), 244 deletions(-)
  create mode 100644 js/src/jit-test/tests/strings/concat.js
  create mode 100644 js/src/vm/PortableBaselineInterpret-defs.h
  create mode 100644 js/src/vm/PortableBaselineInterpret-weval-defs.h
  create mode 100644 js/src/vm/Weval.h
 
 diff --git a/js/moz.configure b/js/moz.configure
-index 1c92f37e74f6..e6944cda3fb9 100644
+index a78399f88b37..e5f20807f2a1 100644
 --- a/js/moz.configure
 +++ b/js/moz.configure
-@@ -200,6 +200,21 @@ set_config(
+@@ -176,6 +176,21 @@ set_config(
      depends_if("--enable-portable-baseline-interp-force")(lambda _: True),
  )
  
@@ -64,10 +64,10 @@ index 1c92f37e74f6..e6944cda3fb9 100644
  option(
      "--enable-aot-ics",
 diff --git a/js/src/gc/GC.cpp b/js/src/gc/GC.cpp
-index 4948db68d3bd..3749e07c31e4 100644
+index 262d4283a97a..01cef4d7c8ac 100644
 --- a/js/src/gc/GC.cpp
 +++ b/js/src/gc/GC.cpp
-@@ -5261,6 +5261,16 @@ Realm* js::NewRealm(JSContext* cx, JSPrincipals* principals,
+@@ -5805,6 +5805,16 @@ Realm* js::NewRealm(JSContext* cx, JSPrincipals* principals,
      zone->compartments().infallibleAppend(compHolder.release());
    }
  
@@ -121,10 +121,10 @@ index 000000000000..cfc7bc5db63e
 +}
 +test();
 diff --git a/js/src/jit/BaselineCacheIRCompiler.cpp b/js/src/jit/BaselineCacheIRCompiler.cpp
-index 16b53e572d23..1370374422f9 100644
+index bd11ae2028d5..fd09e42408bc 100644
 --- a/js/src/jit/BaselineCacheIRCompiler.cpp
 +++ b/js/src/jit/BaselineCacheIRCompiler.cpp
-@@ -29,6 +29,7 @@
+@@ -27,6 +27,7 @@
  #include "util/Unicode.h"
  #include "vm/PortableBaselineInterpret.h"
  #include "vm/StaticStrings.h"
@@ -132,7 +132,7 @@ index 16b53e572d23..1370374422f9 100644
  
  #include "jit/JitScript-inl.h"
  #include "jit/MacroAssembler-inl.h"
-@@ -2142,6 +2143,11 @@ static bool LookupOrCompileStub(JSContext* cx, CacheKind kind,
+@@ -2126,6 +2127,11 @@ static bool LookupOrCompileStub(JSContext* cx, CacheKind kind,
                                               /* stubCode = */ nullptr)) {
        return false;
      }
@@ -144,7 +144,7 @@ index 16b53e572d23..1370374422f9 100644
    }
    MOZ_ASSERT_IF(IsBaselineInterpreterEnabled(), code);
    MOZ_ASSERT(stubInfo);
-@@ -2314,7 +2320,14 @@ ICAttachResult js::jit::AttachBaselineCacheIRStub(
+@@ -2309,7 +2315,14 @@ ICAttachResult js::jit::AttachBaselineCacheIRStubLocked(
    newStub->setTypeData(writer.typeData());
  
  #ifdef ENABLE_PORTABLE_BASELINE_INTERP
@@ -158,12 +158,12 @@ index 16b53e572d23..1370374422f9 100644
 +#endif
  #endif
  
-   stub->addNewStub(icEntry, newStub);
+   if (!lock.isSome()) {
 diff --git a/js/src/jit/CacheIR.cpp b/js/src/jit/CacheIR.cpp
-index c0f7cac6ae36..0b8127675399 100644
+index 74ce9e8784fd..1a9743ed6453 100644
 --- a/js/src/jit/CacheIR.cpp
 +++ b/js/src/jit/CacheIR.cpp
-@@ -15998,12 +15998,16 @@ AttachDecision BinaryArithIRGenerator::tryAttachStringConcat() {
+@@ -16282,12 +16282,16 @@ AttachDecision BinaryArithIRGenerator::tryAttachStringConcat() {
      return AttachDecision::NoAction;
    }
  
@@ -181,10 +181,10 @@ index c0f7cac6ae36..0b8127675399 100644
    ValOperandId lhsId(writer.setInputOperandId(0));
    ValOperandId rhsId(writer.setInputOperandId(1));
 diff --git a/js/src/jit/CacheIRCompiler.cpp b/js/src/jit/CacheIRCompiler.cpp
-index c5754dc3927f..cf614e499832 100644
+index 1cf65a9bc437..fcb861755da8 100644
 --- a/js/src/jit/CacheIRCompiler.cpp
 +++ b/js/src/jit/CacheIRCompiler.cpp
-@@ -49,6 +49,7 @@
+@@ -46,6 +46,7 @@
  #include "vm/TypedArrayObject.h"
  #include "vm/TypeofEqOperand.h"  // TypeofEqOperand
  #include "vm/Uint8Clamped.h"
@@ -192,7 +192,7 @@ index c5754dc3927f..cf614e499832 100644
  
  #include "builtin/Boolean-inl.h"
  #include "jit/MacroAssembler-inl.h"
-@@ -1032,6 +1033,20 @@ void CacheRegisterAllocator::restoreInputState(MacroAssembler& masm,
+@@ -1029,6 +1030,20 @@ void CacheRegisterAllocator::restoreInputState(MacroAssembler& masm,
    }
  }
  
@@ -213,7 +213,7 @@ index c5754dc3927f..cf614e499832 100644
  size_t CacheIRStubInfo::stubDataSize() const {
    size_t field = 0;
    size_t size = 0;
-@@ -1264,6 +1279,15 @@ ICCacheIRStub* ICCacheIRStub::clone(JSRuntime* rt, ICStubSpace& newSpace) {
+@@ -1273,6 +1288,15 @@ ICCacheIRStub* ICCacheIRStub::clone(JSRuntime* rt, ICStubSpace& newSpace,
    return newStub;
  }
  
@@ -230,10 +230,10 @@ index c5754dc3927f..cf614e499832 100644
  static inline bool ShouldTraceWeakEdgeInStub(JSTracer* trc) {
    if constexpr (std::is_same_v<T, IonICStub>) {
 diff --git a/js/src/jit/CacheIRCompiler.h b/js/src/jit/CacheIRCompiler.h
-index 62d2f8f0d4cf..582e92f0394e 100644
+index 05f306ef75da..26f889f1ac9a 100644
 --- a/js/src/jit/CacheIRCompiler.h
 +++ b/js/src/jit/CacheIRCompiler.h
-@@ -28,6 +28,10 @@ namespace js {
+@@ -26,6 +26,10 @@ namespace js {
  class TypedArrayObject;
  enum class UnaryMathFunction : uint8_t;
  
@@ -244,7 +244,7 @@ index 62d2f8f0d4cf..582e92f0394e 100644
  namespace jit {
  
  class BaselineCacheIRCompiler;
-@@ -1347,18 +1351,12 @@ class CacheIRStubInfo {
+@@ -1329,18 +1333,12 @@ class CacheIRStubInfo {
    uint8_t stubDataOffset_;
    bool makesGCCalls_;
  
@@ -266,9 +266,9 @@ index 62d2f8f0d4cf..582e92f0394e 100644
 -  }
 +                  uint32_t stubDataOffset, uint32_t codeLength);
  
-   CacheIRStubInfo(const CacheIRStubInfo&) = delete;
-   CacheIRStubInfo& operator=(const CacheIRStubInfo&) = delete;
-@@ -1434,6 +1432,11 @@ class CacheIRStubInfo {
+  public:
+   CacheKind kind() const { return kind_; }
+@@ -1416,6 +1414,11 @@ class CacheIRStubInfo {
  
    void replaceStubRawValueBits(uint8_t* stubData, uint32_t offset,
                                 uint64_t oldBits, uint64_t newBits) const;
@@ -281,10 +281,10 @@ index 62d2f8f0d4cf..582e92f0394e 100644
  
  template <typename T>
 diff --git a/js/src/jit/CacheIRSpewer.cpp b/js/src/jit/CacheIRSpewer.cpp
-index 52e2782266f6..4d5764c6f348 100644
+index 0a4b5ea32dce..b387f0eb7da5 100644
 --- a/js/src/jit/CacheIRSpewer.cpp
 +++ b/js/src/jit/CacheIRSpewer.cpp
-@@ -525,6 +525,8 @@ static const char* ArrayBufferViewKindName(ArrayBufferViewKind kind) {
+@@ -520,6 +520,8 @@ static const char* ArrayBufferViewKindName(ArrayBufferViewKind kind) {
    switch (kind) {
      case ArrayBufferViewKind::FixedLength:
        return "FixedLength";
@@ -294,10 +294,10 @@ index 52e2782266f6..4d5764c6f348 100644
        return "Resizable";
    }
 diff --git a/js/src/jit/CacheIRWriter.h b/js/src/jit/CacheIRWriter.h
-index 7f7325b9ee07..147b31ceb05a 100644
+index 08a44c134f82..3e0d21123b56 100644
 --- a/js/src/jit/CacheIRWriter.h
 +++ b/js/src/jit/CacheIRWriter.h
-@@ -379,6 +379,9 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
+@@ -397,6 +397,9 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
      MOZ_ASSERT(op == nextOperandId_);
      nextOperandId_++;
      numInputOperands_++;
@@ -308,10 +308,10 @@ index 7f7325b9ee07..147b31ceb05a 100644
    }
  
 diff --git a/js/src/jit/CompactBuffer.h b/js/src/jit/CompactBuffer.h
-index d21f5e579e62..db7b14be85bb 100644
+index 1988529b1db6..4e3d382248ba 100644
 --- a/js/src/jit/CompactBuffer.h
 +++ b/js/src/jit/CompactBuffer.h
-@@ -68,7 +68,7 @@ class CompactBufferReader {
+@@ -66,7 +66,7 @@ class CompactBufferReader {
        : buffer_(start), end_(end) {}
    inline explicit CompactBufferReader(const CompactBufferWriter& writer);
    uint8_t readByte() {
@@ -320,7 +320,7 @@ index d21f5e579e62..db7b14be85bb 100644
      return *buffer_++;
    }
    uint32_t readFixedUint32_t() {
-@@ -117,14 +117,14 @@ class CompactBufferReader {
+@@ -115,14 +115,14 @@ class CompactBufferReader {
    }
  
    bool more() const {
@@ -339,57 +339,47 @@ index d21f5e579e62..db7b14be85bb 100644
  
    const uint8_t* currentPosition() const { return buffer_; }
 diff --git a/js/src/jit/moz.build b/js/src/jit/moz.build
-index 39d5d48c3edf..caf81c8e6d4d 100644
+index a8355b4884ae..a72ddce0cde7 100644
 --- a/js/src/jit/moz.build
 +++ b/js/src/jit/moz.build
-@@ -307,3 +307,8 @@ if CONFIG["ENABLE_JS_AOT_ICS"]:
- 
+@@ -316,6 +316,11 @@ if CONFIG["ENABLE_JS_AOT_ICS"]:
  if CONFIG["FUZZING_INTERFACES"] or CONFIG["FUZZING_JS_FUZZILLI"]:
      include("/tools/fuzzing/libfuzzer-config.mozbuild")
-+
+ 
 +if CONFIG["ENABLE_JS_PBL_WEVAL"]:
 +    LOCAL_INCLUDES += [
 +        "../../../third_party/weval"
 +    ]
-diff --git a/js/src/moz.build b/js/src/moz.build
-index a000e4a42dda..ae5af29eda3f 100644
---- a/js/src/moz.build
-+++ b/js/src/moz.build
-@@ -703,3 +703,8 @@ if CONFIG["JS_HAS_INTL_API"]:
- 
- if CONFIG["USE_LIBZ_RS"]:
-     DEFINES["USE_LIBZ_RS"] = True
 +
-+if CONFIG["ENABLE_JS_PBL_WEVAL"]:
-+    LOCAL_INCLUDES += [
-+        "../../third_party/weval"
-+    ]
+ LICENSED_UNDER += ["arm"]
+ LICENSED_UNDER["arm"].paths = [
+     "arm64/vixl",
 diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
-index b4193feef5f3..c09a9a4c9c5c 100644
+index 5390df52d769..915ce7eaec2e 100644
 --- a/js/src/shell/js.cpp
 +++ b/js/src/shell/js.cpp
-@@ -12716,7 +12716,7 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+@@ -12940,7 +12940,7 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
    }
  
    if (!JS::SetLoggingInterface(shellLoggingInterface)) {
 -    return 1;
 +    return AsVariant(1);
    }
-   ParseLoggerOptions();
- 
+   char* logopts = getenv("MOZ_LOG");
+   if (logopts) {
 diff --git a/js/src/vm/JSScript.cpp b/js/src/vm/JSScript.cpp
-index f64ed893ca19..9a5f260cbf62 100644
+index 1106b8c3bba0..4c9106362d04 100644
 --- a/js/src/vm/JSScript.cpp
 +++ b/js/src/vm/JSScript.cpp
-@@ -75,6 +75,7 @@
+@@ -72,6 +72,7 @@
  #include "vm/StringType.h"    // JSString, JSAtom
  #include "vm/Time.h"          // AutoIncrementalTimer
  #include "vm/ToSource.h"      // JS::ValueToSource
 +#include "vm/Weval.h"
+ 
+ #include "vm/JSScript-inl.h"
  #ifdef MOZ_VTUNE
- #  include "vtune/VTuneWrapper.h"
- #endif
-@@ -2663,6 +2664,10 @@ bool JSScript::fullyInitFromStencil(
+@@ -2727,6 +2728,10 @@ bool JSScript::fullyInitFromStencil(
      }
    }
  
@@ -400,7 +390,7 @@ index f64ed893ca19..9a5f260cbf62 100644
    return true;
  }
  
-@@ -3891,3 +3896,9 @@ JS::ubi::Base::Size JS::ubi::Concrete<BaseScript>::size(
+@@ -4012,3 +4017,9 @@ JS::ubi::Base::Size JS::ubi::Concrete<BaseScript>::size(
  const char* JS::ubi::Concrete<BaseScript>::scriptFilename() const {
    return get().filename();
  }
@@ -411,10 +401,10 @@ index f64ed893ca19..9a5f260cbf62 100644
 +}
 +#endif
 diff --git a/js/src/vm/JSScript.h b/js/src/vm/JSScript.h
-index 3a6c1ffc7aa0..bed6c7d01f05 100644
+index 239b31ee4ce1..5218cfb6af0b 100644
 --- a/js/src/vm/JSScript.h
 +++ b/js/src/vm/JSScript.h
-@@ -91,6 +91,8 @@ struct CompilationStencilMerger;
+@@ -90,6 +90,8 @@ struct CompilationStencilMerger;
  class StencilXDR;
  }  // namespace frontend
  
@@ -423,7 +413,7 @@ index 3a6c1ffc7aa0..bed6c7d01f05 100644
  class ScriptCounts {
   public:
    using PCCountsVector = mozilla::Vector<PCCounts, 0, SystemAllocPolicy>;
-@@ -1567,6 +1569,13 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
+@@ -1796,6 +1798,13 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
    // will be nullptr.
    RefPtr<js::SharedImmutableScriptData> sharedData_ = {};
  
@@ -437,7 +427,7 @@ index 3a6c1ffc7aa0..bed6c7d01f05 100644
    // End of fields.
  
    BaseScript(uint8_t* stubEntry, JSFunction* function,
-@@ -1746,6 +1755,17 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
+@@ -1975,6 +1984,17 @@ class BaseScript : public gc::TenuredCellWithNonGCPointer<uint8_t> {
  #if defined(DEBUG) || defined(JS_JITSPEW)
    void dumpStringContent(js::GenericPrinter& out) const;
  #endif
@@ -695,7 +685,7 @@ index 000000000000..61aaa7e7907b
 +
 +#endif /* PortableBaselineInerpret_defs_h */
 diff --git a/js/src/vm/PortableBaselineInterpret.cpp b/js/src/vm/PortableBaselineInterpret.cpp
-index 696115476b83..25a9a1a9f210 100644
+index ec80deec911b..c0b5f9513263 100644
 --- a/js/src/vm/PortableBaselineInterpret.cpp
 +++ b/js/src/vm/PortableBaselineInterpret.cpp
 @@ -57,6 +57,7 @@
@@ -706,9 +696,9 @@ index 696115476b83..25a9a1a9f210 100644
  #include "vm/WrapperObject.h"
  
  #include "debugger/DebugAPI-inl.h"
-@@ -67,6 +68,13 @@
- #include "vm/JSScript-inl.h"
+@@ -68,6 +69,13 @@
  #include "vm/PlainObject-inl.h"
+ #include "vm/Realm-inl.h"
  
 +#ifdef ENABLE_JS_PBL_WEVAL
 +WEVAL_DEFINE_GLOBALS()
@@ -720,7 +710,7 @@ index 696115476b83..25a9a1a9f210 100644
  namespace js {
  namespace pbl {
  
-@@ -91,8 +99,6 @@ using namespace js::jit;
+@@ -92,8 +100,6 @@ using namespace js::jit;
      } while (0)
  #endif
  
@@ -729,7 +719,7 @@ index 696115476b83..25a9a1a9f210 100644
  // Whether we are using the "hybrid" strategy for ICs (see the [SMDOC]
  // in PortableBaselineInterpret.h for more). This is currently a
  // constant, but may become configurable in the future.
-@@ -439,24 +445,24 @@ class VMFrame {
+@@ -440,24 +446,24 @@ class VMFrame {
    bool success() const { return exitFP != nullptr; }
  };
  
@@ -759,7 +749,7 @@ index 696115476b83..25a9a1a9f210 100644
  
  /*
   * -----------------------------------------------
-@@ -469,26 +475,55 @@ class VMFrame {
+@@ -470,26 +476,55 @@ class VMFrame {
  // platforms, e.g. Wasm on Wasmtime on x86-64, we have as few as four
  // register arguments available before args go through the stack.)
  struct ICCtx {
@@ -821,7 +811,7 @@ index 696115476b83..25a9a1a9f210 100644
  };
  
  #define IC_ERROR_SENTINEL() (JS::MagicValue(JS_GENERIC_MAGIC).asRawBits())
-@@ -497,17 +532,10 @@ struct ICCtx {
+@@ -498,17 +533,10 @@ struct ICCtx {
  typedef uint64_t (*ICStubFunc)(uint64_t arg0, uint64_t arg1, ICStub* stub,
                                 ICCtx& ctx);
  
@@ -841,7 +831,7 @@ index 696115476b83..25a9a1a9f210 100644
                               jsbytecode* restartEntryPC,
                               BaselineFrame* restartFrame,
                               StackVal* restartEntryFrame,
-@@ -533,6 +561,7 @@ static double DoubleMinMax(bool isMax, double first, double second) {
+@@ -534,6 +562,7 @@ static double DoubleMinMax(bool isMax, double first, double second) {
  }
  
  // Interpreter for CacheIR.
@@ -849,7 +839,7 @@ index 696115476b83..25a9a1a9f210 100644
  uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
                          ICCtx& ctx) {
    {
-@@ -549,33 +578,30 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -551,9 +580,19 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
  
  #else  // ENABLE_COMPUTED_GOTO_DISPATCH
  
@@ -872,12 +862,11 @@ index 696115476b83..25a9a1a9f210 100644
  #  define CACHEOP_CASE_FALLTHROUGH(name) \
      [[fallthrough]];                     \
      CACHEOP_CASE(name)
- 
--#  define DISPATCH_CACHEOP()          \
--    cacheop = cacheIRReader.readOp(); \
-+#  define DISPATCH_CACHEOP()                         \
-+    cacheop = cacheIRReader.readOp();                \
-+    PBL_UPDATE_CTX(cacheIRReader.currentPosition()); \
+@@ -561,24 +600,11 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+ #  define DISPATCH_CACHEOP()                                                \
+     cacheop =                                                               \
+         cacheIRReader.more() ? cacheIRReader.readOp() : CacheOp::PblReturn; \
++    PBL_UPDATE_CTX(cacheIRReader.currentPosition());                        \
      goto dispatch;
  
  #endif  // !ENABLE_COMPUTED_GOTO_DISPATCH
@@ -896,10 +885,10 @@ index 696115476b83..25a9a1a9f210 100644
 -    ctx.icregs.icTags[(index)] = 0;                   \
 -  } while (0)
 -
-     DECLARE_CACHEOP_CASE(ReturnFromIC);
+     DECLARE_CACHEOP_CASE(PblReturn);
      DECLARE_CACHEOP_CASE(GuardToObject);
      DECLARE_CACHEOP_CASE(GuardIsNullOrUndefined);
-@@ -857,7 +883,17 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -859,7 +885,17 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
  #define CACHEOP_TRACE(name) \
    TRACE_PRINTF("cacheop (frame %p stub %p): " #name "\n", ctx.frame, cstub);
  
@@ -918,30 +907,30 @@ index 696115476b83..25a9a1a9f210 100644
  
  // We set a fixed bound on the number of icVals which is smaller than what IC
  // generators may use. As a result we can't evaluate an IC if it defines too
-@@ -868,22 +904,24 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -870,23 +906,25 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
  #define BOUNDSCHECK(resultId) \
    if (resultId.id() >= ICRegs::kMaxICVals) FAIL_IC();
  
--#define PREDICT_NEXT(name)                       \
--  if (cacheIRReader.peekOp() == CacheOp::name) { \
--    cacheIRReader.readOp();                      \
--    cacheop = CacheOp::name;                     \
--    goto cacheop_##name;                         \
+-#define PREDICT_NEXT(name)                            \
+-  static_assert(CacheOp::name != CacheOp::PblReturn); \
+-  if (cacheIRReader.peekOp() == CacheOp::name) {      \
+-    cacheIRReader.readOp();                           \
+-    cacheop = CacheOp::name;                          \
+-    goto cacheop_##name;                              \
 +#define PREDICT_NEXT(name)                                       \
++  static_assert(CacheOp::name != CacheOp::PblReturn);            \
 +  if (!Specialized && cacheIRReader.peekOp() == CacheOp::name) { \
 +    cacheIRReader.readOp();                                      \
 +    cacheop = CacheOp::name;                                     \
 +    goto cacheop_##name;                                         \
    }
  
--#define PREDICT_RETURN()                                 \
--  if (cacheIRReader.peekOp() == CacheOp::ReturnFromIC) { \
--    TRACE_PRINTF("stub successful, predicted return\n"); \
+ #define PREDICT_RETURN()                                 \
+-  if (!cacheIRReader.more()) {                           \
++  if (!Specialized && !cacheIRReader.more()) {           \
+     TRACE_PRINTF("stub successful, predicted return\n"); \
 -    return retValue;                                     \
-+#define PREDICT_RETURN()                                                 \
-+  if (!Specialized && cacheIRReader.peekOp() == CacheOp::ReturnFromIC) { \
-+    TRACE_PRINTF("stub successful, predicted return\n");                 \
-+    RETURN_IC(retValue);                                                 \
++    RETURN_IC(retValue);                                 \
    }
  
      ICCacheIRStub* cstub = stub->toCacheIRStub();
@@ -950,11 +939,11 @@ index 696115476b83..25a9a1a9f210 100644
 +    const CacheIRStubInfo* stubInfo;
 +    const uint8_t* code;
 +    PBL_ESTABLISH_STUBINFO_CODE(Specialized, stubInfo, code);
-+    CacheIRReader cacheIRReader(code, nullptr);
++    CacheIRReader cacheIRReader(code, code + stubInfo->codeLength());
      uint64_t retValue = 0;
      CacheOp cacheop;
  
-@@ -891,6 +929,8 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -894,6 +932,8 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
      WRITE_VALUE_REG(1, Value::fromRawBits(arg1));
      WRITE_VALUE_REG(2, Value::fromRawBits(ctx.arg2));
  
@@ -963,16 +952,16 @@ index 696115476b83..25a9a1a9f210 100644
      DISPATCH_CACHEOP();
  
  #ifndef ENABLE_COMPUTED_GOTO_DISPATCH
-@@ -901,7 +941,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -904,7 +944,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
  
-       CACHEOP_CASE(ReturnFromIC) {
+       CACHEOP_CASE(PblReturn) {
          TRACE_PRINTF("stub successful!\n");
 -        return retValue;
 +        RETURN_IC(retValue);
        }
  
        CACHEOP_CASE(GuardToObject) {
-@@ -1901,7 +1941,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -1902,7 +1942,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            if (!SetElementMegamorphic<false>(cx, obj0, value0, value1,
                                              args.strict)) {
              ctx.error = PBIResult::Error;
@@ -981,8 +970,8 @@ index 696115476b83..25a9a1a9f210 100644
            }
          }
          DISPATCH_CACHEOP();
-@@ -2306,7 +2346,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
-           if (!ctx.stack.check(sp, sizeof(StackVal) * (totalArgs + 6))) {
+@@ -2307,7 +2347,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+           if (!ctx.stack.check(sp, sizeof(StackVal) * (totalArgs + 7))) {
              ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
              ctx.error = PBIResult::Error;
 -            return IC_ERROR_SENTINEL();
@@ -990,16 +979,16 @@ index 696115476b83..25a9a1a9f210 100644
            }
  
            // Create `this` if we are constructing and this is a
-@@ -2329,7 +2369,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
-               ReservedRooted<Value> result(&ctx.state.value0);
-               if (!CreateThisFromIC(cx, calleeObj, newTargetRooted, &result)) {
+@@ -2333,7 +2373,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+               if (!js::CreateThis(cx, fun, newTargetRooted, GenericObject,
+                                   &result)) {
                  ctx.error = PBIResult::Error;
 -                return IC_ERROR_SENTINEL();
 +                RETURN_IC(IC_ERROR_SENTINEL());
                }
                thisVal = result;
                // `callee` may have moved.
-@@ -2398,7 +2438,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -2403,7 +2443,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
  
              if (!success) {
                ctx.error = PBIResult::Error;
@@ -1008,7 +997,7 @@ index 696115476b83..25a9a1a9f210 100644
              }
              retValue = args[0].asRawBits();
            } else {
-@@ -2414,13 +2454,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -2419,13 +2459,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
              ImmutableScriptData* isd = script->immutableScriptData();
              PBIResult result;
              Value ret;
@@ -1028,7 +1017,7 @@ index 696115476b83..25a9a1a9f210 100644
              }
              if (flags.isConstructing() && !ret.isObject()) {
                ret = args[0];
-@@ -2475,7 +2517,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -2480,7 +2522,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            if (!ctx.stack.check(sp, sizeof(StackVal) * 8)) {
              ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
              ctx.error = PBIResult::Error;
@@ -1037,7 +1026,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
  
            // This will not be an Exit frame but a BaselineStub frame, so
-@@ -2503,12 +2545,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -2508,12 +2550,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            ImmutableScriptData* isd = script->immutableScriptData();
            PBIResult result;
            Value ret;
@@ -1057,7 +1046,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ret.asRawBits();
          }
-@@ -2566,7 +2611,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -2571,7 +2616,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            if (!ctx.stack.check(sp, sizeof(StackVal) * (totalArgs + 6))) {
              ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
              ctx.error = PBIResult::Error;
@@ -1066,7 +1055,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
  
            // This will not be an Exit frame but a BaselineStub frame, so
-@@ -2597,12 +2642,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -2602,12 +2647,15 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            ImmutableScriptData* isd = script->immutableScriptData();
            PBIResult result;
            Value ret;
@@ -1086,7 +1075,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ret.asRawBits();
          }
-@@ -2860,7 +2908,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -2865,7 +2913,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            JSLinearString* result = LinearizeForCharAccess(cx, str);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1095,7 +1084,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            WRITE_REG(resultId.id(), reinterpret_cast<uintptr_t>(result), STRING);
          }
-@@ -2882,7 +2930,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -2887,7 +2935,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            JSLinearString* result = LinearizeForCharAccess(cx, str);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1104,7 +1093,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            WRITE_REG(resultId.id(), reinterpret_cast<uintptr_t>(result), STRING);
          }
-@@ -2927,7 +2975,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -2932,7 +2980,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
              result = StringFromCharCode(cx, c);
              if (!result) {
                ctx.error = PBIResult::Error;
@@ -1113,7 +1102,7 @@ index 696115476b83..25a9a1a9f210 100644
              }
            }
            retValue = StringValue(result).asRawBits();
-@@ -3356,7 +3404,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -3361,7 +3409,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
              retValue = StringValue(result).asRawBits();
            } else {
              ctx.error = PBIResult::Error;
@@ -1122,7 +1111,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
          }
          PREDICT_RETURN();
-@@ -3395,7 +3443,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -3400,7 +3448,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
                  }
                  if (!StringsEqual<EqualityKind::Equal>(cx, lhs, rhs, &result)) {
                    ctx.error = PBIResult::Error;
@@ -1131,7 +1120,7 @@ index 696115476b83..25a9a1a9f210 100644
                  }
                  break;
                case JSOp::Ne:
-@@ -3411,35 +3459,35 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -3416,35 +3464,35 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
                  if (!StringsEqual<EqualityKind::NotEqual>(cx, lhs, rhs,
                                                            &result)) {
                    ctx.error = PBIResult::Error;
@@ -1172,7 +1161,7 @@ index 696115476b83..25a9a1a9f210 100644
                  }
                  break;
                default:
-@@ -3955,7 +4003,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -3953,7 +4001,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            ReservedRooted<Value> result(&ctx.state.value0);
            if (!NumberParseInt(cx, str0, radix, &result)) {
              ctx.error = PBIResult::Error;
@@ -1181,7 +1170,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = result.asRawBits();
          }
-@@ -4168,7 +4216,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4166,7 +4214,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* iter = GetIterator(cx, rootedObj);
            if (!iter) {
              ctx.error = PBIResult::Error;
@@ -1190,7 +1179,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*iter).asRawBits();
          }
-@@ -4230,7 +4278,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4228,7 +4276,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
                                                          args.allocKind, site);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1199,7 +1188,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*result).asRawBits();
          }
-@@ -4255,7 +4303,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4253,7 +4301,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
                NewArrayObjectBaselineFallback(cx, arrayLength, allocKind, site);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1208,7 +1197,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*result).asRawBits();
          }
-@@ -4279,7 +4327,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4277,7 +4325,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
                ArrayConstructorOneArg(cx, templateObjectRooted, length, site);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1217,7 +1206,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*result).asRawBits();
          }
-@@ -4301,7 +4349,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4299,7 +4347,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
                cx, templateObjectRooted, length);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1226,7 +1215,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*result).asRawBits();
          }
-@@ -4331,7 +4379,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4329,7 +4377,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
                lengthRooted);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1235,7 +1224,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*result).asRawBits();
          }
-@@ -4354,7 +4402,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4352,7 +4400,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
                cx, templateObjectRooted, arrayRooted);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1244,7 +1233,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*result).asRawBits();
          }
-@@ -4395,7 +4443,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4393,7 +4441,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            if (!CallNativeGetter(cx, getterRooted, receiverRooted,
                                  &resultRooted)) {
              ctx.error = PBIResult::Error;
@@ -1253,7 +1242,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = resultRooted.asRawBits();
          }
-@@ -4423,7 +4471,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4421,7 +4469,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            ReservedRooted<Value> rhsRooted(&ctx.state.value1, rhs);
            if (!CallNativeSetter(cx, setterRooted, receiverRooted, rhsRooted)) {
              ctx.error = PBIResult::Error;
@@ -1262,7 +1251,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
          }
          PREDICT_RETURN();
-@@ -4517,7 +4565,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4515,7 +4563,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            bool result = false;
            if (!StringIncludes(cx, str0, str1, &result)) {
              ctx.error = PBIResult::Error;
@@ -1271,7 +1260,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = BooleanValue(result).asRawBits();
          }
-@@ -4538,7 +4586,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4536,7 +4584,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            int32_t result = 0;
            if (!StringIndexOf(cx, str0, str1, &result)) {
              ctx.error = PBIResult::Error;
@@ -1280,7 +1269,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = Int32Value(result).asRawBits();
          }
-@@ -4559,7 +4607,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4557,7 +4605,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            int32_t result = 0;
            if (!StringLastIndexOf(cx, str0, str1, &result)) {
              ctx.error = PBIResult::Error;
@@ -1289,7 +1278,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = Int32Value(result).asRawBits();
          }
-@@ -4580,7 +4628,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4578,7 +4626,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            bool result = false;
            if (!StringStartsWith(cx, str0, str1, &result)) {
              ctx.error = PBIResult::Error;
@@ -1298,7 +1287,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = BooleanValue(result).asRawBits();
          }
-@@ -4601,7 +4649,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4599,7 +4647,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            bool result = false;
            if (!StringEndsWith(cx, str0, str1, &result)) {
              ctx.error = PBIResult::Error;
@@ -1307,7 +1296,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = BooleanValue(result).asRawBits();
          }
-@@ -4617,7 +4665,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4615,7 +4663,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = StringToLowerCase(cx, str);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1316,7 +1305,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = StringValue(result).asRawBits();
          }
-@@ -4633,7 +4681,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4631,7 +4679,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = StringToUpperCase(cx, str);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1325,7 +1314,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = StringValue(result).asRawBits();
          }
-@@ -4650,7 +4698,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4648,7 +4696,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = StringTrim(cx, str0);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1334,7 +1323,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = StringValue(result).asRawBits();
          }
-@@ -4667,7 +4715,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4665,7 +4713,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = StringTrimStart(cx, str0);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1343,7 +1332,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = StringValue(result).asRawBits();
          }
-@@ -4684,7 +4732,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4682,7 +4730,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = StringTrimEnd(cx, str0);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1352,7 +1341,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = StringValue(result).asRawBits();
          }
-@@ -4705,7 +4753,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4703,7 +4751,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = SubstringKernel(cx, str0, begin, length);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1361,7 +1350,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = StringValue(result).asRawBits();
          }
-@@ -4730,7 +4778,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4728,7 +4776,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = StringReplace(cx, str0, str1, str2);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1370,7 +1359,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = StringValue(result).asRawBits();
          }
-@@ -4751,7 +4799,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -4749,7 +4797,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = StringSplitString(cx, str0, str1, INT32_MAX);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1433,7 +1422,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
          }
          PREDICT_RETURN();
-@@ -5055,7 +5103,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5056,7 +5104,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = ObjectKeys(cx, obj0);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1442,7 +1431,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*result).asRawBits();
          }
-@@ -5073,7 +5121,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5074,7 +5122,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = ObjectCreateWithTemplate(cx, templateRooted);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1451,7 +1440,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*result).asRawBits();
          }
-@@ -5111,7 +5159,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5112,7 +5160,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = Int32ToStringWithBase<CanGC>(cx, input, base, true);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1460,7 +1449,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = StringValue(result).asRawBits();
          }
-@@ -5146,7 +5194,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5147,7 +5195,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            PUSH_IC_FRAME();
            if (!GetFirstDollarIndexRaw(cx, str, &result)) {
              ctx.error = PBIResult::Error;
@@ -1469,7 +1458,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = Int32Value(result).asRawBits();
          }
-@@ -5210,7 +5258,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5211,7 +5259,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            }
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1478,7 +1467,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
  
            retValue = ObjectValue(*result).asRawBits();
-@@ -5241,7 +5289,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5242,7 +5290,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
              if (!RegExpMatcherRaw(cx, regexpRooted, inputRooted, lastIndex,
                                    nullptr, &result)) {
                ctx.error = PBIResult::Error;
@@ -1487,7 +1476,7 @@ index 696115476b83..25a9a1a9f210 100644
              }
              retValue = result.asRawBits();
            } else {
-@@ -5249,7 +5297,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5250,7 +5298,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
              if (!RegExpSearcherRaw(cx, regexpRooted, inputRooted, lastIndex,
                                     nullptr, &result)) {
                ctx.error = PBIResult::Error;
@@ -1496,7 +1485,7 @@ index 696115476b83..25a9a1a9f210 100644
              }
              retValue = Int32Value(result).asRawBits();
            }
-@@ -5279,7 +5327,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5280,7 +5328,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            bool result = false;
            if (!RegExpHasCaptureGroups(cx, regexpRooted, inputRooted, &result)) {
              ctx.error = PBIResult::Error;
@@ -1505,7 +1494,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = BooleanValue(result).asRawBits();
          }
-@@ -5305,7 +5353,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5306,7 +5354,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            if (!RegExpBuiltinExecMatchFromJit(cx, regexpRooted, inputRooted,
                                               nullptr, &output)) {
              ctx.error = PBIResult::Error;
@@ -1514,7 +1503,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = output.asRawBits();
          }
-@@ -5331,7 +5379,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5332,7 +5380,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            if (!RegExpBuiltinExecTestFromJit(cx, regexpRooted, inputRooted,
                                              &result)) {
              ctx.error = PBIResult::Error;
@@ -1523,7 +1512,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = BooleanValue(result).asRawBits();
          }
-@@ -5359,7 +5407,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5360,7 +5408,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            auto* result = NewRegExpStringIterator(cx);
            if (!result) {
              ctx.error = PBIResult::Error;
@@ -1532,7 +1521,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = ObjectValue(*result).asRawBits();
          }
-@@ -5379,7 +5427,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5380,7 +5428,7 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
            ReservedRooted<Value> result(&ctx.state.value0, UndefinedValue());
            if (!GetSparseElementHelper(cx, nobjRooted, index, &result)) {
              ctx.error = PBIResult::Error;
@@ -1541,7 +1530,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
            retValue = result.asRawBits();
          }
-@@ -5405,6 +5453,8 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
+@@ -5406,6 +5454,8 @@ uint64_t ICInterpretOps(uint64_t arg0, uint64_t arg1, ICStub* stub,
  #undef CACHEOP_UNIMPL
  
  next_ic:
@@ -1550,7 +1539,7 @@ index 696115476b83..25a9a1a9f210 100644
    TRACE_PRINTF("IC failed; next IC\n");
    return CallNextIC(arg0, arg1, stub, ctx);
  }
-@@ -5759,7 +5809,7 @@ uint8_t* GetPortableFallbackStub(BaselineICFallbackKind kind) {
+@@ -5760,7 +5810,7 @@ uint8_t* GetPortableFallbackStub(BaselineICFallbackKind kind) {
  }
  
  uint8_t* GetICInterpreter() {
@@ -1559,7 +1548,7 @@ index 696115476b83..25a9a1a9f210 100644
  }
  
  /*
-@@ -5768,34 +5818,34 @@ uint8_t* GetICInterpreter() {
+@@ -5769,34 +5819,34 @@ uint8_t* GetICInterpreter() {
   * -----------------------------------------------
   */
  
@@ -1608,7 +1597,7 @@ index 696115476b83..25a9a1a9f210 100644
  
  #define LABEL(op) (&&label_##op)
  #ifdef ENABLE_COMPUTED_GOTO_DISPATCH
-@@ -5805,29 +5855,24 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
+@@ -5806,29 +5856,24 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
      goto* addresses[*pc]
  #else
  #  define CASE(op) label_##op : case JSOp::op:
@@ -1646,7 +1635,7 @@ index 696115476b83..25a9a1a9f210 100644
  #define IC_SET_VAL_ARG(index, expr) ic_arg##index = (expr).asRawBits();
  #define IC_SET_OBJ_ARG(index, expr) \
    ic_arg##index = reinterpret_cast<uint64_t>(expr);
-@@ -5835,10 +5880,10 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
+@@ -5836,10 +5881,10 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
  #define IC_PUSH_RESULT() VIRTPUSH(StackVal(ic_ret));
  
  #if !defined(TRACE_INTERP)
@@ -1661,7 +1650,7 @@ index 696115476b83..25a9a1a9f210 100644
      }
  #else
  #  define PREDICT_NEXT(op)
-@@ -5863,14 +5908,19 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
+@@ -5864,14 +5909,19 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
  
  #define NEXT_IC() icEntry++
  
@@ -1683,7 +1672,7 @@ index 696115476b83..25a9a1a9f210 100644
      ic_result = ctx.error;                                                   \
      goto ic_fail;                                                            \
    }                                                                          \
-@@ -5895,12 +5945,15 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
+@@ -5896,12 +5946,15 @@ static EnvironmentObject& getEnvironmentFromCoordinate(
      Stack::handleMut(&sp[(index)]); \
    })
  
@@ -1705,7 +1694,7 @@ index 696115476b83..25a9a1a9f210 100644
  #define RESTART(code)                                                 \
    if (!IsRestart) {                                                   \
      TRACE_PRINTF("Restarting (code %d sp %p fp %p)\n", int(code), sp, \
-@@ -5913,14 +5966,26 @@ PBIResult PortableBaselineInterpret(
+@@ -5914,14 +5967,26 @@ PBIResult PortableBaselineInterpret(
  #define GOTO_ERROR()           \
    do {                         \
      SYNCSP();                  \
@@ -1732,7 +1721,7 @@ index 696115476b83..25a9a1a9f210 100644
    isd = new_script->immutableScriptData();                          \
    icEntries = frame->icScript()->icEntries();                       \
    icEntry = frame->interpreterICEntry();                            \
-@@ -5940,6 +6005,7 @@ PBIResult PortableBaselineInterpret(
+@@ -5941,6 +6006,7 @@ PBIResult PortableBaselineInterpret(
    BaselineFrame* frame = restartFrame;
    StackVal* entryFrame = restartEntryFrame;
    jsbytecode* entryPC = restartEntryPC;
@@ -1740,7 +1729,7 @@ index 696115476b83..25a9a1a9f210 100644
  
    if (!IsRestart) {
      PUSHNATIVE(StackValNative(nullptr));  // Fake return address.
-@@ -5953,18 +6019,54 @@ PBIResult PortableBaselineInterpret(
+@@ -5954,18 +6020,54 @@ PBIResult PortableBaselineInterpret(
      entryPC = pc;
    }
  
@@ -1800,7 +1789,7 @@ index 696115476b83..25a9a1a9f210 100644
    if (IsRestart) {
      ic_result = restartCode;
      TRACE_PRINTF(
-@@ -5996,11 +6098,13 @@ PBIResult PortableBaselineInterpret(
+@@ -5997,11 +6099,13 @@ PBIResult PortableBaselineInterpret(
    }
    ret->setUndefined();
  
@@ -1819,7 +1808,7 @@ index 696115476b83..25a9a1a9f210 100644
    }
  
    if (CalleeTokenIsFunction(frame->calleeToken())) {
-@@ -6017,37 +6121,43 @@ PBIResult PortableBaselineInterpret(
+@@ -6018,37 +6122,43 @@ PBIResult PortableBaselineInterpret(
    }
  
    // The debug prologue can't run until the function environment is set up.
@@ -1880,7 +1869,7 @@ index 696115476b83..25a9a1a9f210 100644
    while (true) {
      DEBUG_CHECK();
  
-@@ -6322,7 +6432,8 @@ PBIResult PortableBaselineInterpret(
+@@ -6323,7 +6433,8 @@ PBIResult PortableBaselineInterpret(
            result = Value::fromRawBits(ic_ret).toBoolean();
          }
          int32_t jumpOffset = GET_JUMP_OFFSET(pc);
@@ -1890,7 +1879,7 @@ index 696115476b83..25a9a1a9f210 100644
            ADVANCE(jumpOffset);
            PREDICT_NEXT(JumpTarget);
            PREDICT_NEXT(LoopHead);
-@@ -6348,7 +6459,8 @@ PBIResult PortableBaselineInterpret(
+@@ -6349,7 +6460,8 @@ PBIResult PortableBaselineInterpret(
            result = Value::fromRawBits(ic_ret).toBoolean();
          }
          int32_t jumpOffset = GET_JUMP_OFFSET(pc);
@@ -1900,7 +1889,7 @@ index 696115476b83..25a9a1a9f210 100644
            ADVANCE(jumpOffset);
            PREDICT_NEXT(JumpTarget);
            PREDICT_NEXT(LoopHead);
-@@ -6376,7 +6488,8 @@ PBIResult PortableBaselineInterpret(
+@@ -6377,7 +6489,8 @@ PBIResult PortableBaselineInterpret(
            result = Value::fromRawBits(ic_ret).toBoolean();
          }
          int32_t jumpOffset = GET_JUMP_OFFSET(pc);
@@ -1910,7 +1899,7 @@ index 696115476b83..25a9a1a9f210 100644
            ADVANCE(jumpOffset);
            PREDICT_NEXT(JumpTarget);
            PREDICT_NEXT(LoopHead);
-@@ -6404,7 +6517,8 @@ PBIResult PortableBaselineInterpret(
+@@ -6405,7 +6518,8 @@ PBIResult PortableBaselineInterpret(
            result = Value::fromRawBits(ic_ret).toBoolean();
          }
          int32_t jumpOffset = GET_JUMP_OFFSET(pc);
@@ -1920,7 +1909,7 @@ index 696115476b83..25a9a1a9f210 100644
            ADVANCE(jumpOffset);
            PREDICT_NEXT(JumpTarget);
            PREDICT_NEXT(LoopHead);
-@@ -7737,6 +7851,10 @@ PBIResult PortableBaselineInterpret(
+@@ -7740,6 +7854,10 @@ PBIResult PortableBaselineInterpret(
          uint32_t argc = GET_ARGC(pc);
          do {
            {
@@ -1931,7 +1920,7 @@ index 696115476b83..25a9a1a9f210 100644
              // CallArgsFromSp would be called with
              // - numValues = argc + 2 + constructing
              // - stackSlots = argc + constructing
-@@ -7796,6 +7914,10 @@ PBIResult PortableBaselineInterpret(
+@@ -7799,6 +7917,10 @@ PBIResult PortableBaselineInterpret(
                TRACE_PRINTF("missed fastpath: not enough arguments\n");
                break;
              }
@@ -1942,7 +1931,7 @@ index 696115476b83..25a9a1a9f210 100644
  
              // Fast-path: function, interpreted, has JitScript, same realm, no
              // argument underflow.
-@@ -7873,10 +7995,11 @@ PBIResult PortableBaselineInterpret(
+@@ -7876,10 +7998,11 @@ PBIResult PortableBaselineInterpret(
              ctx.frameMgr.switchToFrame(frame);
              ctx.frame = frame;
              // 6. Set up PC and SP for callee.
@@ -1956,7 +1945,7 @@ index 696115476b83..25a9a1a9f210 100644
                PUSH_EXIT_FRAME();
                ReportOverRecursed(ctx.frameMgr.cxForLocalUseOnly());
                GOTO_ERROR();
-@@ -7934,6 +8057,8 @@ PBIResult PortableBaselineInterpret(
+@@ -7937,6 +8060,8 @@ PBIResult PortableBaselineInterpret(
  
          // Slow path: use the IC!
          ic_arg0 = argc;
@@ -1965,7 +1954,7 @@ index 696115476b83..25a9a1a9f210 100644
          ctx.icregs.extraArgs = 2 + constructing;
          INVOKE_IC(Call, false);
          VIRTPOPN(argc + 2 + constructing);
-@@ -7960,6 +8085,8 @@ PBIResult PortableBaselineInterpret(
+@@ -7963,6 +8088,8 @@ PBIResult PortableBaselineInterpret(
        CASE(SpreadNew) {
          static_assert(JSOpLength_SpreadSuperCall == JSOpLength_SpreadNew);
          ic_arg0 = 1;
@@ -1974,7 +1963,7 @@ index 696115476b83..25a9a1a9f210 100644
          ctx.icregs.extraArgs = 3;
          INVOKE_IC(SpreadCall, false);
          VIRTPOPN(4);
-@@ -8288,7 +8415,9 @@ PBIResult PortableBaselineInterpret(
+@@ -8265,7 +8392,9 @@ PBIResult PortableBaselineInterpret(
        }
  
        CASE(Coalesce) {
@@ -1985,7 +1974,7 @@ index 696115476b83..25a9a1a9f210 100644
            ADVANCE(GET_JUMP_OFFSET(pc));
            DISPATCH();
          } else {
-@@ -8298,7 +8427,8 @@ PBIResult PortableBaselineInterpret(
+@@ -8275,7 +8404,8 @@ PBIResult PortableBaselineInterpret(
  
        CASE(Case) {
          bool cond = VIRTPOP().asValue().toBoolean();
@@ -1995,7 +1984,7 @@ index 696115476b83..25a9a1a9f210 100644
            VIRTPOP();
            ADVANCE(GET_JUMP_OFFSET(pc));
            DISPATCH();
-@@ -8328,7 +8458,8 @@ PBIResult PortableBaselineInterpret(
+@@ -8305,7 +8435,8 @@ PBIResult PortableBaselineInterpret(
          }
  
          if (i >= low && i <= high) {
@@ -2005,7 +1994,7 @@ index 696115476b83..25a9a1a9f210 100644
            uint32_t firstResumeIndex = GET_RESUMEINDEX(pc + 3 * JUMP_OFFSET_LEN);
            pc = entryPC + resumeOffsets[firstResumeIndex + idx];
            DISPATCH();
-@@ -8363,28 +8494,29 @@ PBIResult PortableBaselineInterpret(
+@@ -8340,28 +8471,29 @@ PBIResult PortableBaselineInterpret(
          }
          from_unwind = false;
  
@@ -2041,7 +2030,7 @@ index 696115476b83..25a9a1a9f210 100644
            TRACE_PRINTF(" sp -> %p, fp -> %p, frame -> %p\n", sp, ctx.stack.fp,
                         frame);
            ctx.frameMgr.switchToFrame(frame);
-@@ -8539,13 +8671,14 @@ PBIResult PortableBaselineInterpret(
+@@ -8516,13 +8648,14 @@ PBIResult PortableBaselineInterpret(
        }
        CASE(InitLexical) {
          uint32_t i = GET_LOCALNO(pc);
@@ -2058,7 +2047,7 @@ index 696115476b83..25a9a1a9f210 100644
          obj.setAliasedBinding(ec, VIRTSP(0).asValue());
          END_OP(InitAliasedLexical);
        }
-@@ -8650,7 +8783,8 @@ PBIResult PortableBaselineInterpret(
+@@ -8627,7 +8760,8 @@ PBIResult PortableBaselineInterpret(
          static_assert(JSOpLength_GetAliasedVar ==
                        JSOpLength_GetAliasedDebugVar);
          EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
@@ -2068,7 +2057,7 @@ index 696115476b83..25a9a1a9f210 100644
          VIRTPUSH(StackVal(obj.aliasedBinding(ec)));
          END_OP(GetAliasedVar);
        }
-@@ -8745,7 +8879,8 @@ PBIResult PortableBaselineInterpret(
+@@ -8722,7 +8856,8 @@ PBIResult PortableBaselineInterpret(
  
        CASE(SetAliasedVar) {
          EnvironmentCoordinate ec = EnvironmentCoordinate(pc);
@@ -2078,7 +2067,7 @@ index 696115476b83..25a9a1a9f210 100644
          MOZ_ASSERT(!IsUninitializedLexical(obj.aliasedBinding(ec)));
          obj.setAliasedBinding(ec, VIRTSP(0).asValue());
          END_OP(SetAliasedVar);
-@@ -9053,11 +9188,13 @@ PBIResult PortableBaselineInterpret(
+@@ -9028,11 +9163,13 @@ PBIResult PortableBaselineInterpret(
          END_OP(Unpick);
        }
        CASE(DebugCheckSelfHosted) {
@@ -2097,7 +2086,7 @@ index 696115476b83..25a9a1a9f210 100644
            }
          }
          END_OP(DebugCheckSelfHosted);
-@@ -9086,9 +9223,15 @@ PBIResult PortableBaselineInterpret(
+@@ -9060,9 +9197,15 @@ PBIResult PortableBaselineInterpret(
  restart:
    // This is a `goto` target so that we exit any on-stack exit frames
    // before restarting, to match previous behavior.
@@ -2116,7 +2105,7 @@ index 696115476b83..25a9a1a9f210 100644
  
  error:
    TRACE_PRINTF("HandleException: frame %p\n", frame);
-@@ -9117,7 +9260,7 @@ error:
+@@ -9091,7 +9234,7 @@ error:
        case ExceptionResumeKind::Finally:
          RESET_PC(frame->interpreterPC(), frame->script());
          ctx.stack.fp = reinterpret_cast<StackVal*>(rfe.framePointer);
@@ -2125,7 +2114,7 @@ index 696115476b83..25a9a1a9f210 100644
          TRACE_PRINTF(" -> finally to pc %p\n", pc);
          VIRTPUSH(StackVal(rfe.exception));
          VIRTPUSH(StackVal(rfe.exceptionStack));
-@@ -9153,6 +9296,8 @@ error:
+@@ -9127,6 +9270,8 @@ error:
    DISPATCH();
  
  ic_fail:
@@ -2134,7 +2123,7 @@ index 696115476b83..25a9a1a9f210 100644
    RESTART(ic_result);
    switch (ic_result) {
      case PBIResult::Ok:
-@@ -9174,7 +9319,7 @@ unwind:
+@@ -9148,7 +9293,7 @@ unwind:
      TRACE_PRINTF(" -> returning\n");
      return PBIResult::Unwind;
    }
@@ -2143,7 +2132,7 @@ index 696115476b83..25a9a1a9f210 100644
    ctx.stack.fp = ctx.stack.unwindingFP;
    frame = reinterpret_cast<BaselineFrame*>(
        reinterpret_cast<uintptr_t>(ctx.stack.fp) - BaselineFrame::Size());
-@@ -9194,7 +9339,7 @@ unwind_error:
+@@ -9168,7 +9313,7 @@ unwind_error:
        reinterpret_cast<uintptr_t>(entryFrame) + BaselineFrame::Size()) {
      return PBIResult::Error;
    }
@@ -2152,7 +2141,7 @@ index 696115476b83..25a9a1a9f210 100644
    ctx.stack.fp = ctx.stack.unwindingFP;
    frame = reinterpret_cast<BaselineFrame*>(
        reinterpret_cast<uintptr_t>(ctx.stack.fp) - BaselineFrame::Size());
-@@ -9212,10 +9357,10 @@ unwind_ret:
+@@ -9186,10 +9331,10 @@ unwind_ret:
    }
    if (reinterpret_cast<uintptr_t>(ctx.stack.unwindingFP) ==
        reinterpret_cast<uintptr_t>(entryFrame) + BaselineFrame::Size()) {
@@ -2165,7 +2154,7 @@ index 696115476b83..25a9a1a9f210 100644
    ctx.stack.fp = ctx.stack.unwindingFP;
    frame = reinterpret_cast<BaselineFrame*>(
        reinterpret_cast<uintptr_t>(ctx.stack.fp) - BaselineFrame::Size());
-@@ -9226,7 +9371,6 @@ unwind_ret:
+@@ -9200,7 +9345,6 @@ unwind_ret:
    from_unwind = true;
    goto do_return;
  
@@ -2173,7 +2162,7 @@ index 696115476b83..25a9a1a9f210 100644
  debug:;
    {
      TRACE_PRINTF("hit debug point\n");
-@@ -9239,7 +9383,6 @@ debug:;
+@@ -9213,7 +9357,6 @@ debug:;
      TRACE_PRINTF("HandleDebugTrap done\n");
    }
    goto dispatch;
@@ -2181,7 +2170,7 @@ index 696115476b83..25a9a1a9f210 100644
  }
  
  /*
-@@ -9306,9 +9449,10 @@ bool PortableBaselineTrampoline(JSContext* cx, size_t argc, Value* argv,
+@@ -9280,9 +9423,10 @@ bool PortableBaselineTrampoline(JSContext* cx, size_t argc, Value* argv,
    jsbytecode* pc = script->code();
    ImmutableScriptData* isd = script->immutableScriptData();
    PBIResult ret;
@@ -2195,7 +2184,7 @@ index 696115476b83..25a9a1a9f210 100644
    switch (ret) {
      case PBIResult::Ok:
      case PBIResult::UnwindRet:
-@@ -9380,5 +9524,65 @@ bool PortablebaselineInterpreterStackCheck(JSContext* cx, RunState& state,
+@@ -9357,5 +9501,65 @@ bool PortablebaselineInterpreterStackCheck(JSContext* cx, RunState& state,
    return (top - base) >= needed;
  }
  
@@ -2262,10 +2251,10 @@ index 696115476b83..25a9a1a9f210 100644
  }  // namespace pbl
  }  // namespace js
 diff --git a/js/src/vm/PortableBaselineInterpret.h b/js/src/vm/PortableBaselineInterpret.h
-index 7bc49e309e6e..46f80d1ae585 100644
+index 9288843e7e43..d6348caec257 100644
 --- a/js/src/vm/PortableBaselineInterpret.h
 +++ b/js/src/vm/PortableBaselineInterpret.h
-@@ -329,16 +329,26 @@ enum class PBIResult {
+@@ -328,16 +328,26 @@ enum class PBIResult {
    UnwindRet,
  };
  
@@ -2337,3 +2326,19 @@ index 000000000000..fd805e3f943c
 +}  // namespace js
 +
 +#endif /* vm_Weval_h */
+diff --git a/js/src/vm/moz.build b/js/src/vm/moz.build
+index 2fb5b1cdc5bb..1c975fd8d7ab 100644
+--- a/js/src/vm/moz.build
++++ b/js/src/vm/moz.build
+@@ -153,6 +153,11 @@ else:
+ if CONFIG["USE_LIBZ_RS"]:
+     DEFINES["USE_LIBZ_RS"] = True
+ 
++if CONFIG["ENABLE_JS_PBL_WEVAL"]:
++    LOCAL_INCLUDES += [
++        "../../../third_party/weval"
++    ]
++
+ if CONFIG["FUZZING_JS_FUZZILLI"]:
+     include("/tools/fuzzing/libfuzzer-config.mozbuild")
+ 

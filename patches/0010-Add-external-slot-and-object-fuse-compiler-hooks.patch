@@ -33,7 +33,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
 ---
  js/public/ExternalCompilerHooks.h             |  45 ++++
  js/src/builtin/Object.cpp                     |  14 +-
- js/src/builtin/TestingFunctions.cpp           | 238 ++++++++++++++++++
+ js/src/builtin/TestingFunctions.cpp           | 240 ++++++++++++++++++
  .../external-compiler/assign-slot-policy.js   |  20 ++
  .../object-fuse-notifications.js              |  32 +++
  .../tests/external-compiler/permuted-slots.js | 205 +++++++++++++++
@@ -41,23 +41,24 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/jit/VMFunctions.cpp                    |   3 +
  js/src/vm/ExternalCompilerHooks.cpp           |  36 +++
  js/src/vm/JSContext.h                         |   5 +
- js/src/vm/NativeObject.h                      |   9 +
+ js/src/vm/NativeObject.cpp                    |  13 +
+ js/src/vm/NativeObject.h                      |  18 ++
  js/src/vm/ObjectFlags-inl.h                   |   6 +
  js/src/vm/ObjectFlags.h                       |  10 +
  js/src/vm/ObjectFuse.cpp                      |  13 +
  js/src/vm/ObjectFuse.h                        |   4 +
  js/src/vm/PlainObject.cpp                     |   4 +-
- js/src/vm/PropMap.cpp                         |  93 ++++++-
- js/src/vm/PropMap.h                           |  30 ++-
+ js/src/vm/PropMap.cpp                         | 126 ++++++++-
+ js/src/vm/PropMap.h                           |  38 ++-
  js/src/vm/Shape.cpp                           | 125 ++++++++-
  js/src/vm/Shape.h                             |  39 +++
- 20 files changed, 924 insertions(+), 12 deletions(-)
+ 21 files changed, 989 insertions(+), 12 deletions(-)
  create mode 100644 js/src/jit-test/tests/external-compiler/assign-slot-policy.js
  create mode 100644 js/src/jit-test/tests/external-compiler/object-fuse-notifications.js
  create mode 100644 js/src/jit-test/tests/external-compiler/permuted-slots.js
 
 diff --git a/js/public/ExternalCompilerHooks.h b/js/public/ExternalCompilerHooks.h
-index 741ff49a52f1..c349ab8ad5ed 100644
+index b8006e1c9472..d2bb1ccf202a 100644
 --- a/js/public/ExternalCompilerHooks.h
 +++ b/js/public/ExternalCompilerHooks.h
 @@ -37,6 +37,8 @@
@@ -106,7 +107,7 @@ index 741ff49a52f1..c349ab8ad5ed 100644
    // Script entry. Every script carries a pointer-sized external word, zero
    // at birth; the engine consults these only for scripts whose word is
    // nonzero.
-@@ -153,6 +178,26 @@ extern JS_PUBLIC_API void ExternalPropertyAdded(JSContext* cx,
+@@ -158,6 +183,26 @@ extern JS_PUBLIC_API void ExternalPropertyAdded(JSContext* cx,
                                                  NativeObject* obj,
                                                  JS::PropertyKey id,
                                                  uint32_t slot);
@@ -134,10 +135,10 @@ index 741ff49a52f1..c349ab8ad5ed 100644
  }  // namespace js
  
 diff --git a/js/src/builtin/Object.cpp b/js/src/builtin/Object.cpp
-index d845de248ae8..cb025f56fb95 100644
+index 2de3f5cb19b9..aed88116e950 100644
 --- a/js/src/builtin/Object.cpp
 +++ b/js/src/builtin/Object.cpp
-@@ -878,6 +878,12 @@ void PlainObjectAssignCache::assertValid() const {
+@@ -877,6 +877,12 @@ void PlainObjectCopyPropsCache::assertValid() const {
    if (fromPlain->getDenseInitializedLength() > 0 || fromPlain->isIndexed()) {
      return true;
    }
@@ -147,10 +148,10 @@ index d845de248ae8..cb025f56fb95 100644
 +  if (fromPlain->shape()->hasPermutedSlots()) {
 +    return true;
 +  }
-   MOZ_ASSERT(!fromPlain->getClass()->getNewEnumerate());
-   MOZ_ASSERT(!fromPlain->getClass()->getEnumerate());
+   MOZ_ASSERT(!ClassCanHaveExtraEnumeratedProperties(fromPlain->getClass()));
  
-@@ -888,6 +894,12 @@ void PlainObjectAssignCache::assertValid() const {
+   // Empty |from| objects are common, so check for this first.
+@@ -886,6 +892,12 @@ void PlainObjectCopyPropsCache::assertValid() const {
    }
  
    Handle<PlainObject*> toPlain = to.as<PlainObject>();
@@ -163,28 +164,28 @@ index d845de248ae8..cb025f56fb95 100644
    if (!CanAddNewPropertyExcludingProtoFast(toPlain)) {
      return true;
    }
-@@ -1030,7 +1042,7 @@ void PlainObjectAssignCache::assertValid() const {
+@@ -995,7 +1007,7 @@ void PlainObjectCopyPropsCache::assertValid() const {
    // more complicated slot layout (the slot numbers may not match the property
    // definition order and the slots may contain holes).
    if (toWasEmpty && hasOnlyEnumerableProps && !fromPlain->inDictionaryMode() &&
 -      !toPlain->inDictionaryMode()) {
 +      !toPlain->inDictionaryMode() && !toPlain->shape()->hasPermutedSlots()) {
-     PlainObjectAssignCache& cache = cx->realm()->plainObjectAssignCache;
+     PlainObjectCopyPropsCache& cache = cx->realm()->plainObjectAssignCache;
      cache.fill(&origToShape->asShared(), fromPlain->sharedShape(),
                 toPlain->sharedShape());
 diff --git a/js/src/builtin/TestingFunctions.cpp b/js/src/builtin/TestingFunctions.cpp
-index eb04d37ce7ef..57fe47087e63 100644
+index c3e10f21c624..8fde7871d139 100644
 --- a/js/src/builtin/TestingFunctions.cpp
 +++ b/js/src/builtin/TestingFunctions.cpp
-@@ -83,6 +83,7 @@
+@@ -80,6 +80,7 @@
  #include "js/experimental/JSStencil.h"  // JS::Stencil, JS::EncodeStencil, JS::DecodeStencil, JS::InstantiateGlobalStencil
  #include "js/experimental/PCCountProfiling.h"  // JS::{Start,Stop}PCCountProfiling, JS::PurgePCCounts, JS::GetPCCountScript{Count,Summary,Contents}
  #include "js/experimental/TypedData.h"         // JS_GetObjectAsUint8Array
 +#include "js/ExternalCompilerHooks.h"
  #include "js/friend/DumpFunctions.h"  // js::Dump{Backtrace,Heap,Object}, JS::FormatStackDump, js::IgnoreNurseryObjects
  #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
- #include "js/friend/WindowProxy.h"    // js::ToWindowProxyIfWindow
-@@ -154,6 +155,7 @@
+ #include "js/friend/PerformanceHint.h"  // js::SetRealmIsDyingHint
+@@ -155,6 +156,7 @@
  #include "vm/JSObject-inl.h"
  #include "vm/NativeObject-inl.h"
  #include "vm/ObjectFlags-inl.h"
@@ -192,7 +193,7 @@ index eb04d37ce7ef..57fe47087e63 100644
  #include "vm/StringType-inl.h"
  #include "wasm/WasmInstance-inl.h"
  
-@@ -8545,6 +8547,215 @@ static bool NumAllocSitesPretenured(JSContext* cx, unsigned argc, Value* vp) {
+@@ -8824,6 +8826,217 @@ static bool NumAllocSitesPretenured(JSContext* cx, unsigned argc, Value* vp) {
    return true;
  }
  
@@ -255,8 +256,9 @@ index eb04d37ce7ef..57fe47087e63 100644
 +  }
 +  Rooted<PlainObject*> src(cx, &args[0].toObject().as<PlainObject>());
 +  RootedObject proto(cx, nullptr);
-+  Rooted<PlainObject*> dst(cx, NewPlainObjectWithProtoAndAllocKind(
-+                                   cx, proto, src->allocKindForTenure()));
++  Rooted<PlainObject*> dst(
++      cx, NewPlainObjectWithProto(cx, proto,
++                                  {.allocKind = src->allocKindForTenure()}));
 +  if (!dst ||
 +      !JS_InitializePropertiesFromCompatibleNativeObject(cx, dst, src)) {
 +    return false;
@@ -285,7 +287,8 @@ index eb04d37ce7ef..57fe47087e63 100644
 +    return false;
 +  }
 +  for (ShapePropertyIter<NoGC> iter(obj->shape()); !iter.done(); iter++) {
-+    if (iter->hasSlot() && !fuse->tryOptimizeConstantProperty(*iter)) {
++    if (iter->hasSlot() &&
++        !fuse->tryOptimizeConstantProperty(iter->key(), *iter)) {
 +      JS_ReportErrorASCII(cx, "unable to mark property constant");
 +      return false;
 +    }
@@ -408,7 +411,7 @@ index eb04d37ce7ef..57fe47087e63 100644
  static bool GetLcovInfo(JSContext* cx, unsigned argc, Value* vp) {
    CallArgs args = CallArgsFromVp(argc, vp);
  
-@@ -10986,6 +11197,33 @@ JS_FOR_WASM_FEATURES(WASM_FEATURE)
+@@ -11438,6 +11651,33 @@ JS_FOR_WASM_FEATURES(WASM_FEATURE)
  "  Return the number of allocation sites that were pretenured for the current\n"
  "  global\n"),
  
@@ -718,10 +721,10 @@ index 000000000000..8e6ef9c44131
 +compatibleCopy.extra = 13;
 +assertEq(compatibleCopy.low + compatibleCopy.extra, 24);
 diff --git a/js/src/jit/CacheIR.cpp b/js/src/jit/CacheIR.cpp
-index 0b8127675399..70a50e6e95f8 100644
+index 1a9743ed6453..c74baafadd45 100644
 --- a/js/src/jit/CacheIR.cpp
 +++ b/js/src/jit/CacheIR.cpp
-@@ -5609,6 +5609,11 @@ AttachDecision SetPropIRGenerator::tryAttachAddSlotStub(
+@@ -5612,6 +5612,11 @@ AttachDecision SetPropIRGenerator::tryAttachAddSlotStub(
      return AttachDecision::NoAction;
    }
  
@@ -734,11 +737,11 @@ index 0b8127675399..70a50e6e95f8 100644
  
    // The property must be the last added property of the object.
 diff --git a/js/src/jit/VMFunctions.cpp b/js/src/jit/VMFunctions.cpp
-index 4e0563f9c3ff..a3e23d939c01 100644
+index 9c17f376119b..67a994496408 100644
 --- a/js/src/jit/VMFunctions.cpp
 +++ b/js/src/jit/VMFunctions.cpp
-@@ -2345,7 +2345,10 @@ static bool TryAddOrSetPlainObjectProperty(JSContext* cx,
-   bool res = AddDataPropertyToPlainObject(cx, obj, keyRoot, value, &resultSlot);
+@@ -2405,7 +2405,10 @@ static bool TryAddOrSetNativeObjectProperty(JSContext* cx,
+                                                   &resultSlot);
  
    if constexpr (UseCache) {
 +    // A transition to permuted slots may skip slots (initialized by the add)
@@ -800,10 +803,10 @@ index 6c79aa7df56c..c20ce8313fdb 100644
 +  return NativeObject::addPropertyWithShape(cx, obj, newShape, slot);
 +}
 diff --git a/js/src/vm/JSContext.h b/js/src/vm/JSContext.h
-index 7b1aad337156..d9207b97bcd5 100644
+index 5018fce305c2..cefc2541e370 100644
 --- a/js/src/vm/JSContext.h
 +++ b/js/src/vm/JSContext.h
-@@ -482,6 +482,11 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
+@@ -536,6 +536,11 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
      return externalCompilerHooks_;
    }
    void* getExternalCompilerState() const { return externalCompilerState_; }
@@ -815,11 +818,51 @@ index 7b1aad337156..d9207b97bcd5 100644
    void setExternalCompilerState(void* state) {
      externalCompilerState_ = state;
    }
+diff --git a/js/src/vm/NativeObject.cpp b/js/src/vm/NativeObject.cpp
+index fc7d75f6de8b..b729154d4f4f 100644
+--- a/js/src/vm/NativeObject.cpp
++++ b/js/src/vm/NativeObject.cpp
+@@ -2980,6 +2980,19 @@ bool js::CopyDataPropertiesNative(JSContext* cx, Handle<PlainObject*> target,
+     }
+   }
+ 
++  // As in TryAssignPlain (builtin/Object.cpp): the cache and shape-reuse paths
++  // copy slot i to slot i and assume property i is in slot i, which permuted
++  // slots do not.
++  if (from->shape()->hasPermutedSlots()) {
++    return true;
++  }
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // Bulk shape reuse bypasses the tier's placement and addition callbacks.
++  if (target->externalWord()) {
++    return true;
++  }
++#endif
++
+   // Check the plainObjectSpreadCache.
+   if (!excludedItems) {
+     const PlainObjectCopyPropsCache& cache =
 diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
-index 12dbdc35eb22..1b6b92165729 100644
+index 254777b01fd4..ece5a8e62a6f 100644
 --- a/js/src/vm/NativeObject.h
 +++ b/js/src/vm/NativeObject.h
-@@ -1058,6 +1058,15 @@ class NativeObject : public JSObject {
+@@ -689,6 +689,15 @@ inline size_t NativeObjectSlotSpanForTracing(Shape* shape,
+ 
+   uint32_t propMapLength = shapeFlags & Shape::MAP_LENGTH_MASK;
+ 
++  // With permuted slots (ObjectFlag::PermutedSlots, mirrored in the immutable
++  // flags word) the last property need not hold the top slot; as in
++  // SharedShape::slotSpanSlow, take the highest slot instead, with a walk
++  // that reads the map header flags and links the tracing-safe way.
++  if (MOZ_UNLIKELY(shapeFlags & Shape::PERMUTED_SLOTS_BIT)) {
++    return SharedPropMap::permutedSlotSpanForTracing(clasp, propMap,
++                                                     propMapLength);
++  }
++
+   // The data read by SharedPropMap::lastUsedSlot is immutable so this doesn't
+   // need to be atomic.
+   return SharedPropMap::slotSpan(clasp, propMap, propMapLength);
+@@ -1298,6 +1307,15 @@ class NativeObject : public JSObject {
      return addProperty(cx, obj, id, flags, slotOut);
    }
  
@@ -836,10 +879,10 @@ index 12dbdc35eb22..1b6b92165729 100644
                                          Handle<NativeObject*> obj, HandleId id,
                                          uint32_t slot, PropertyFlags flags);
 diff --git a/js/src/vm/ObjectFlags-inl.h b/js/src/vm/ObjectFlags-inl.h
-index e2b468bdb865..abe01f89c1c8 100644
+index 36605957eb64..9be6134d9d7d 100644
 --- a/js/src/vm/ObjectFlags-inl.h
 +++ b/js/src/vm/ObjectFlags-inl.h
-@@ -77,6 +77,12 @@ inline ObjectFlags CopyPropMapObjectFlags(ObjectFlags dest,
+@@ -75,6 +75,12 @@ inline ObjectFlags CopyPropMapObjectFlags(ObjectFlags dest,
    if (source.hasFlag(ObjectFlag::NeedsProxyGetSetResultValidation)) {
      dest.setFlag(ObjectFlag::NeedsProxyGetSetResultValidation);
    }
@@ -853,13 +896,13 @@ index e2b468bdb865..abe01f89c1c8 100644
  }
  
 diff --git a/js/src/vm/ObjectFlags.h b/js/src/vm/ObjectFlags.h
-index 9c8951b3557f..ace560518632 100644
+index b8c74221fe96..5d7b7e826779 100644
 --- a/js/src/vm/ObjectFlags.h
 +++ b/js/src/vm/ObjectFlags.h
-@@ -101,6 +101,16 @@ enum class ObjectFlag : uint32_t {
-   // If set, the object may have an accessor property where the getter or setter
-   // is a non-JSFunction callable object.
-   HasNonFunctionAccessor = 1 << 17,
+@@ -100,6 +100,16 @@ enum class ObjectFlag : uint32_t {
+   // constructor. This excludes it from IsOptimizableRegExpObject.
+   // If we run out of flag bits, this would be a good flag to try aliasing.
+   LegacyFeaturesDisabled = 1 << 18,
 +
 +  // If set, the shape's slot numbers may not follow property insertion order:
 +  // a property was placed in a slot of the embedder's choosing (see
@@ -869,15 +912,15 @@ index 9c8951b3557f..ace560518632 100644
 +  // shape derived from one that has it. Code that assumes slot i holds the
 +  // i-th property, or that the last property holds the top slot, must check
 +  // it. Only set with JS_EXTERNAL_COMPILER_HOOKS.
-+  PermutedSlots = 1 << 18,
++  PermutedSlots = 1 << 19,
  };
  
  using ObjectFlags = EnumFlags<ObjectFlag>;
 diff --git a/js/src/vm/ObjectFuse.cpp b/js/src/vm/ObjectFuse.cpp
-index 1d235675a0fb..38c0e7be6f76 100644
+index 79fb28e15ee2..bf00ce4f7a57 100644
 --- a/js/src/vm/ObjectFuse.cpp
 +++ b/js/src/vm/ObjectFuse.cpp
-@@ -9,7 +9,9 @@
+@@ -7,7 +7,9 @@
  #include "gc/Barrier.h"
  #include "gc/StableCellHasher.h"
  #include "jit/InvalidationScriptSet.h"
@@ -887,7 +930,7 @@ index 1d235675a0fb..38c0e7be6f76 100644
  #include "vm/JSScript.h"
  #include "vm/NativeObject.h"
  #include "vm/PropertyInfo.h"
-@@ -50,6 +52,15 @@ bool ObjectFuse::ensurePropertyStateLength(uint32_t length) {
+@@ -48,6 +50,15 @@ bool ObjectFuse::ensurePropertyStateLength(uint32_t length) {
    return true;
  }
  
@@ -903,7 +946,7 @@ index 1d235675a0fb..38c0e7be6f76 100644
  bool ObjectFuse::addDependency(uint32_t propSlot,
                                 const jit::IonScriptKey& ionScript) {
    MOZ_ASSERT(getPropertyState(propSlot) == PropertyState::Constant);
-@@ -66,6 +77,7 @@ bool ObjectFuse::addDependency(uint32_t propSlot,
+@@ -64,6 +75,7 @@ bool ObjectFuse::addDependency(uint32_t propSlot,
  void ObjectFuse::invalidateDependentIonScriptsForProperty(JSContext* cx,
                                                            PropertyInfo prop,
                                                            const char* reason) {
@@ -911,19 +954,19 @@ index 1d235675a0fb..38c0e7be6f76 100644
    if (auto p = dependencies_.lookup(prop.slot())) {
      p->value().invalidateAndClear(cx, reason);
      dependencies_.remove(p);
-@@ -74,6 +86,7 @@ void ObjectFuse::invalidateDependentIonScriptsForProperty(JSContext* cx,
+@@ -72,6 +84,7 @@ void ObjectFuse::invalidateDependentIonScriptsForProperty(JSContext* cx,
  
  void ObjectFuse::invalidateAllDependentIonScripts(JSContext* cx,
                                                    const char* reason) {
 +  notifyExternalTier(cx, UINT32_MAX);
-   for (auto r = dependencies_.all(); !r.empty(); r.popFront()) {
-     r.front().value().invalidateAndClear(cx, reason);
+   for (auto iter = dependencies_.iter(); !iter.done(); iter.next()) {
+     iter.get().value().invalidateAndClear(cx, reason);
    }
 diff --git a/js/src/vm/ObjectFuse.h b/js/src/vm/ObjectFuse.h
-index 40d84d63e49d..c09e91476b41 100644
+index 95347740a3c0..efb7d5a05d51 100644
 --- a/js/src/vm/ObjectFuse.h
 +++ b/js/src/vm/ObjectFuse.h
-@@ -131,6 +131,10 @@ class ObjectFuse {
+@@ -130,6 +130,10 @@ class ObjectFuse {
                                                  PropertyInfo prop,
                                                  const char* reason);
    void invalidateAllDependentIonScripts(JSContext* cx, const char* reason);
@@ -935,10 +978,10 @@ index 40d84d63e49d..c09e91476b41 100644
    static constexpr uint32_t propertyStateShift(uint32_t propSlot) {
      return (propSlot % NumPropsPerWord) * NumBitsPerProp;
 diff --git a/js/src/vm/PlainObject.cpp b/js/src/vm/PlainObject.cpp
-index a4d0e7a19bf5..f6766b4670ed 100644
+index 95eab93ecd4e..0c2c4012a9cd 100644
 --- a/js/src/vm/PlainObject.cpp
 +++ b/js/src/vm/PlainObject.cpp
-@@ -309,7 +309,9 @@ static PlainObject* NewPlainObjectWithProperties(
+@@ -259,7 +259,9 @@ static PlainObject* NewPlainObjectWithProperties(
      }
    }
  
@@ -950,10 +993,10 @@ index a4d0e7a19bf5..f6766b4670ed 100644
      MOZ_ASSERT(obj->slotSpan() == properties.length());
      cache.add(obj->sharedShape());
 diff --git a/js/src/vm/PropMap.cpp b/js/src/vm/PropMap.cpp
-index dacb66fbcd00..9a1ab2b36608 100644
+index 5090478511b0..16eab8020c86 100644
 --- a/js/src/vm/PropMap.cpp
 +++ b/js/src/vm/PropMap.cpp
-@@ -239,15 +239,62 @@ bool SharedPropMap::addChild(JSContext* cx, SharedPropMapAndIndex child,
+@@ -236,15 +236,95 @@ bool SharedPropMap::addChild(JSContext* cx, SharedPropMapAndIndex child,
    return true;
  }
  
@@ -976,6 +1019,39 @@ index dacb66fbcd00..9a1ab2b36608 100644
 +      break;
 +    }
 +    cur = cur->asNormal()->previous();
++    len = PropMap::Capacity;
++  }
++  return span;
++}
++
++// static
++uint32_t SharedPropMap::permutedSlotSpanForTracing(const JSClass* clasp,
++                                                   const SharedPropMap* map,
++                                                   uint32_t mapLength) {
++  MOZ_ASSERT(clasp->isNativeObject());
++  uint32_t span = JSCLASS_RESERVED_SLOTS(clasp);
++  const SharedPropMap* cur = map;
++  uint32_t len = mapLength;
++  while (cur) {
++    uintptr_t flags = cur->getFlagsForTracing();
++    bool isCompact = flags & IsCompactFlag;
++    for (uint32_t i = 0; i < len; i++) {
++      PropertyInfo prop =
++          isCompact
++              ? PropertyInfo(
++                    static_cast<const CompactPropMap*>(cur)->propInfos_[i])
++              : static_cast<const NormalPropMap*>(cur)
++                    ->linkedData_.propInfos[i];
++      if (prop.hasSlot()) {
++        span = std::max(span, prop.slot() + 1);
++      }
++    }
++    if (isCompact || !(flags & HasPrevFlag)) {
++      break;
++    }
++    cur = static_cast<const SharedPropMap*>(
++        static_cast<const NormalPropMap*>(cur)
++            ->linkedData_.previous.getForTracing());
 +    len = PropMap::Capacity;
 +  }
 +  return span;
@@ -1019,7 +1095,7 @@ index dacb66fbcd00..9a1ab2b36608 100644
  
    if (MOZ_UNLIKELY(*slot > SHAPE_MAXIMUM_SLOT)) {
      ReportAllocationOverflow(cx);
-@@ -261,6 +308,40 @@ bool SharedPropMap::addProperty(JSContext* cx, const JSClass* clasp,
+@@ -258,6 +338,40 @@ bool SharedPropMap::addProperty(JSContext* cx, const JSClass* clasp,
    return addPropertyInternal(cx, map, mapLength, id, prop);
  }
  
@@ -1060,7 +1136,7 @@ index dacb66fbcd00..9a1ab2b36608 100644
  // static
  bool SharedPropMap::addPropertyInReservedSlot(
      JSContext* cx, const JSClass* clasp, MutableHandle<SharedPropMap*> map,
-@@ -292,7 +373,8 @@ bool SharedPropMap::addPropertyWithKnownSlot(JSContext* cx,
+@@ -289,7 +403,8 @@ bool SharedPropMap::addPropertyWithKnownSlot(JSContext* cx,
                                       objectFlags);
    }
  
@@ -1070,7 +1146,7 @@ index dacb66fbcd00..9a1ab2b36608 100644
    MOZ_RELEASE_ASSERT(slot <= SHAPE_MAXIMUM_SLOT);
  
    *objectFlags =
-@@ -1316,7 +1398,8 @@ void PropMap::checkConsistency(NativeObject* obj) const {
+@@ -1307,7 +1422,8 @@ void PropMap::checkConsistency(NativeObject* obj) const {
        if (prop.hasSlot()) {
          MOZ_ASSERT_IF((curMap != this || index < mapLength),
                        prop.slot() < obj->slotSpan());
@@ -1081,10 +1157,10 @@ index dacb66fbcd00..9a1ab2b36608 100644
        }
  
 diff --git a/js/src/vm/PropMap.h b/js/src/vm/PropMap.h
-index 0dcf416f32cc..689315f9f675 100644
+index 1f0db8fc1807..2c28fbaa2e7a 100644
 --- a/js/src/vm/PropMap.h
 +++ b/js/src/vm/PropMap.h
-@@ -690,6 +690,18 @@ class SharedPropMap : public PropMap {
+@@ -698,6 +698,26 @@ class SharedPropMap : public PropMap {
      return std::max(lastSlot + 1, numReserved);
    }
  
@@ -1095,6 +1171,14 @@ index 0dcf416f32cc..689315f9f675 100644
 +                                   const SharedPropMap* map,
 +                                   uint32_t mapLength);
 +
++  // permutedSlotSpan for GC tracing, which may run concurrently with the
++  // mutator: the map header flags (which also hold mutable bits such as
++  // HasChildrenSetFlag) are read with getFlagsForTracing and the previous
++  // links with getForTracing. The property infos are immutable.
++  static uint32_t permutedSlotSpanForTracing(const JSClass* clasp,
++                                             const SharedPropMap* map,
++                                             uint32_t mapLength);
++
 +  // Whether no property of map/mapLength has slot `slot`. Linear in the number
 +  // of properties.
 +  static bool slotIsUnused(const SharedPropMap* map, uint32_t mapLength,
@@ -1103,7 +1187,7 @@ index 0dcf416f32cc..689315f9f675 100644
    static uint32_t indexOfNextProperty(uint32_t index) {
      MOZ_ASSERT(index < PropMap::Capacity);
      return (index + 1) % PropMap::Capacity;
-@@ -697,10 +709,26 @@ class SharedPropMap : public PropMap {
+@@ -705,10 +725,26 @@ class SharedPropMap : public PropMap {
  
    // Add a new property to this map. Returns the new map/mapLength, slot number,
    // and object flags.
@@ -1132,10 +1216,10 @@ index 0dcf416f32cc..689315f9f675 100644
    // Like addProperty, but for when the slot number is a reserved slot. A few
    // builtin objects use this for initial properties.
 diff --git a/js/src/vm/Shape.cpp b/js/src/vm/Shape.cpp
-index 4512f7509e62..9e19b273a99c 100644
+index d759816c9112..50299037c8da 100644
 --- a/js/src/vm/Shape.cpp
 +++ b/js/src/vm/Shape.cpp
-@@ -344,6 +344,19 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
+@@ -350,6 +350,19 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
      return false;
    }
  
@@ -1155,7 +1239,7 @@ index 4512f7509e62..9e19b273a99c 100644
    if (auto* shape = LookupShapeForAdd(obj->shape(), id, flags, slot)) {
      if (!obj->setShapeAndAddNewSlot(cx, shape, *slot)) {
        return false;
-@@ -387,7 +400,8 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
+@@ -393,7 +406,8 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
    uint32_t mapLength = obj->shape()->propMapLength();
  
    if (!SharedPropMap::addProperty(cx, clasp, &map, &mapLength, id, flags,
@@ -1165,7 +1249,7 @@ index 4512f7509e62..9e19b273a99c 100644
      return false;
    }
  
-@@ -441,6 +455,98 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
+@@ -447,6 +461,98 @@ bool NativeObject::addProperty(JSContext* cx, Handle<NativeObject*> obj,
    return true;
  }
  
@@ -1264,7 +1348,7 @@ index 4512f7509e62..9e19b273a99c 100644
  void Shape::maybeCacheIterator(JSContext* cx, PropertyIteratorObject* iter) {
    if (!cache().isNone() && !cache().isIterator()) {
      // If we're already caching other shape data, skip caching the iterator.
-@@ -599,7 +705,12 @@ bool NativeObject::changeProperty(JSContext* cx, Handle<NativeObject*> obj,
+@@ -605,7 +711,12 @@ bool NativeObject::changeProperty(JSContext* cx, Handle<NativeObject*> obj,
  
    bool isLast = propMap == map && propIndex == mapLength - 1;
    bool nonLastCustomProperty = oldProp.isCustomDataProperty() && !isLast;
@@ -1278,7 +1362,7 @@ index 4512f7509e62..9e19b273a99c 100644
      // To change a property, we get the previous propmap and then call
      // addProperty to re-add the changed property with the new flags. If it
      // is not the last property, we have to re-add all the following
-@@ -620,8 +731,11 @@ bool NativeObject::changeProperty(JSContext* cx, Handle<NativeObject*> obj,
+@@ -626,8 +737,11 @@ bool NativeObject::changeProperty(JSContext* cx, Handle<NativeObject*> obj,
          return false;
        }
      } else {
@@ -1291,7 +1375,7 @@ index 4512f7509e62..9e19b273a99c 100644
          return false;
        }
      }
-@@ -921,8 +1035,11 @@ bool NativeObject::removeProperty(JSContext* cx, Handle<NativeObject*> obj,
+@@ -933,8 +1047,11 @@ bool NativeObject::removeProperty(JSContext* cx, Handle<NativeObject*> obj,
      // 4) We add a new property P, reuse Shape S1, and mark P Constant.
      // 5) We use the SetSlot IC stub again but this is invalid because P is
      //    still marked Constant.
@@ -1305,10 +1389,10 @@ index 4512f7509e62..9e19b273a99c 100644
  
        Rooted<SharedPropMap*> sharedMap(cx, map->asShared());
 diff --git a/js/src/vm/Shape.h b/js/src/vm/Shape.h
-index 4ddbea5da1d0..9a6730dfcec4 100644
+index f9da9cf56b1a..2b8ca7a58f05 100644
 --- a/js/src/vm/Shape.h
 +++ b/js/src/vm/Shape.h
-@@ -358,6 +358,10 @@ class Shape : public gc::CellWithTenuredGCPointer<gc::TenuredCell, BaseShape> {
+@@ -360,6 +360,10 @@ class Shape : public gc::CellWithTenuredGCPointer<gc::TenuredCell, BaseShape> {
      SMALL_SLOTSPAN_MAX = 0x3ff,  // 10 bits.
      SMALL_SLOTSPAN_SHIFT = 11,
      SMALL_SLOTSPAN_MASK = uint32_t(SMALL_SLOTSPAN_MAX << SMALL_SLOTSPAN_SHIFT),
@@ -1318,8 +1402,8 @@ index 4ddbea5da1d0..9a6730dfcec4 100644
 +    PERMUTED_SLOTS_BIT = 1 << 21,
    };
  
-   uint32_t immutableFlags;   // Immutable flags, see above.
-@@ -401,6 +405,15 @@ class Shape : public gc::CellWithTenuredGCPointer<gc::TenuredCell, BaseShape> {
+  protected:
+@@ -404,6 +408,15 @@ class Shape : public gc::CellWithTenuredGCPointer<gc::TenuredCell, BaseShape> {
      return objectFlags_.hasFlag(flag);
    }
  
@@ -1335,7 +1419,7 @@ index 4ddbea5da1d0..9a6730dfcec4 100644
   protected:
    Shape(Kind kind, BaseShape* base, ObjectFlags objectFlags)
        : CellWithTenuredGCPointer(base),
-@@ -495,6 +508,9 @@ class NativeShape : public Shape {
+@@ -505,6 +518,9 @@ class NativeShape : public Shape {
      MOZ_ASSERT(base->clasp()->isNativeObject());
      MOZ_ASSERT(mapLength <= PropMap::Capacity);
      immutableFlags |= (nfixed << FIXED_SLOTS_SHIFT) | mapLength;
@@ -1345,7 +1429,7 @@ index 4ddbea5da1d0..9a6730dfcec4 100644
    }
  
   public:
-@@ -520,6 +536,11 @@ class NativeShape : public Shape {
+@@ -533,6 +549,11 @@ class NativeShape : public Shape {
    // For JIT usage.
    static constexpr uint32_t fixedSlotsMask() { return FIXED_SLOTS_MASK; }
    static constexpr uint32_t fixedSlotsShift() { return FIXED_SLOTS_SHIFT; }
@@ -1357,7 +1441,7 @@ index 4ddbea5da1d0..9a6730dfcec4 100644
  };
  
  // Shared shape for a NativeObject.
-@@ -572,6 +593,9 @@ class SharedShape : public NativeShape {
+@@ -585,6 +606,9 @@ class SharedShape : public NativeShape {
    uint32_t slotSpanSlow() const {
      MOZ_ASSERT(isShared());
      const JSClass* clasp = getObjectClass();
@@ -1367,8 +1451,8 @@ index 4ddbea5da1d0..9a6730dfcec4 100644
      return SharedPropMap::slotSpan(clasp, propMap(), propMapLength());
    }
    uint32_t slotSpan() const {
-@@ -585,6 +609,21 @@ class SharedShape : public NativeShape {
-     return slotSpanSlow();
+@@ -600,6 +624,21 @@ class SharedShape : public NativeShape {
+     return (immutableFlags & SMALL_SLOTSPAN_MASK) >> SMALL_SLOTSPAN_SHIFT;
    }
  
 +#ifdef JS_EXTERNAL_COMPILER_HOOKS

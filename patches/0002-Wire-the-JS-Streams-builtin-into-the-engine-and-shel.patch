@@ -29,7 +29,7 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/shell/js.cpp                           |   26 +
  js/src/shell/jsshell.h                        |    5 +
  .../ReadableStream/readable-stream-globals.js |  367 +++++
- js/src/vm/CommonPropertyNames.h               |   12 +
+ js/src/vm/CommonPropertyNames.h               |   13 +
  js/src/vm/GlobalObject.cpp                    |   23 +
  js/src/vm/List-inl.h                          |   65 +-
  js/src/vm/List.h                              |   13 +
@@ -37,15 +37,15 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
  js/src/vm/Runtime.h                           |   25 +
  js/xpconnect/src/XPCJSRuntime.cpp             |    1 +
  modules/libpref/init/StaticPrefList.yaml      |   16 +
- 24 files changed, 1939 insertions(+), 5 deletions(-)
+ 24 files changed, 1940 insertions(+), 5 deletions(-)
  create mode 100644 js/src/jsapi-tests/testReadableStream.cpp
  create mode 100644 js/src/tests/non262/ReadableStream/readable-stream-globals.js
 
 diff --git a/js/moz.configure b/js/moz.configure
-index 765c1de95f38..a363235983ab 100644
+index 5b4549c8d2dd..1327388db4a7 100644
 --- a/js/moz.configure
 +++ b/js/moz.configure
-@@ -233,6 +233,24 @@ set_config(
+@@ -206,6 +206,24 @@ set_config(
  )
  
  
@@ -71,10 +71,10 @@ index 765c1de95f38..a363235983ab 100644
  # =======================================================
  @depends(target, "--enable-portable-baseline-interp")
 diff --git a/js/public/ProtoKey.h b/js/public/ProtoKey.h
-index 7fdafc1956e5..140bb85c0d9e 100644
+index 4bb71da83291..c5bc4da86b8a 100644
 --- a/js/public/ProtoKey.h
 +++ b/js/public/ProtoKey.h
-@@ -158,7 +158,26 @@
+@@ -163,7 +163,26 @@
    REAL_IF_INTL(PlainYearMonth, OCLASP(temporal::PlainYearMonth))             \
    REAL_IF_INTL(PlainTime, OCLASP(temporal::PlainTime))                       \
    REAL_IF_INTL(TemporalNow, OCLASP(temporal::TemporalNow))                   \
@@ -103,10 +103,10 @@ index 7fdafc1956e5..140bb85c0d9e 100644
  // guarded by #ifdef.) It will break binary compatibility. Instead, create an
  // IF_<feature> macro and add it to the parameter list below and add a
 diff --git a/js/public/RealmOptions.h b/js/public/RealmOptions.h
-index 42b806b020bb..c9ea131fc65d 100644
+index dffea35d8e6c..77f9a08bdce8 100644
 --- a/js/public/RealmOptions.h
 +++ b/js/public/RealmOptions.h
-@@ -186,6 +186,19 @@ class JS_PUBLIC_API RealmCreationOptions {
+@@ -184,6 +184,19 @@ class JS_PUBLIC_API RealmCreationOptions {
    bool getCoopAndCoepEnabled() const;
    RealmCreationOptions& setCoopAndCoepEnabled(bool flag);
  
@@ -126,7 +126,7 @@ index 42b806b020bb..c9ea131fc65d 100644
    bool getToSourceEnabled() const { return toSource_; }
    RealmCreationOptions& setToSourceEnabled(bool flag) {
      toSource_ = flag;
-@@ -239,6 +252,7 @@ class JS_PUBLIC_API RealmCreationOptions {
+@@ -237,6 +250,7 @@ class JS_PUBLIC_API RealmCreationOptions {
    bool sharedMemoryAndAtomics_ = false;
    bool defineSharedArrayBufferConstructor_ = true;
    bool coopAndCoep_ = false;
@@ -135,11 +135,11 @@ index 42b806b020bb..c9ea131fc65d 100644
  
    bool secureContext_ = false;
 diff --git a/js/public/TypeDecls.h b/js/public/TypeDecls.h
-index ea95dc4e9875..cde4093aa993 100644
+index 7f0ea12920ba..cc132d409e00 100644
 --- a/js/public/TypeDecls.h
 +++ b/js/public/TypeDecls.h
-@@ -138,6 +138,12 @@ using jsid = JS::PropertyKey;
- #  define IF_EXPLICIT_RESOURCE_MANAGEMENT(x, ...) __VA_ARGS__
+@@ -130,4 +130,10 @@ using jsid = JS::PropertyKey;
+ #  define IF_DECORATORS(x, ...) __VA_ARGS__
  #endif
  
 +#ifdef MOZ_JS_STREAMS
@@ -148,14 +148,12 @@ index ea95dc4e9875..cde4093aa993 100644
 +#  define IF_JS_STREAMS(x, ...) __VA_ARGS__
 +#endif
 +
- // Helper macros to combine build flags
- // TODO: need to find more generalised way to combine build flags
- #if defined(ENABLE_EXPLICIT_RESOURCE_MANAGEMENT) || defined(ENABLE_DECORATORS)
+ #endif /* js_TypeDecls_h */
 diff --git a/js/public/Value.h b/js/public/Value.h
-index db428d9387e9..3a049f281e3a 100644
+index 88e28b2ca2fe..78e757d2da4f 100644
 --- a/js/public/Value.h
 +++ b/js/public/Value.h
-@@ -371,6 +371,24 @@ enum JSWhyMagic {
+@@ -379,6 +379,24 @@ enum JSWhyMagic {
    /** for local use */
    JS_GENERIC_MAGIC,
  
@@ -181,10 +179,10 @@ index db428d9387e9..3a049f281e3a 100644
     * When an error object is created without the error cause argument, we set
     * the error's cause slot to this magic value.
 diff --git a/js/public/friend/ErrorNumbers.msg b/js/public/friend/ErrorNumbers.msg
-index 96ce067fcaea..41e5ef114617 100644
+index 76a0f79c8b26..e1a0f2f77caa 100644
 --- a/js/public/friend/ErrorNumbers.msg
 +++ b/js/public/friend/ErrorNumbers.msg
-@@ -808,6 +808,66 @@ MSG_DEF(JSMSG_NOT_AN_ASYNC_GENERATOR,  0, JSEXN_TYPEERR, "Not an async generator
+@@ -817,6 +817,66 @@ MSG_DEF(JSMSG_NOT_AN_ASYNC_GENERATOR,  0, JSEXN_TYPEERR, "Not an async generator
  MSG_DEF(JSMSG_GET_ASYNC_ITER_RETURNED_PRIMITIVE, 0, JSEXN_TYPEERR, "[Symbol.asyncIterator]() returned a non-object value")
  MSG_DEF(JSMSG_SUSPENDED_QUEUE_NOT_EMPTY, 0, JSEXN_INTERNALERR, "Async generator is in invalid state due to debugger interaction")
  
@@ -252,10 +250,10 @@ index 96ce067fcaea..41e5ef114617 100644
  MSG_DEF(JSMSG_WASM_ERROR_CONSUMING_RESPONSE,             0, JSEXN_TYPEERR,  "WebAssembly: There was an error consuming the Response")
  MSG_DEF(JSMSG_WASM_BAD_RESPONSE_VALUE,                   0, JSEXN_TYPEERR,  "WebAssembly: Expected Response or Promise resolving to Response")
 diff --git a/js/src/builtin/TestingFunctions.cpp b/js/src/builtin/TestingFunctions.cpp
-index 7d269ff06bd5..eb04d37ce7ef 100644
+index d69dddd6f1f4..c3e10f21c624 100644
 --- a/js/src/builtin/TestingFunctions.cpp
 +++ b/js/src/builtin/TestingFunctions.cpp
-@@ -4962,6 +4962,12 @@ static bool RejectPromise(JSContext* cx, unsigned argc, Value* vp) {
+@@ -5196,6 +5196,12 @@ static bool RejectPromise(JSContext* cx, unsigned argc, Value* vp) {
    return result;
  }
  
@@ -268,7 +266,7 @@ index 7d269ff06bd5..eb04d37ce7ef 100644
  static unsigned finalizeCount = 0;
  
  static void finalize_counter_finalize(JS::GCContext* gcx, JSObject* obj) {
-@@ -10334,6 +10340,10 @@ JS_FN_HELP("rejectPromise", RejectPromise, 2, 0,
+@@ -10766,6 +10772,10 @@ JS_FN_HELP("rejectPromise", RejectPromise, 2, 0,
  "rejectPromise(promise, reason)",
  "  Reject a Promise by calling the JSAPI function JS::RejectPromise."),
  
@@ -280,10 +278,10 @@ index 7d269ff06bd5..eb04d37ce7ef 100644
  "makeFinalizeObserver()",
  "  Get a special object whose finalization increases the counter returned\n"
 diff --git a/js/src/frontend/FrontendContext.cpp b/js/src/frontend/FrontendContext.cpp
-index 3066ce4ec686..f12bea502951 100644
+index 80dcf1142f25..4782427cc446 100644
 --- a/js/src/frontend/FrontendContext.cpp
 +++ b/js/src/frontend/FrontendContext.cpp
-@@ -62,7 +62,7 @@ void FrontendContext::setStackQuota(JS::NativeStackSize stackSize) {
+@@ -61,7 +61,7 @@ void FrontendContext::setStackQuota(JS::NativeStackSize stackSize) {
    }
  #endif  // !__wasi__
  
@@ -292,7 +290,7 @@ index 3066ce4ec686..f12bea502951 100644
    setNativeStackLimitThread();
  #endif
  }
-@@ -250,7 +250,9 @@ static size_t GetTid() {
+@@ -272,7 +272,9 @@ static size_t GetTid() {
  }
  
  void FrontendContext::setNativeStackLimitThread() {
@@ -303,10 +301,10 @@ index 3066ce4ec686..f12bea502951 100644
  
  void FrontendContext::assertNativeStackLimitThread() {
 diff --git a/js/src/fuzz-tests/tests.cpp b/js/src/fuzz-tests/tests.cpp
-index b730db188eaf..85ea0c3b6bbf 100644
+index cc96bb10c28c..e25ecc389dae 100644
 --- a/js/src/fuzz-tests/tests.cpp
 +++ b/js/src/fuzz-tests/tests.cpp
-@@ -38,7 +38,10 @@ static const JSClass* getGlobalClass() {
+@@ -36,7 +36,10 @@ static const JSClass* getGlobalClass() {
  static JSObject* jsfuzz_createGlobal(JSContext* cx, JSPrincipals* principals) {
    /* Create the global object. */
    JS::RealmOptions options;
@@ -319,10 +317,10 @@ index b730db188eaf..85ea0c3b6bbf 100644
                              JS::FireOnNewGlobalHook, options);
  }
 diff --git a/js/src/jsapi-tests/moz.build b/js/src/jsapi-tests/moz.build
-index a76d1de55450..a6963f63d372 100644
+index bfadc461891b..b4d6e0680573 100644
 --- a/js/src/jsapi-tests/moz.build
 +++ b/js/src/jsapi-tests/moz.build
-@@ -182,6 +182,11 @@ if not CONFIG["JS_CODEGEN_NONE"]:
+@@ -187,6 +187,11 @@ if not CONFIG["JS_CODEGEN_NONE"]:
          "testsJit.cpp",
      ]
  
@@ -336,7 +334,7 @@ index a76d1de55450..a6963f63d372 100644
      UNIFIED_SOURCES += [
 diff --git a/js/src/jsapi-tests/testReadableStream.cpp b/js/src/jsapi-tests/testReadableStream.cpp
 new file mode 100644
-index 000000000000..ea987915d3b9
+index 000000000000..bcda99bf8975
 --- /dev/null
 +++ b/js/src/jsapi-tests/testReadableStream.cpp
 @@ -0,0 +1,1195 @@
@@ -503,7 +501,7 @@ index 000000000000..ea987915d3b9
 +  return &chunkVal.toObject();
 +}
 +
-+struct StreamTestFixture : public JSAPIRuntimeTest {
++struct StreamTestFixture : public jsapitest::RuntimeTest {
 +  virtual ~StreamTestFixture() {}
 +};
 +
@@ -1536,10 +1534,10 @@ index 000000000000..ea987915d3b9
 +    StreamTestFixture,
 +    testReadableStream_ReadableStreamDefaultReaderRead_CrossCompartment)
 diff --git a/js/src/jsapi-tests/tests.cpp b/js/src/jsapi-tests/tests.cpp
-index d515791104b6..21a86ed43dd9 100644
+index 3d0756217f81..71fb7003a0ad 100644
 --- a/js/src/jsapi-tests/tests.cpp
 +++ b/js/src/jsapi-tests/tests.cpp
-@@ -118,7 +118,9 @@ JSObject* JSAPIRuntimeTest::createGlobal(JSPrincipals* principals) {
+@@ -369,7 +369,9 @@ JSObject* RuntimeTest::createGlobal(JSPrincipals* principals) {
    /* Create the global object. */
    JS::RootedObject newGlobal(cx);
    JS::RealmOptions options;
@@ -1551,10 +1549,10 @@ index d515791104b6..21a86ed43dd9 100644
                                   JS::FireOnNewGlobalHook, options);
    if (!newGlobal) {
 diff --git a/js/src/moz.build b/js/src/moz.build
-index 121dfd9c76e9..a000e4a42dda 100644
+index 81a49f76945a..27e557bc0082 100644
 --- a/js/src/moz.build
 +++ b/js/src/moz.build
-@@ -201,6 +201,7 @@ EXPORTS.js += [
+@@ -180,6 +180,7 @@ EXPORTS.js += [
      "../public/SourceText.h",
      "../public/StableStringChars.h",
      "../public/Stack.h",
@@ -1562,8 +1560,8 @@ index 121dfd9c76e9..a000e4a42dda 100644
      "../public/StreamConsumer.h",
      "../public/String.h",
      "../public/StructuredClone.h",
-@@ -451,6 +452,34 @@ UNIFIED_SOURCES += [
-     "vm/Xdr.cpp",
+@@ -281,6 +282,34 @@ UNIFIED_SOURCES += [
+     "jsfriendapi.cpp",
  ]
  
 +if CONFIG["MOZ_JS_STREAMS"]:
@@ -1594,14 +1592,14 @@ index 121dfd9c76e9..a000e4a42dda 100644
 +        "builtin/streams/WritableStreamWriterOperations.cpp",
 +    ]
 +
- # builtin/RegExp.cpp cannot be built in unified mode because it causes huge
- #   win32 test slowdowns
- # jsmath.cpp cannot be built in unified mode because it needs to re-#define the
+ # Must be in SOURCES so that Glean symbols from xul will take priority over the
+ # no-op symbols implemented in jsglean.cpp
+ SOURCES += [
 diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
-index bb2b2e0a4328..bcaba8febee8 100644
+index 44ac9793342e..84fd91e1cf60 100644
 --- a/js/src/shell/js.cpp
 +++ b/js/src/shell/js.cpp
-@@ -847,6 +847,12 @@ bool shell::enableTestWasmAwaitTier2 = false;
+@@ -882,6 +882,12 @@ bool shell::enableTestWasmAwaitTier2 = false;
  bool shell::enableSourcePragmas = true;
  bool shell::enableAsyncStacks = false;
  bool shell::enableAsyncStackCaptureDebuggeeOnly = false;
@@ -1614,7 +1612,7 @@ index bb2b2e0a4328..bcaba8febee8 100644
  bool shell::enableToSource = false;
  #ifdef JS_GC_ZEAL
  uint32_t shell::gZealBits = 0;
-@@ -4552,6 +4558,7 @@ static void SetStandardRealmOptions(JS::RealmOptions& options) {
+@@ -4474,6 +4480,7 @@ static void SetStandardRealmOptions(JSContext* cx, JS::RealmOptions& options) {
    options.creationOptions()
        .setSharedMemoryAndAtomicsEnabled(enableSharedMemory)
        .setCoopAndCoepEnabled(false)
@@ -1622,7 +1620,7 @@ index bb2b2e0a4328..bcaba8febee8 100644
        .setToSourceEnabled(enableToSource);
  }
  
-@@ -12944,6 +12951,20 @@ bool InitOptionParser(OptionParser& op) {
+@@ -13183,6 +13190,20 @@ bool InitOptionParser(OptionParser& op) {
        !op.addBoolOption('\0', "less-debug-code",
                          "Emit less machine code for "
                          "checking assertions under DEBUG.") ||
@@ -1643,7 +1641,7 @@ index bb2b2e0a4328..bcaba8febee8 100644
        !op.addBoolOption('\0', "disable-tosource", "Disable toSource/uneval") ||
        !op.addBoolOption('\0', "disable-property-error-message-fix",
                          "Disable fix for the error message when accessing "
-@@ -13737,6 +13758,11 @@ bool SetContextWasmOptions(JSContext* cx, const OptionParser& op) {
+@@ -14067,6 +14088,11 @@ bool SetContextWasmOptions(JSContext* cx, const OptionParser& op) {
    }
  
    enableTestWasmAwaitTier2 = op.getBoolOption("test-wasm-await-tier2");
@@ -1654,12 +1652,12 @@ index bb2b2e0a4328..bcaba8febee8 100644
 +  enableReadableStreamPipeTo = op.getBoolOption("enable-readablestream-pipeto");
  
    JS::ContextOptionsRef(cx)
-       .setAsmJS(enableAsmJS)
+       .setWasm(enableWasm)
 diff --git a/js/src/shell/jsshell.h b/js/src/shell/jsshell.h
-index 6c615a704acb..85174e25a9d1 100644
+index 9ce1b499a2e6..6caa4d93dcbb 100644
 --- a/js/src/shell/jsshell.h
 +++ b/js/src/shell/jsshell.h
-@@ -117,6 +117,11 @@ extern bool enableTestWasmAwaitTier2;
+@@ -115,6 +115,11 @@ extern bool enableTestWasmAwaitTier2;
  extern bool enableSourcePragmas;
  extern bool enableAsyncStacks;
  extern bool enableAsyncStackCaptureDebuggeeOnly;
@@ -2045,12 +2043,12 @@ index 000000000000..bafd2214bec2
 +
 +runTest();
 diff --git a/js/src/vm/CommonPropertyNames.h b/js/src/vm/CommonPropertyNames.h
-index 81794dced35b..bce1ddfe35e3 100644
+index 5cbd4b7e5335..4fc6e3631f9e 100644
 --- a/js/src/vm/CommonPropertyNames.h
 +++ b/js/src/vm/CommonPropertyNames.h
-@@ -55,12 +55,14 @@
-   MACRO_(AsyncGeneratorReturn, "AsyncGeneratorReturn")                         \
-   MACRO_(AsyncGeneratorThrow, "AsyncGeneratorThrow")                           \
+@@ -48,12 +48,15 @@
+   MACRO_(Async_from_Sync_Iterator_, "Async-from-Sync Iterator")                \
+   MACRO_(AsyncGenerator, "AsyncGenerator")                                     \
    MACRO2(at, "at")                                                             \
 +  MACRO_(autoAllocateChunkSize, "autoAllocateChunkSize")                       \
    MACRO_(await, "await")                                                       \
@@ -2060,10 +2058,11 @@ index 81794dced35b..bce1ddfe35e3 100644
    MACRO_(breakdown, "breakdown")                                               \
    MACRO2(by, "by")                                                             \
 +  MACRO_(byob, "byob")                                                         \
-   MACRO_(byteLength, "byteLength")                                             \
-   MACRO_(byteOffset, "byteOffset")                                             \
++  MACRO_(byteLength, "byteLength")                                             \
    MACRO_(bytes, "bytes")                                                       \
-@@ -71,6 +73,7 @@
+   MACRO_(calendar, "calendar")                                                 \
+   MACRO_(calendarName, "calendarName")                                         \
+@@ -62,6 +65,7 @@
    MACRO_(callee, "callee")                                                     \
    MACRO_(callFunction, "callFunction")                                         \
    MACRO_(captureStackTrace, "captureStackTrace")                               \
@@ -2071,7 +2070,7 @@ index 81794dced35b..bce1ddfe35e3 100644
    MACRO_(case_, "case")                                                        \
    MACRO_(caseFirst, "caseFirst")                                               \
    MACRO_(catch_, "catch")                                                      \
-@@ -78,6 +81,7 @@
+@@ -69,6 +73,7 @@
    MACRO_(chunks, "chunks")                                                     \
    MACRO_(class_, "class")                                                      \
    MACRO_(cleanupSome, "cleanupSome")                                           \
@@ -2079,28 +2078,29 @@ index 81794dced35b..bce1ddfe35e3 100644
    MACRO_(collation, "collation")                                               \
    MACRO_(collections, "collections")                                           \
    MACRO_(column, "column")                                                     \
-@@ -228,6 +232,7 @@
+@@ -222,6 +227,7 @@
    MACRO_(hash_constructor_, "#constructor")                                    \
    MACRO_(hasIndices, "hasIndices")                                             \
    MACRO_(hasOwn, "hasOwn")                                                     \
 +  MACRO_(highWaterMark, "highWaterMark")                                       \
-   IF_EXPLICIT_RESOURCE_MANAGEMENT(MACRO_(hint, "hint"))                        \
+   MACRO_(hint, "hint")                                                         \
    MACRO_(hour, "hour")                                                         \
    MACRO_(hour12, "hour12")                                                     \
-@@ -338,6 +343,7 @@
+@@ -323,6 +329,7 @@
+   MACRO_(minutes, "minutes")                                                   \
    MACRO_(minutesDisplay, "minutesDisplay")                                     \
-   MACRO_(minutesStyle, "minutesStyle")                                         \
    MACRO_(missingArguments, "missingArguments")                                 \
 +  MACRO_(mode, "mode")                                                         \
    MACRO_(module, "module")                                                     \
    MACRO_(Module, "Module")                                                     \
-   MACRO_(month, "month")                                                       \
-@@ -407,8 +413,12 @@
+   MACRO_(DeferredModule, "Deferred Module")                                    \
+@@ -391,9 +398,13 @@
    MACRO_(pause, "pause")                                                       \
    MACRO_(pending, "pending")                                                   \
    MACRO_(percentSign, "percentSign")                                           \
 +  MACRO_(pipeTo, "pipeTo")                                                     \
    MACRO_(plainTime, "plainTime")                                               \
+   MACRO_(pluralCategories, "pluralCategories")                                 \
    MACRO_(plusSign, "plusSign")                                                 \
 +  MACRO_(preventAbort, "preventAbort")                                         \
 +  MACRO_(preventCancel, "preventCancel")                                       \
@@ -2108,7 +2108,7 @@ index 81794dced35b..bce1ddfe35e3 100644
    MACRO_(preventExtensions, "preventExtensions")                               \
    MACRO_(private_, "private")                                                  \
    MACRO_(promise, "promise")                                                   \
-@@ -417,6 +427,7 @@
+@@ -402,6 +413,7 @@
    MACRO_(prototype, "prototype")                                               \
    MACRO_(proxy, "proxy")                                                       \
    MACRO_(public_, "public")                                                    \
@@ -2116,7 +2116,7 @@ index 81794dced35b..bce1ddfe35e3 100644
    MACRO_(quarter, "quarter")                                                   \
    MACRO_(range, "range")                                                       \
    MACRO_(raw, "raw")                                                           \
-@@ -464,6 +475,7 @@
+@@ -449,6 +461,7 @@
    MACRO_(setFromHex, "setFromHex")                                             \
    MACRO_(setPrototypeOf, "setPrototypeOf")                                     \
    MACRO_(shared, "shared")                                                     \
@@ -2125,13 +2125,13 @@ index 81794dced35b..bce1ddfe35e3 100644
    MACRO_(size, "size")                                                         \
    MACRO_(sliceToImmutable, "sliceToImmutable")                                 \
 diff --git a/js/src/vm/GlobalObject.cpp b/js/src/vm/GlobalObject.cpp
-index 34f30e7495a7..2ba62411ffbf 100644
+index 823dc0d446c1..59a891d1953d 100644
 --- a/js/src/vm/GlobalObject.cpp
 +++ b/js/src/vm/GlobalObject.cpp
-@@ -33,6 +33,14 @@
+@@ -26,6 +26,14 @@
+ #endif
  #include "builtin/FinalizationRegistryObject.h"
  #include "builtin/MapObject.h"
- #include "builtin/ShadowRealm.h"
 +#include "builtin/streams/QueueingStrategies.h"  // js::{ByteLength,Count}QueueingStrategy
 +#include "builtin/streams/ReadableStream.h"             // js::ReadableStream
 +#include "builtin/streams/ReadableStreamBYOBRequest.h"  // js::ReadableStreamBYOBRequest
@@ -2143,8 +2143,8 @@ index 34f30e7495a7..2ba62411ffbf 100644
  #include "builtin/Symbol.h"
  #ifdef JS_HAS_INTL_API
  #  include "builtin/temporal/Duration.h"
-@@ -219,6 +227,21 @@ bool GlobalObject::skipDeselectedConstructor(JSContext* cx, JSProtoKey key) {
-       return !JS::Prefs::experimental_temporal();
+@@ -218,6 +226,21 @@ bool GlobalObject::skipDeselectedConstructor(JSContext* cx, JSProtoKey key) {
+       return false;
  #endif
  
 +#ifdef MOZ_JS_STREAMS
@@ -2166,10 +2166,10 @@ index 34f30e7495a7..2ba62411ffbf 100644
      case JSProto_Atomics:
      case JSProto_SharedArrayBuffer:
 diff --git a/js/src/vm/List-inl.h b/js/src/vm/List-inl.h
-index 50f7c1caf24c..52b196995892 100644
+index 66086d9836a1..682b1ccf07da 100644
 --- a/js/src/vm/List-inl.h
 +++ b/js/src/vm/List-inl.h
-@@ -13,12 +13,15 @@
+@@ -11,12 +11,15 @@
  
  #include <stdint.h>  // uint32_t
  
@@ -2186,7 +2186,7 @@ index 50f7c1caf24c..52b196995892 100644
  
  inline /* static */ js::ListObject* js::ListObject::create(JSContext* cx) {
    return NewObjectWithGivenProto<ListObject>(cx, nullptr);
-@@ -36,6 +39,21 @@ inline bool js::ListObject::append(JSContext* cx, Value value) {
+@@ -47,6 +50,21 @@ inline bool js::ListObject::append(JSContext* cx, Value v1, Value v2) {
    return true;
  }
  
@@ -2208,7 +2208,7 @@ index 50f7c1caf24c..52b196995892 100644
  inline JS::Value js::ListObject::popFirst(JSContext* cx) {
    uint32_t len = length();
    MOZ_ASSERT(len > 0);
-@@ -51,9 +69,54 @@ inline JS::Value js::ListObject::popFirst(JSContext* cx) {
+@@ -62,9 +80,54 @@ inline JS::Value js::ListObject::popFirst(JSContext* cx) {
    return entry;
  }
  
@@ -2264,12 +2264,12 @@ index 50f7c1caf24c..52b196995892 100644
 +
  #endif  // vm_List_inl_h
 diff --git a/js/src/vm/List.h b/js/src/vm/List.h
-index cb8699d7030c..42c79dc406aa 100644
+index bc9d1f0507f8..0f6f2c26f43c 100644
 --- a/js/src/vm/List.h
 +++ b/js/src/vm/List.h
-@@ -51,6 +51,13 @@ class ListObject : public NativeObject {
+@@ -56,6 +56,13 @@ class ListObject : public NativeObject {
     */
-   [[nodiscard]] inline bool append(JSContext* cx, Value value);
+   [[nodiscard]] inline bool append(JSContext* cx, Value v1, Value v2);
  
 +  /**
 +   * Adds |value| and |size| elements to a list consisting of (value, size)
@@ -2281,7 +2281,7 @@ index cb8699d7030c..42c79dc406aa 100644
    /**
     * Remove and return the first element of the list.
     *
-@@ -58,6 +65,12 @@ class ListObject : public NativeObject {
+@@ -63,6 +70,12 @@ class ListObject : public NativeObject {
     */
    inline JS::Value popFirst(JSContext* cx);
  
@@ -2295,10 +2295,10 @@ index cb8699d7030c..42c79dc406aa 100644
     * Remove and return the first element of the list.
     *
 diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
-index d88b717bf652..74eb0d0daa9b 100644
+index 78b165cfa288..3fd04ca15f10 100644
 --- a/js/src/vm/NativeObject.h
 +++ b/js/src/vm/NativeObject.h
-@@ -1485,6 +1485,8 @@ class NativeObject : public JSObject {
+@@ -1777,6 +1777,8 @@ class NativeObject : public JSObject {
    inline void ensureDenseInitializedLength(uint32_t index, uint32_t extra);
  
    void setDenseElement(uint32_t index, const Value& val) {
@@ -2308,18 +2308,18 @@ index d88b717bf652..74eb0d0daa9b 100644
      setDenseElementUnchecked(index, val);
    }
 diff --git a/js/src/vm/Runtime.h b/js/src/vm/Runtime.h
-index d9614160b0e7..e7d9e55422e0 100644
+index e501e49181cd..2a5bf1741d30 100644
 --- a/js/src/vm/Runtime.h
 +++ b/js/src/vm/Runtime.h
-@@ -41,6 +41,7 @@
+@@ -37,6 +37,7 @@
+ #include "js/ScriptPrivate.h"
  #include "js/shadow/Zone.h"
- #include "js/ShadowRealmCallbacks.h"
  #include "js/Stack.h"
 +#include "js/Stream.h" // JS::AbortSignalIsAborted
  #include "js/StreamConsumer.h"
  #include "js/Symbol.h"
  #include "js/UniquePtr.h"
-@@ -591,6 +592,30 @@ struct JSRuntime {
+@@ -570,6 +571,30 @@ struct JSRuntime {
    const JSClass* maybeWindowProxyClass() const { return windowProxyClass_; }
    void setWindowProxyClass(const JSClass* clasp) { windowProxyClass_ = clasp; }
  
@@ -2347,14 +2347,14 @@ index d9614160b0e7..e7d9e55422e0 100644
 +    return abortSignalIsAborted_(obj);
 +  }
 +
-  private:
-   // List of non-ephemeron weak containers to sweep during
-   // beginSweepingSweepGroup.
+   template <typename T>
+   struct GlobalObjectWatchersLinkAccess {
+     static const mozilla::DoublyLinkedListElement<T>& Get(const T* aThis) {
 diff --git a/js/xpconnect/src/XPCJSRuntime.cpp b/js/xpconnect/src/XPCJSRuntime.cpp
-index 80e04d9a87f2..43986f7c556a 100644
+index 785c22271ba4..ca3521883d81 100644
 --- a/js/xpconnect/src/XPCJSRuntime.cpp
 +++ b/js/xpconnect/src/XPCJSRuntime.cpp
-@@ -52,6 +52,7 @@
+@@ -73,6 +73,7 @@
  #include "js/MemoryMetrics.h"
  #include "js/Object.h"  // JS::GetClass
  #include "js/RealmIterators.h"
@@ -2363,10 +2363,10 @@ index 80e04d9a87f2..43986f7c556a 100644
  #include "js/UbiNode.h"
  #include "js/UbiNodeUtils.h"
 diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
-index 0986e53121fd..605557973900 100644
+index 80be46d83cc0..67f4fd88b5c6 100644
 --- a/modules/libpref/init/StaticPrefList.yaml
 +++ b/modules/libpref/init/StaticPrefList.yaml
-@@ -9171,6 +9171,22 @@
+@@ -10029,6 +10029,22 @@
    mirror: always  # LoadStartupJSPrefs
    do_not_use_directly: true
  
