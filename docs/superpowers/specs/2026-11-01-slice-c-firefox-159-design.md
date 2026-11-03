@@ -36,9 +36,10 @@ release's build tag; the RELEASE tag is the one `UPSTREAM` uses).
   layout-change rule applies: NightMonkey first, then the queue PR that bumps
   `NIGHTMONKEY_PIN`. (Missed by this assessment and found during the work: 159
   also re-encoded the `Value` tags (`STRING` 0x06 to 0x0e, `SYMBOL` 0x07 to
-  0x08, `PRIVATE_GCTHING` 0x08 to 0x07), which the opcode digest does not
-  cover, and the removed and renumbered opcodes required
-  `JSOP_SEMANTICS_VERSION` 2. Both were handled in NightMonkey #23.)
+  0x08, `PRIVATE_GCTHING` 0x08 to 0x07) and renumbered `JSWhyMagic`, neither of
+  which the opcode digest covers, and the removed and renumbered opcodes required
+  `JSOP_SEMANTICS_VERSION` 2 (set by queue patch 0009, checked by NightMonkey).
+  NightMonkey #23 handles all three.)
 - **Not assessed:** security-fix delta in the JIT area; new test floors.
 
 ## Goals
@@ -47,7 +48,7 @@ release's build tag; the RELEASE tag is the one `UPSTREAM` uses).
    queue, passing the same acceptance as `engine-v147.0.4-1` (snapshot
    round-trip, AOT and interpreter jit-test floors).
 2. NightMonkey consumes it with its opcode table (and anything else
-   layout-dependent) regenerated for 159.
+   layout-dependent) regenerated or ported for 159.
 3. New floors in `baseline/jit-floor.txt`, justified (fewer or more tests is
    explained, not just accepted).
 4. A written list of what changed that matters to us (patch rebases made,
@@ -66,8 +67,8 @@ release's build tag; the RELEASE tag is the one `UPSTREAM` uses).
 ## Anti-goals (would make this a failure even if CI is green)
 
 - Silently lowering a floor, or excluding failing tests, to get green. A justified
-  exclusion must record its reason, engine version and lane scope, and its effect
-  on the measured floors. (Outcome: NightMonkey #23 added six AOT-only and twelve
+  exclusion must record its reason, engine version and lane scope, and the floors
+  must state that they are measured with it applied. (Outcome: NightMonkey #23 added six AOT-only and twelve
   both-lane `ff159` exclusions, each with its reason, and the floors in #33 are
   measured with them applied, so green does not mean every upstream test ran.)
 - Regenerated opcode tables landed in NightMonkey out of order with the pin
@@ -126,7 +127,7 @@ followed step by step:
   `ff147` (cargo feature plus `NIGHT_ENGINE_VERSION`; `ff147` stays the default
   until the release bump), rather than gating on `engine/ENGINE_RELEASE` with no
   dual build. Besides the regenerated opcode table it ports the 159 `Value` tag
-  encoding (not in the assessment above), the resume protocol and the
+  encoding and `JSWhyMagic` numbering (not in the assessment above), the resume protocol and the
   `JSOP_SEMANTICS_VERSION` 2 check. NightMonkey has no IC tables; `data/ics` was
   not regenerated (it is not built into the engine; see PROVENANCE.md).
 - **Queue (#33):** the spike, the rebase, `UPSTREAM` at `FIREFOX_159_0_RELEASE`,
