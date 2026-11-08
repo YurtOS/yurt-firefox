@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: export-patches <export-patches@localhost>
+Date: Sun, 8 Nov 2026 14:28:18 +0200
+Subject: [PATCH] Hook: no await skips while an external-tier frame is live
+
+js::CanSkipAwait finds the awaiting generator alone on the context when it is
+resumed from an external-tier frame, because those frames sit on no
+activation, and skips an await the interpreter would not (its caller's
+activation is under the generator's). Add an appended hook,
+externalFramesLive(cx), that the tier answers true while any of its frames
+is live; CanSkipAwait then never skips. A table that does not name it leaves
+it null.
+
+diff --git a/js/public/ExternalCompilerHooks.h b/js/public/ExternalCompilerHooks.h
+index d2bb1ccf202a..589be66e2ad5 100644
+--- a/js/public/ExternalCompilerHooks.h
++++ b/js/public/ExternalCompilerHooks.h
+@@ -157,6 +157,17 @@ struct ExternalCompilerHooks {
+                       JS::Handle<JSLinearString*> input, size_t start,
+                       js::VectorMatchPairs* matches, bool latin1,
+                       js::RegExpRunStatus* status);
++
++  // Await skipping. js::CanSkipAwait skips an await when the awaiting frame
++  // is the first frame of the context's only activation, entered to resume a
++  // generator, and the job queue is otherwise empty. The external tier's
++  // frames sit on no activation, so a generator resumed from one looks to
++  // that test as if it were alone, where the interpreter would see the
++  // caller's activation below it. Return true while any of the tier's frames
++  // is live on `cx`'s stack (the generator was resumed from, or under, one):
++  // no await then skips. Null means never. Appended last: a table that does
++  // not name it leaves it null.
++  bool (*externalFramesLive)(JSContext* cx);
+ };
+ 
+ // Register (or, with nullptr, unregister) the hook table on a runtime. The
+diff --git a/js/src/builtin/Promise.cpp b/js/src/builtin/Promise.cpp
+index dff04f721cae..199eb86f82c8 100644
+--- a/js/src/builtin/Promise.cpp
++++ b/js/src/builtin/Promise.cpp
+@@ -11,6 +11,9 @@
+ #include "jsapi.h"
+ #include "jsfriendapi.h"
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++#  include "js/ExternalCompilerHooks.h"
++#endif
+ #include "js/CallAndConstruct.h"      // JS::Construct, JS::IsCallable
+ #include "js/experimental/JitInfo.h"  // JSJitGetterOp, JSJitInfo
+ #include "js/ForOfIterator.h"         // JS::ForOfIterator
+@@ -8346,6 +8349,18 @@ void PromiseObject::dumpOwnStringContent(js::GenericPrinter& out) const {}
+     return true;
+   }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // The external tier's frames sit on no activation, so the activation test
++  // below cannot see them: a live one means the interpreter would have found
++  // its caller's activation under this one.
++  if (JS::ExternalCompilerHooks* hooks = cx->externalCompilerHooks()) {
++    if (hooks->externalFramesLive && hooks->externalFramesLive(cx)) {
++      *canSkip = false;
++      return true;
++    }
++  }
++#endif
++
+   // The op already established the stack frame is the first frame of its
+   // activation. Ensure the activation is a resume and the sole activation.
+   Activation* act = cx->activation();

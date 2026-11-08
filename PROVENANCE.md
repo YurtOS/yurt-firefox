@@ -152,3 +152,15 @@ store check, which matters only if the external tier tags `Date` objects. `data/
 the 147 era; it is not built into this engine (no `--enable-aot-ics`) and is carried only so the
 tree hash stays byte-identical.
 
+
+## Patch 0013: no await skips under an external-tier frame (2026-11-08)
+
+Added on top of the rebased queue (the tree in `UPSTREAM` moved to `2873440f82cca6ad8c3ab2ef756a4fce9597d079`;
+patches 0001-0012 are unchanged byte for byte). `js::CanSkipAwait` skips an await when the awaiting
+frame is the first frame of the context's only activation, entered to resume a generator, and no job
+is queued. NightMonkey's compiled frames sit on no activation, so an interpreted generator resumed
+from one looked alone and skipped an await the interpreter would not (NightMonkey issue #32, split
+from #24). 0013 appends a hook, `ExternalCompilerHooks::externalFramesLive(cx)`, and `CanSkipAwait`
+never skips while it answers true. Null (every table that does not name it) changes nothing, so the
+pinned gate passes with the current `NIGHTMONKEY_PIN`; NightMonkey implements the hook after the
+engine release that carries 0013.
