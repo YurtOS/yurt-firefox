@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 9 Nov 2026 20:21:09 +0000
+Subject: [PATCH] AOT ICs: read the corpus in sorted order
+
+With --enable-aot-ics, read_aot_ics numbered the ICs in os.scandir order, so
+the contents of JS_AOT_IC_DATA depended on the filesystem. Sort by name.
+
+diff --git a/js/src/jit/GenerateCacheIRFiles.py b/js/src/jit/GenerateCacheIRFiles.py
+index 3417c1001aaf..772d0e1ec489 100644
+--- a/js/src/jit/GenerateCacheIRFiles.py
++++ b/js/src/jit/GenerateCacheIRFiles.py
+@@ -629,7 +629,9 @@ def generate_cacheirops_header(c_out, yaml_path):
+ def read_aot_ics(ic_path):
+     ics = ""
+     idx = 0
+-    for entry in os.scandir(ic_path):
++    # Sorted by name: os.scandir order depends on the filesystem, and the index
++    # of each IC in JS_AOT_IC_DATA must not.
++    for entry in sorted(os.scandir(ic_path), key=lambda e: e.name):
+         if entry.is_file() and os.path.basename(entry.path).startswith("IC-"):
+             with open(entry.path) as f:
+                 content = f.read().strip()

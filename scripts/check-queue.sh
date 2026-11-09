@@ -22,7 +22,7 @@ run_fixtures() {
   for t in test-fixture.sh test-apply.sh test-export.sh test-classify.sh test-check-queue.sh \
     test-verify-migration.sh test-build-engine.sh test-workflows.sh test-package-engine.sh \
     test-package-test-sources.sh test-accept-engine.sh \
-    test-release-workflow.sh; do
+    test-release-workflow.sh test-aot-ic-order.sh; do
     echo "== $t"
     if [ "$t" = test-check-queue.sh ]; then
       bash "$SELF/tests/$t" --fixtures || failed=1
