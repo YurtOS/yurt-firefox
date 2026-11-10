@@ -149,6 +149,34 @@ excluded_unusual_name_is_reset() {
   case $OUT in *PASS*) ;; *) echo "no PASS: $OUT"; return 1 ;; esac
 }
 
+# Names git quotes whatever core.quotePath says (a tab, a newline) are reset
+# like any other excluded path: only the NUL-separated lists keep them intact.
+excluded_tab_and_newline_names_are_reset() {
+  new_root
+  printf 'yurt\n' >"$URL/other/$(printf 't\tab').txt"
+  printf 'yurt\n' >"$URL/other/$(printf 'new\nline').txt"
+  yurt_commit "add names git always quotes"
+  queue_from_yurt js
+  run_verify "$YURT"
+  assert_eq 0 "$RC" "$OUT"
+  case $OUT in *PASS*) ;; *) echo "no PASS: $OUT"; return 1 ;; esac
+}
+
+# A glob-looking excluded name next to the plain one it would match as a
+# pattern: `other/[b].txt` is its own path, absent at the tag, so it is
+# removed and `other/b.txt` keeps its tag content. (This git's `ls-tree`
+# matches paths literally with or without `--literal-pathspecs`; the test pins
+# the behaviour, not the flag, so a different matcher cannot slip in.)
+excluded_glob_name_is_reset_literally() {
+  new_root
+  echo yurt >"$URL/other/[b].txt"
+  yurt_commit "add a glob-looking excluded name"
+  queue_from_yurt js
+  run_verify "$YURT"
+  assert_eq 0 "$RC" "$OUT"
+  case $OUT in *PASS*) ;; *) echo "no PASS: $OUT"; return 1 ;; esac
+}
+
 # hostile_root: new_root with a passing queue and a CRLF corpus file that the
 # yurt commit carries too, so config that rewrites line endings or ignores
 # files would change the queue tree.
@@ -227,11 +255,17 @@ verify_fails_closed() {
     rm -rf "$R.shim"
     # shellcheck disable=SC2086
     set -- $c
-    make_failing_shim "$R.shim" git "$1" "$2"
+    # "--git-path" is an argument of rev-parse; the rest are subcommands, and
+    # must fail that subcommand, not a call that merely carries the word in a
+    # `-c diff.*` config argument.
+    case $1 in
+      -*) make_failing_shim "$R.shim" git "$1" "$2"; want="shim: git fails" ;;
+      *) make_failing_subcommand_shim "$R.shim" git "$1" "$2"; want="shim: git $1 fails" ;;
+    esac
     RC=0
     OUT=$(PATH="$R.shim:$PATH" PQ_ROOT=$R "$VERIFY" "$YURT" 2>&1) || RC=$?
     case $RC:$OUT in 0:* | *PASS*) failed="$failed [$c: rc $RC: $OUT]" ;; esac
-    case $OUT in *"shim: git fails"*) ;; *) failed="$failed [$c: shim not reached: $OUT]" ;; esac
+    case $OUT in *"$want"*) ;; *) failed="$failed [$c: shim not reached: $OUT]" ;; esac
   done
   assert_eq "" "$failed" "git failures not propagated"
   mkdir "$BASE/lists-noexclude"
@@ -251,6 +285,8 @@ run_test leftover_fails_even_with_equal_trees leftover_fails_even_with_equal_tre
 run_test dom_count_is_enforced dom_count_is_enforced
 run_test usage_errors usage_errors
 run_test excluded_unusual_name_is_reset excluded_unusual_name_is_reset
+run_test excluded_tab_and_newline_names_are_reset excluded_tab_and_newline_names_are_reset
+run_test excluded_glob_name_is_reset_literally excluded_glob_name_is_reset_literally
 run_test verify_ignores_user_config verify_ignores_user_config
 run_test verify_ignores_repository_env verify_ignores_repository_env
 run_test verify_refuses_readonly_repository_env verify_refuses_readonly_repository_env
