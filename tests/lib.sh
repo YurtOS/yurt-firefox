@@ -150,6 +150,34 @@ exec "%s" "$@"
   chmod +x "$dir/$cmd"
 }
 
+# make_failing_subcommand_shim <dir> <command> <subcommand> <nth>: like
+# make_failing_shim, but it counts only calls whose subcommand (the first
+# argument that is not an option or an option's value: `-c k=v`, `-C dir`,
+# `--git-dir=...`) is <subcommand>, so a `-c diff.x=y` config argument cannot
+# match `diff`. It fails on the <nth> such call and names it on stderr.
+make_failing_subcommand_shim() {
+  local dir=$1 cmd=$2 sub=$3 nth=$4
+  mkdir -p "$dir" || return 1
+  printf '#!/bin/sh
+sub=; skip=0
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case $a in
+    -c | -C | --git-dir | --work-tree | --namespace | --exec-path | --super-prefix | --config-env | --attr-source) skip=1 ;;
+    -*) ;;
+    *) sub=$a; break ;;
+  esac
+done
+if [ "$sub" = "%s" ]; then
+  n=$(cat "%s" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" >"%s"
+  if [ "$n" -eq %s ]; then echo "shim: %s %s fails" >&2; exit 1; fi
+fi
+exec "%s" "$@"
+' \
+    "$sub" "$dir/$cmd.count" "$dir/$cmd.count" "$nth" "$cmd" "$sub" "$(command -v "$cmd")" >"$dir/$cmd" || return 1
+  chmod +x "$dir/$cmd"
+}
+
 # make_decoy <dir>: a repository that code under test must never touch.
 make_decoy() {
   mkdir -p "$1" || return 1
