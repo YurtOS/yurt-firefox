@@ -163,7 +163,7 @@ sub=; skip=0
 for a in "$@"; do
   if [ "$skip" = 1 ]; then skip=0; continue; fi
   case $a in
-    -c | -C | --git-dir | --work-tree | --namespace | --exec-path) skip=1 ;;
+    -c | -C | --git-dir | --work-tree | --namespace | --exec-path | --super-prefix | --config-env | --attr-source) skip=1 ;;
     -*) ;;
     *) sub=$a; break ;;
   esac
