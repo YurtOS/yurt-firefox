@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: export-patches <export-patches@localhost>
+Date: Wed, 11 Nov 2026 19:16:32 +0200
+Subject: [PATCH] Hook: scripted-caller queries see the external tier's calling
+ frame
+
+JS::DescribeScriptedCaller and js::DescribeScriptedCallerForCompilation walk
+the engine's frames, and the external tier's frames sit on no activation: a
+native called from one (loadRelativeToScript, indirect eval, new Function)
+finds no caller, or the engine frame under the tier's. Add an appended hook,
+innermostFrame(cx, &activation), that returns the script of the tier's
+innermost calling frame and the activation recorded with it; the engine
+reports that frame unless its iterator's activation is newer than the
+recorded one (a frame pushed after the tier's is above it). A table that does
+not name it leaves it null.
+
+diff --git a/js/public/ExternalCompilerHooks.h b/js/public/ExternalCompilerHooks.h
+index 589be66e2ad5..ed9469114986 100644
+--- a/js/public/ExternalCompilerHooks.h
++++ b/js/public/ExternalCompilerHooks.h
+@@ -36,6 +36,7 @@
+ 
+ namespace js {
+ class AbstractGeneratorObject;
++class Activation;
+ class NativeObject;
+ class ObjectFuse;
+ class SharedShape;
+@@ -168,6 +169,24 @@ struct ExternalCompilerHooks {
+   // no await then skips. Null means never. Appended last: a table that does
+   // not name it leaves it null.
+   bool (*externalFramesLive)(JSContext* cx);
++
++  // Scripted-caller queries. JS::DescribeScriptedCaller and
++  // js::DescribeScriptedCallerForCompilation (what the shell's
++  // loadRelativeToScript, indirect eval and `new Function` ask) walk the
++  // engine's frames, and the external tier's frames sit on no activation: a
++  // native called from one finds no caller, or the engine frame under it.
++  // Return the script of the innermost tier frame that is calling out on
++  // `cx`, and store in `*activation` the activation that was
++  // cx->activation() when the tier recorded that frame (null if none was);
++  // or return null when no tier frame is calling. The engine reports the
++  // tier's frame instead of its own iterator's unless the iterator's
++  // activation is newer than `*activation`: an activation pushed after the
++  // tier's frame was recorded holds frames that are above it. (The engine
++  // loop that owns an activation is blocked while a tier frame it called
++  // runs on it, so an equal activation means the tier's frame is above.)
++  // Null means never. Appended last: a table that does not name it leaves
++  // it null.
++  JSScript* (*innermostFrame)(JSContext* cx, js::Activation** activation);
+ };
+ 
+ // Register (or, with nullptr, unregister) the hook table on a runtime. The
+diff --git a/js/src/jsapi.cpp b/js/src/jsapi.cpp
+index 04fb2a5e66e4..b7a259b95fa2 100644
+--- a/js/src/jsapi.cpp
++++ b/js/src/jsapi.cpp
+@@ -4871,6 +4871,30 @@ JS_PUBLIC_API bool DescribeScriptedCaller(AutoFilename* filename, JSContext* cx,
+   }
+ 
+   NonBuiltinFrameIter i(cx, cx->realm()->principals());
++
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // A calling frame of the external tier, which the iterator cannot see: its
++  // script's own position stands for the call's.
++  js::Activation* tierActivation = nullptr;
++  if (JSScript* tierScript = js::ExternalCallerScript(
++          cx, i.done() ? nullptr : i.activation(), &tierActivation)) {
++    if (tierActivation && tierActivation->scriptedCallerIsHidden()) {
++      return false;
++    }
++    if (filename) {
++      filename->setScriptSource(tierScript->scriptSource());
++    }
++    if (lineno) {
++      *lineno = tierScript->lineno();
++    }
++    if (column) {
++      *column =
++          JS::ColumnNumberOneOrigin(tierScript->column().oneOriginValue());
++    }
++    return true;
++  }
++#endif
++
+   if (i.done()) {
+     return false;
+   }
+diff --git a/js/src/vm/JSScript.cpp b/js/src/vm/JSScript.cpp
+index 5e57dda2b61f..a9a6e8419745 100644
+--- a/js/src/vm/JSScript.cpp
++++ b/js/src/vm/JSScript.cpp
+@@ -3130,11 +3130,57 @@ void js::DescribeScriptedCallerForDirectEval(JSContext* cx, HandleScript script,
+   *mutedErrors = script->mutedErrors();
+ }
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++JSScript* js::ExternalCallerScript(JSContext* cx, Activation* iterActivation,
++                                   Activation** frameActivation) {
++  JS::ExternalCompilerHooks* hooks = cx->externalCompilerHooks();
++  if (!hooks || !hooks->innermostFrame) {
++    return nullptr;
++  }
++  Activation* recorded = nullptr;
++  JSScript* script = hooks->innermostFrame(cx, &recorded);
++  // The iterators these queries use skip self-hosted frames.
++  if (!script || script->selfHosted()) {
++    return nullptr;
++  }
++  // An engine frame pushed after the tier's frame is on a newer activation:
++  // walk newest first, and if the iterator's activation comes before the
++  // recorded one the iterator's frame is the innermost. The same activation
++  // means the tier's frame is above (see the hook's comment).
++  if (iterActivation) {
++    for (Activation* act = cx->activation(); act; act = act->prev()) {
++      if (act == recorded) {
++        break;
++      }
++      if (act == iterActivation) {
++        return nullptr;
++      }
++    }
++  }
++  *frameActivation = recorded;
++  return script;
++}
++#endif
++
+ void js::DescribeScriptedCallerForCompilation(
+     JSContext* cx, MutableHandleScript maybeScript, const char** file,
+     uint32_t* linenop, uint32_t* pcOffset, bool* mutedErrors) {
+   NonBuiltinFrameIter iter(cx, cx->realm()->principals());
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++  // A calling frame of the external tier, which the iterator cannot see.
++  Activation* tierActivation = nullptr;
++  if (JSScript* tierScript = ExternalCallerScript(
++          cx, iter.done() ? nullptr : iter.activation(), &tierActivation)) {
++    maybeScript.set(tierScript);
++    *file = tierScript->filename();
++    *linenop = tierScript->lineno();
++    *pcOffset = 0;
++    *mutedErrors = tierScript->mutedErrors();
++    return;
++  }
++#endif
++
+   if (iter.done()) {
+     maybeScript.set(nullptr);
+     *file = nullptr;
+diff --git a/js/src/vm/JSScript.h b/js/src/vm/JSScript.h
+index ba5a4e2e1d19..8effbd7285c6 100644
+--- a/js/src/vm/JSScript.h
++++ b/js/src/vm/JSScript.h
+@@ -48,6 +48,7 @@ class SourceText;
+ 
+ namespace js {
+ 
++class Activation;
+ class Compressor;
+ class FrontendContext;
+ class ScriptSource;
+@@ -2615,6 +2616,20 @@ class SourceLocationIterator {
+   JS::LimitedColumnNumberOneOrigin column() const { return column_; }
+ };
+ 
++#ifdef JS_EXTERNAL_COMPILER_HOOKS
++/*
++ * The script of the external tier's innermost calling frame, which a
++ * scripted-caller query reports instead of the frame iterator's, or null:
++ * when the tier has no calling frame, or the iterator's frame (on
++ * `iterActivation`, null if the iterator found none) is above it. Sets
++ * `*frameActivation` to the activation recorded with the tier's frame.
++ * See ExternalCompilerHooks::innermostFrame.
++ */
++extern JSScript* ExternalCallerScript(JSContext* cx,
++                                      Activation* iterActivation,
++                                      Activation** frameActivation);
++#endif
++
+ /*
+  * This function returns the file and line number of the script currently
+  * executing on cx. If there is no current script executing on cx (e.g., a
