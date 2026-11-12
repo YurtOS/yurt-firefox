@@ -87,10 +87,10 @@ index 04fb2a5e66e4..b7a259b95fa2 100644
      return false;
    }
 diff --git a/js/src/vm/JSScript.cpp b/js/src/vm/JSScript.cpp
-index 5e57dda2b61f..a9a6e8419745 100644
+index 5e57dda2b61f..7cf13b48a0dc 100644
 --- a/js/src/vm/JSScript.cpp
 +++ b/js/src/vm/JSScript.cpp
-@@ -3130,11 +3130,57 @@ void js::DescribeScriptedCallerForDirectEval(JSContext* cx, HandleScript script,
+@@ -3130,11 +3130,67 @@ void js::DescribeScriptedCallerForDirectEval(JSContext* cx, HandleScript script,
    *mutedErrors = script->mutedErrors();
  }
  
@@ -103,9 +103,19 @@ index 5e57dda2b61f..a9a6e8419745 100644
 +  }
 +  Activation* recorded = nullptr;
 +  JSScript* script = hooks->innermostFrame(cx, &recorded);
-+  // The iterators these queries use skip self-hosted frames.
++  // The iterators these queries use skip self-hosted frames ...
 +  if (!script || script->selfHosted()) {
 +    return nullptr;
++  }
++  // ... and frames whose principals the current realm's do not subsume
++  // (the test in vm/FrameIter.cpp that NonBuiltinFrameIter's principals use).
++  if (JSPrincipals* principals = cx->realm()->principals()) {
++    if (JSSubsumesOp subsumes = cx->runtime()->securityCallbacks->subsumes) {
++      JS::AutoSuppressGCAnalysis nogc;
++      if (!subsumes(principals, script->realm()->principals())) {
++        return nullptr;
++      }
++    }
 +  }
 +  // An engine frame pushed after the tier's frame is on a newer activation:
 +  // walk newest first, and if the iterator's activation comes before the
