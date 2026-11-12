@@ -13,70 +13,12 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
     (all included paths except build/moz.configure, config/system-headers.mozbuild)
   f6cb6f9ddc21 Review feedback.
     (all included paths)
----
- js/moz.configure                       |  23 ++++
- js/public/ExternalCompilerHooks.h      | 166 +++++++++++++++++++++++
- js/public/shadow/Object.h              |   5 +-
- js/src/build/export_private_headers.py | 132 +++++++++++++++++++
- js/src/builtin/RegExp.cpp              |  22 +++-
- js/src/builtin/RegExp.h                |  13 ++
- js/src/builtin/String.cpp              |  15 ++-
- js/src/builtin/String.h                |   6 +
- js/src/debugger/Script.cpp             |   6 +
- js/src/gc/Nursery.h                    |   2 +-
- js/src/irregexp/RegExpAPI.cpp          |  12 ++
- js/src/irregexp/RegExpAPI.h            |   7 +
- js/src/moz.build                       |  28 ++++
- js/src/shell/CommonShellGlobals.cpp    | 107 +++++++++++++++
- js/src/shell/CommonShellGlobals.h      |  46 +++++++
- js/src/shell/js.cpp                    | 176 +++++++++++++++----------
- js/src/shell/jsshell.h                 |  25 ++++
- js/src/shell/lib/moz.build             |  54 ++++++++
- js/src/shell/moz.build                 |   6 +
- js/src/shell/wizer.cpp                 |   6 +-
- js/src/vm/BytecodeUtil.cpp             |  10 ++
- js/src/vm/CommonPropertyNames.h        |   3 +
- js/src/vm/EnvironmentObject.cpp        |  10 ++
- js/src/vm/ExternalCompilerHooks.cpp    |  92 +++++++++++++
- js/src/vm/GeneratorObject.cpp          |  33 +++++
- js/src/vm/Interpreter.cpp              |  64 +++++++++
- js/src/vm/JSContext.cpp                |  15 +++
- js/src/vm/JSContext.h                  |  25 +++-
- js/src/vm/JSFunction-inl.h             |  11 ++
- js/src/vm/JSObject.h                   |  41 +++++-
- js/src/vm/JSScript.cpp                 |  17 +++
- js/src/vm/JSScript.h                   |  22 ++++
- js/src/vm/MatchPairs.h                 |  10 ++
- js/src/vm/NativeObject.cpp             |  21 +++
- js/src/vm/NativeObject.h               |  22 +++-
- js/src/vm/Opcodes.h                    |  21 +++
- js/src/vm/ProxyObject.cpp              |  12 ++
- js/src/vm/RealmFuses.cpp               |  25 ++++
- js/src/vm/RealmFuses.h                 |  25 +++-
- js/src/vm/RegExpObject.cpp             |  13 ++
- js/src/vm/RegExpShared.h               |  11 ++
- js/src/vm/RegExpStatics.h              |  31 +++++
- js/src/vm/Runtime.h                    |  19 +++
- js/src/vm/Scope.h                      |   8 ++
- js/src/vm/Shape.cpp                    |  49 ++++++-
- js/src/vm/Shape.h                      |   2 +-
- js/src/vm/SharedStencil.h              |   9 ++
- js/src/vm/StaticStrings.h              |   7 +
- js/src/vm/Watchtower.cpp               |  30 +++++
- js/src/vm/moz.build                    |   4 +-
- 50 files changed, 1421 insertions(+), 98 deletions(-)
- create mode 100644 js/public/ExternalCompilerHooks.h
- create mode 100644 js/src/build/export_private_headers.py
- create mode 100644 js/src/shell/CommonShellGlobals.cpp
- create mode 100644 js/src/shell/CommonShellGlobals.h
- create mode 100644 js/src/shell/lib/moz.build
- create mode 100644 js/src/vm/ExternalCompilerHooks.cpp
 
 diff --git a/js/moz.configure b/js/moz.configure
-index e5f20807f2a1..063c923d4f85 100644
+index 067947fb3680..07731b513679 100644
 --- a/js/moz.configure
 +++ b/js/moz.configure
-@@ -183,11 +183,13 @@ option(
+@@ -179,11 +179,13 @@ option(
      help="{Support|Do not support} wevaling the PBL interpreter",
  )
  
@@ -90,7 +32,7 @@ index e5f20807f2a1..063c923d4f85 100644
  set_define("ENABLE_JS_PBL_WEVAL", js_pbl_weval)
  set_config("ENABLE_JS_PBL_WEVAL", js_pbl_weval)
  
-@@ -236,6 +238,26 @@ set_config(
+@@ -224,6 +226,26 @@ set_define(
      depends_if("--enable-aot-ics-enforce")(lambda _: True),
  )
  
@@ -117,7 +59,7 @@ index e5f20807f2a1..063c923d4f85 100644
  
  # Enable JS Streams
  # ===================================================
-@@ -255,6 +277,7 @@ def enable_js_streams(value):
+@@ -243,6 +265,7 @@ def enable_js_streams(value):
  set_config("MOZ_JS_STREAMS", enable_js_streams)
  set_define("MOZ_JS_STREAMS", enable_js_streams)
  
@@ -611,28 +553,11 @@ index 7f569c87d949..2007924a527c 100644
  extern bool str_codePointAt(JSContext* cx, unsigned argc, Value* vp);
  
  ArrayObject* StringSplitString(JSContext* cx, HandleString str,
-diff --git a/js/src/debugger/Script.cpp b/js/src/debugger/Script.cpp
-index 6cbd004beca5..ea98215b7dc8 100644
---- a/js/src/debugger/Script.cpp
-+++ b/js/src/debugger/Script.cpp
-@@ -562,6 +562,12 @@ static bool ScriptOffset(JSContext* cx, const Value& v, size_t* offsetp) {
-   bool ok = v.isNumber();
-   if (ok) {
-     d = v.toNumber();
-+    // Range-check before converting: a double outside size_t's range makes
-+    // the conversion undefined, and a compiler may then fold the equality
-+    // check below away.
-+    ok = d >= 0 && d <= double(SIZE_MAX);
-+  }
-+  if (ok) {
-     off = size_t(d);
-   }
-   if (!ok || off != d) {
 diff --git a/js/src/gc/Nursery.h b/js/src/gc/Nursery.h
-index fdcbcd9e7778..dde029e12527 100644
+index 56da93b8eb69..95cd49ed91b8 100644
 --- a/js/src/gc/Nursery.h
 +++ b/js/src/gc/Nursery.h
-@@ -132,7 +132,7 @@ class Nursery {
+@@ -178,7 +178,7 @@ class Nursery {
    // now succeed.
    [[nodiscard]] JS::GCReason handleAllocationFailure();
  
@@ -686,7 +611,7 @@ index 8b3e3da356a7..85bd51184e2d 100644
  void TraceIsolate(JSTracer* trc, Isolate* isolate);
  void DestroyIsolate(Isolate* isolate);
 diff --git a/js/src/moz.build b/js/src/moz.build
-index 27e557bc0082..f69f007c037c 100644
+index acf04c648f8a..5bacbd524718 100644
 --- a/js/src/moz.build
 +++ b/js/src/moz.build
 @@ -50,6 +50,8 @@ with Files("doc/Debugger/**"):
@@ -904,7 +829,7 @@ index 000000000000..9647b139200f
 +
 +#endif  // shell_CommonShellGlobals_h
 diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
-index 915ce7eaec2e..092f50df0843 100644
+index 1d7680aeda70..74fd4f17315e 100644
 --- a/js/src/shell/js.cpp
 +++ b/js/src/shell/js.cpp
 @@ -159,6 +159,7 @@
@@ -915,7 +840,7 @@ index 915ce7eaec2e..092f50df0843 100644
  #include "shell/jsoptparse.h"
  #include "shell/jsshell.h"
  #include "shell/OSObject.h"
-@@ -909,6 +910,20 @@ bool shell::OOM_printAllocationCount = false;
+@@ -913,6 +914,20 @@ bool shell::OOM_printAllocationCount = false;
  
  constinit UniqueChars shell::processWideModuleLoadPath;
  
@@ -936,7 +861,7 @@ index 915ce7eaec2e..092f50df0843 100644
  static bool SetTimeoutValue(JSContext* cx, double t);
  
  static void KillWatchdog(JSContext* cx);
-@@ -1383,7 +1398,13 @@ enum class CompileUtf8 {
+@@ -1394,7 +1409,13 @@ enum class CompileUtf8 {
          .setIsRunOnce(true)
          .setNoScriptRval(true);
  
@@ -951,7 +876,7 @@ index 915ce7eaec2e..092f50df0843 100644
        options.setForceFullParse();
      } else {
        options.setEagerDelazificationStrategy(defaultDelazificationMode);
-@@ -1428,6 +1449,13 @@ enum class CompileUtf8 {
+@@ -1439,6 +1460,13 @@ enum class CompileUtf8 {
      return false;
    }
  
@@ -965,7 +890,7 @@ index 915ce7eaec2e..092f50df0843 100644
  #ifdef DEBUG
    if (dumpEntrainedVariables) {
      AnalyzeEntrainedVariables(cx, script);
-@@ -1441,6 +1469,12 @@ enum class CompileUtf8 {
+@@ -1452,6 +1480,12 @@ enum class CompileUtf8 {
      if (printTiming) {
        printf("runtime = %.3f ms\n", double(t2) / PRMJ_USEC_PER_MSEC);
      }
@@ -978,7 +903,7 @@ index 915ce7eaec2e..092f50df0843 100644
    }
    return true;
  }
-@@ -3591,23 +3625,8 @@ static bool PrintInternal(JSContext* cx, const CallArgs& args, RCFile* file) {
+@@ -3602,23 +3636,8 @@ static bool PrintInternal(JSContext* cx, const CallArgs& args, RCFile* file) {
      return false;
    }
  
@@ -1004,7 +929,7 @@ index 915ce7eaec2e..092f50df0843 100644
  }
  
  static bool Print(JSContext* cx, unsigned argc, Value* vp) {
-@@ -3702,56 +3721,6 @@ static bool StopTimingMutator(JSContext* cx, unsigned argc, Value* vp) {
+@@ -3713,56 +3732,6 @@ static bool StopTimingMutator(JSContext* cx, unsigned argc, Value* vp) {
    return true;
  }
  
@@ -1061,7 +986,7 @@ index 915ce7eaec2e..092f50df0843 100644
  static JSScript* GetTopScript(JSContext* cx) {
    NonBuiltinScriptFrameIter iter(cx);
    return iter.done() ? nullptr : iter.script();
-@@ -10197,7 +10166,7 @@ static const JSFunctionSpecWithHelp shell_functions[] = {
+@@ -10223,7 +10192,7 @@ static const JSFunctionSpecWithHelp shell_functions[] = {
  "quit()",
  "  Quit the shell."),
  
@@ -1070,7 +995,7 @@ index 915ce7eaec2e..092f50df0843 100644
  "assertEq(actual, expected[, msg])",
  "  Throw if the first two arguments are not the same (both +0 or both -0,\n"
  "  both NaN, or non-zero and ===)."),
-@@ -12106,6 +12075,12 @@ static JSObject* NewGlobalObject(JSContext* cx, JS::RealmOptions& options,
+@@ -12144,6 +12113,12 @@ static JSObject* NewGlobalObject(JSContext* cx, JS::RealmOptions& options,
          !JS_DefineProfilingFunctions(cx, glob)) {
        return nullptr;
      }
@@ -1083,7 +1008,7 @@ index 915ce7eaec2e..092f50df0843 100644
  #ifdef FUZZING_JS_FUZZILLI
      if (!JS_DefineFunctions(cx, glob, shell_function_fuzzilli_hash)) {
        return nullptr;
-@@ -12362,9 +12337,40 @@ auto minVal(T a, Ts... args) {
+@@ -12400,9 +12375,40 @@ auto minVal(T a, Ts... args) {
        }
  
        RootedValue rval(cx);
@@ -1124,7 +1049,7 @@ index 915ce7eaec2e..092f50df0843 100644
  
        codeChunks.popFront();
        if (sc->quitting) {
-@@ -12397,9 +12403,15 @@ auto minVal(T a, Ts... args) {
+@@ -12435,9 +12441,15 @@ auto minVal(T a, Ts... args) {
      if (!pathUtf8) {
        return false;
      }
@@ -1140,7 +1065,7 @@ index 915ce7eaec2e..092f50df0843 100644
    }
  
    if (op->getBoolOption('i')) {
-@@ -12918,6 +12930,12 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+@@ -12956,6 +12968,12 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
    if (!InitOptionParser(op)) {
      return AsVariant(EXIT_FAILURE);
    }
@@ -1153,7 +1078,7 @@ index 915ce7eaec2e..092f50df0843 100644
  
    switch (op.parseArgs(argc, argv)) {
      case OptionParser::EarlyExit:
-@@ -12938,6 +12956,12 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+@@ -12976,6 +12994,12 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
    if (!SetGlobalOptionsPreJSInit(op)) {
      return AsVariant(EXIT_FAILURE);
    }
@@ -1166,7 +1091,7 @@ index 915ce7eaec2e..092f50df0843 100644
  
    if (!JS::SetLoggingInterface(shellLoggingInterface)) {
      return AsVariant(1);
-@@ -12983,6 +13007,13 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+@@ -13021,6 +13045,13 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
  
    auto destroyCx = MakeScopeExit([cx] { JS_DestroyContext(cx); });
  
@@ -1180,7 +1105,7 @@ index 915ce7eaec2e..092f50df0843 100644
    UniquePtr<ShellContext> sc =
        MakeUnique<ShellContext>(cx, ShellContext::MainThread);
    if (!sc || !sc->registerWithCx(cx)) {
-@@ -13094,14 +13125,15 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+@@ -13132,14 +13163,15 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
    }
  }
  
@@ -1296,7 +1221,7 @@ index 000000000000..a04284e664f1
 +    "!/%s/%s/libjsrust.a" % (CONFIG["RUST_TARGET"], rust_profile),
 +]
 diff --git a/js/src/shell/moz.build b/js/src/shell/moz.build
-index 510e094d7596..767dc6c9f8fe 100644
+index 745d46615796..36eeccf6db17 100644
 --- a/js/src/shell/moz.build
 +++ b/js/src/shell/moz.build
 @@ -3,6 +3,8 @@
@@ -1551,10 +1476,10 @@ index 70d3365a7224..40a8dff7abe8 100644
    return RunScript(cx, state);
  }
 diff --git a/js/src/vm/Interpreter.cpp b/js/src/vm/Interpreter.cpp
-index 89ad5d219a14..50609a0a29fd 100644
+index 6241cd45d02d..bb3b03ca3b26 100644
 --- a/js/src/vm/Interpreter.cpp
 +++ b/js/src/vm/Interpreter.cpp
-@@ -47,6 +47,9 @@
+@@ -48,6 +48,9 @@
  #include "vm/GeneratorObject.h"
  #include "vm/Iteration.h"
  #include "vm/JSContext.h"
@@ -1564,7 +1489,7 @@ index 89ad5d219a14..50609a0a29fd 100644
  #include "vm/JSFunction.h"
  #include "vm/JSObject.h"
  #include "vm/JSScript.h"
-@@ -497,6 +500,20 @@ bool js::RunScript(JSContext* cx, RunState& state) {
+@@ -498,6 +501,20 @@ bool js::RunScript(JSContext* cx, RunState& state) {
        break;
    }
  
@@ -1585,7 +1510,7 @@ index 89ad5d219a14..50609a0a29fd 100644
    bool ok = MaybeEnterInterpreterTrampoline(cx, state);
    if (!ok) {
      AssertExceptionResult(cx);
-@@ -3329,6 +3346,24 @@ bool MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER js::Interpret(JSContext* cx,
+@@ -3341,6 +3358,24 @@ bool MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER js::Interpret(JSContext* cx,
                break;
            }
  
@@ -1610,7 +1535,7 @@ index 89ad5d219a14..50609a0a29fd 100644
  #ifdef NIGHTLY_BUILD
            // If entry trampolines are enabled, call back into
            // MaybeEnterInterpreterTrampoline so we can generate an
-@@ -4229,6 +4264,35 @@ bool MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER js::Interpret(JSContext* cx,
+@@ -4241,6 +4276,35 @@ bool MOZ_NEVER_INLINE JS_HAZ_JSNATIVE_CALLER js::Interpret(JSContext* cx,
      END_CASE(ResumeKind)
  
      CASE(Resume) {
@@ -1943,7 +1868,7 @@ index 210a0810f04c..dd6084d561d2 100644
    /* MatchPair buffer allocator: set pairs_ and pairCount_. */
    bool allocOrExpandArray(size_t pairCount);
 diff --git a/js/src/vm/NativeObject.cpp b/js/src/vm/NativeObject.cpp
-index 909657bffef9..fc7d75f6de8b 100644
+index 9630d9a1d388..7fac74559a2b 100644
 --- a/js/src/vm/NativeObject.cpp
 +++ b/js/src/vm/NativeObject.cpp
 @@ -24,6 +24,9 @@
@@ -1956,7 +1881,7 @@ index 909657bffef9..fc7d75f6de8b 100644
  #include "gc/Nursery-inl.h"
  #include "vm/JSObject-inl.h"
  #include "vm/NativeObject-inl.h"
-@@ -1620,6 +1623,12 @@ bool js::NativeDefineProperty(JSContext* cx, Handle<NativeObject*> obj,
+@@ -1612,6 +1615,12 @@ bool js::NativeDefineProperty(JSContext* cx, Handle<NativeObject*> obj,
                                HandleId id, Handle<PropertyDescriptor> desc_,
                                ObjectOpResult& result) {
    desc_.assertValid();
@@ -1969,7 +1894,7 @@ index 909657bffef9..fc7d75f6de8b 100644
  
    // Section numbers and step numbers below refer to ES2025, draft rev
    // ac21460fedf4b926520b06c9820bdbebad596a8b.
-@@ -2478,6 +2487,12 @@ static bool NativeSetExistingDataProperty(JSContext* cx,
+@@ -2470,6 +2479,12 @@ static bool NativeSetExistingDataProperty(JSContext* cx,
  
    if (prop.isDataProperty()) {
      // The common path. Standard data property.
@@ -1982,7 +1907,7 @@ index 909657bffef9..fc7d75f6de8b 100644
      obj->setSlot(prop.slot(), v);
      return result.succeed();
    }
-@@ -2897,6 +2912,12 @@ bool js::NativeDeleteProperty(JSContext* cx, Handle<NativeObject*> obj,
+@@ -2889,6 +2904,12 @@ bool js::NativeDeleteProperty(JSContext* cx, Handle<NativeObject*> obj,
                                result)) {
      return false;
    }
@@ -1996,7 +1921,7 @@ index 909657bffef9..fc7d75f6de8b 100644
      return true;
    }
 diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
-index 3fd04ca15f10..254777b01fd4 100644
+index 8921156cd5a5..6550b1e1879d 100644
 --- a/js/src/vm/NativeObject.h
 +++ b/js/src/vm/NativeObject.h
 @@ -374,18 +374,18 @@ class ObjectElements {
@@ -2042,7 +1967,7 @@ index 3fd04ca15f10..254777b01fd4 100644
      getSlotAddressUnchecked(slot)->init(this, HeapSlot::Slot, slot, value);
    }
  
-@@ -2035,7 +2041,9 @@ class NativeObject : public JSObject {
+@@ -2023,7 +2029,9 @@ class NativeObject : public JSObject {
    }
  
    /* JIT Accessors */
@@ -2053,7 +1978,7 @@ index 3fd04ca15f10..254777b01fd4 100644
    static size_t offsetOfFixedElements() {
      return sizeof(NativeObject) + sizeof(ObjectElements);
    }
-@@ -2059,7 +2067,9 @@ class NativeObject : public JSObject {
+@@ -2047,7 +2055,9 @@ class NativeObject : public JSObject {
      MOZ_ASSERT(offset % sizeof(Value) == 0);
      return offset / sizeof(Value);
    }
@@ -2501,7 +2426,7 @@ index c89c5dc9e744..f9da9cf56b1a 100644
    }
  
 diff --git a/js/src/vm/SharedStencil.h b/js/src/vm/SharedStencil.h
-index 7687a1d9027e..57f8d7d5490f 100644
+index d18d059aa876..39cfb07ad5de 100644
 --- a/js/src/vm/SharedStencil.h
 +++ b/js/src/vm/SharedStencil.h
 @@ -617,6 +617,15 @@ class alignas(uint32_t) ImmutableScriptData final
@@ -2587,10 +2512,10 @@ index 6518f0bc00df..f28e83a41ba7 100644
    MaybePopPromiseConstructorFuses(cx, obj, id);
  
 diff --git a/js/src/vm/moz.build b/js/src/vm/moz.build
-index 1c975fd8d7ab..13682dea2f77 100644
+index 67c2d2eab046..595f564db0c2 100644
 --- a/js/src/vm/moz.build
 +++ b/js/src/vm/moz.build
-@@ -154,9 +154,7 @@ if CONFIG["USE_LIBZ_RS"]:
+@@ -157,9 +157,7 @@ if CONFIG["USE_LIBZ_RS"]:
      DEFINES["USE_LIBZ_RS"] = True
  
  if CONFIG["ENABLE_JS_PBL_WEVAL"]:

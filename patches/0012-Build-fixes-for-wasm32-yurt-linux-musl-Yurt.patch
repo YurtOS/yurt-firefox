@@ -11,11 +11,6 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
     (all included paths)
   c0fb41d8ebcd RandomNum: take GRND_NONBLOCK from musl's <sys/random.h> on Yurt
     (all included paths)
----
- js/src/vm/JSONPrinter.cpp |  2 +-
- js/src/vm/JSONPrinter.h   |  5 +++--
- mfbt/RandomNum.cpp        | 12 ++++++++++--
- 3 files changed, 14 insertions(+), 5 deletions(-)
 
 diff --git a/js/src/vm/JSONPrinter.cpp b/js/src/vm/JSONPrinter.cpp
 index 717f4b324f8b..dfdb307b4876 100644

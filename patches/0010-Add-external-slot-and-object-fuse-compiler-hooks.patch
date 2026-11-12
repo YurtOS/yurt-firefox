@@ -30,32 +30,6 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
     (all included paths except js/src/tests/lib)
   f850071eda00 style: format external compiler testing fixtures
     (all included paths except js/src/tests/lib)
----
- js/public/ExternalCompilerHooks.h             |  45 ++++
- js/src/builtin/Object.cpp                     |  14 +-
- js/src/builtin/TestingFunctions.cpp           | 240 ++++++++++++++++++
- .../external-compiler/assign-slot-policy.js   |  20 ++
- .../object-fuse-notifications.js              |  32 +++
- .../tests/external-compiler/permuted-slots.js | 205 +++++++++++++++
- js/src/jit/CacheIR.cpp                        |   5 +
- js/src/jit/VMFunctions.cpp                    |   3 +
- js/src/vm/ExternalCompilerHooks.cpp           |  36 +++
- js/src/vm/JSContext.h                         |   5 +
- js/src/vm/NativeObject.cpp                    |  13 +
- js/src/vm/NativeObject.h                      |  18 ++
- js/src/vm/ObjectFlags-inl.h                   |   6 +
- js/src/vm/ObjectFlags.h                       |  10 +
- js/src/vm/ObjectFuse.cpp                      |  13 +
- js/src/vm/ObjectFuse.h                        |   4 +
- js/src/vm/PlainObject.cpp                     |   4 +-
- js/src/vm/PropMap.cpp                         | 126 ++++++++-
- js/src/vm/PropMap.h                           |  38 ++-
- js/src/vm/Shape.cpp                           | 125 ++++++++-
- js/src/vm/Shape.h                             |  39 +++
- 21 files changed, 989 insertions(+), 12 deletions(-)
- create mode 100644 js/src/jit-test/tests/external-compiler/assign-slot-policy.js
- create mode 100644 js/src/jit-test/tests/external-compiler/object-fuse-notifications.js
- create mode 100644 js/src/jit-test/tests/external-compiler/permuted-slots.js
 
 diff --git a/js/public/ExternalCompilerHooks.h b/js/public/ExternalCompilerHooks.h
 index b8006e1c9472..d2bb1ccf202a 100644
@@ -174,7 +148,7 @@ index 2de3f5cb19b9..aed88116e950 100644
      cache.fill(&origToShape->asShared(), fromPlain->sharedShape(),
                 toPlain->sharedShape());
 diff --git a/js/src/builtin/TestingFunctions.cpp b/js/src/builtin/TestingFunctions.cpp
-index c3e10f21c624..8fde7871d139 100644
+index a55195ce730b..50320b457eb1 100644
 --- a/js/src/builtin/TestingFunctions.cpp
 +++ b/js/src/builtin/TestingFunctions.cpp
 @@ -80,6 +80,7 @@
@@ -721,7 +695,7 @@ index 000000000000..8e6ef9c44131
 +compatibleCopy.extra = 13;
 +assertEq(compatibleCopy.low + compatibleCopy.extra, 24);
 diff --git a/js/src/jit/CacheIR.cpp b/js/src/jit/CacheIR.cpp
-index 1a9743ed6453..c74baafadd45 100644
+index 875649889f3b..74905ff46cb4 100644
 --- a/js/src/jit/CacheIR.cpp
 +++ b/js/src/jit/CacheIR.cpp
 @@ -5612,6 +5612,11 @@ AttachDecision SetPropIRGenerator::tryAttachAddSlotStub(
@@ -737,10 +711,10 @@ index 1a9743ed6453..c74baafadd45 100644
  
    // The property must be the last added property of the object.
 diff --git a/js/src/jit/VMFunctions.cpp b/js/src/jit/VMFunctions.cpp
-index 9c17f376119b..67a994496408 100644
+index eb5cf3e0cd9a..d550f7265a27 100644
 --- a/js/src/jit/VMFunctions.cpp
 +++ b/js/src/jit/VMFunctions.cpp
-@@ -2405,7 +2405,10 @@ static bool TryAddOrSetNativeObjectProperty(JSContext* cx,
+@@ -2420,7 +2420,10 @@ static bool TryAddOrSetNativeObjectProperty(JSContext* cx,
                                                    &resultSlot);
  
    if constexpr (UseCache) {
@@ -819,10 +793,10 @@ index 5018fce305c2..cefc2541e370 100644
      externalCompilerState_ = state;
    }
 diff --git a/js/src/vm/NativeObject.cpp b/js/src/vm/NativeObject.cpp
-index fc7d75f6de8b..b729154d4f4f 100644
+index 7fac74559a2b..f46d5d9e5605 100644
 --- a/js/src/vm/NativeObject.cpp
 +++ b/js/src/vm/NativeObject.cpp
-@@ -2980,6 +2980,19 @@ bool js::CopyDataPropertiesNative(JSContext* cx, Handle<PlainObject*> target,
+@@ -2972,6 +2972,19 @@ bool js::CopyDataPropertiesNative(JSContext* cx, Handle<PlainObject*> target,
      }
    }
  
@@ -843,7 +817,7 @@ index fc7d75f6de8b..b729154d4f4f 100644
    if (!excludedItems) {
      const PlainObjectCopyPropsCache& cache =
 diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
-index 254777b01fd4..ece5a8e62a6f 100644
+index 6550b1e1879d..9c0fc05f6748 100644
 --- a/js/src/vm/NativeObject.h
 +++ b/js/src/vm/NativeObject.h
 @@ -689,6 +689,15 @@ inline size_t NativeObjectSlotSpanForTracing(Shape* shape,
@@ -917,7 +891,7 @@ index b8c74221fe96..5d7b7e826779 100644
  
  using ObjectFlags = EnumFlags<ObjectFlag>;
 diff --git a/js/src/vm/ObjectFuse.cpp b/js/src/vm/ObjectFuse.cpp
-index 79fb28e15ee2..bf00ce4f7a57 100644
+index 93b8da861269..e4612218c39b 100644
 --- a/js/src/vm/ObjectFuse.cpp
 +++ b/js/src/vm/ObjectFuse.cpp
 @@ -7,7 +7,9 @@
@@ -963,7 +937,7 @@ index 79fb28e15ee2..bf00ce4f7a57 100644
      iter.get().value().invalidateAndClear(cx, reason);
    }
 diff --git a/js/src/vm/ObjectFuse.h b/js/src/vm/ObjectFuse.h
-index 95347740a3c0..efb7d5a05d51 100644
+index 82c748f0f871..1ed45674245f 100644
 --- a/js/src/vm/ObjectFuse.h
 +++ b/js/src/vm/ObjectFuse.h
 @@ -130,6 +130,10 @@ class ObjectFuse {

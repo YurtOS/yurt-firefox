@@ -14,16 +14,12 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
     (only build/moz.configure)
 
 Co-authored-by: Tomasz Andrzejak <andreiltd@gmail.com>
----
- build/moz.configure/rust.configure      |  7 +++++++
- build/moz.configure/toolchain.configure | 16 ++++++++++++----
- 2 files changed, 19 insertions(+), 4 deletions(-)
 
 diff --git a/build/moz.configure/rust.configure b/build/moz.configure/rust.configure
-index d65e019619ae..dc8b6c215f06 100644
+index 7dee81ac6663..2b26e185067b 100644
 --- a/build/moz.configure/rust.configure
 +++ b/build/moz.configure/rust.configure
-@@ -486,6 +486,13 @@ def detect_rustc_target(host_or_target, arm_target, rust_supported_targets):
+@@ -481,6 +481,13 @@ def detect_rustc_target(host_or_target, arm_target, rust_supported_targets):
          if len(narrowed) == 1:
              return narrowed[0].rust_target
  
@@ -38,7 +34,7 @@ index d65e019619ae..dc8b6c215f06 100644
  
      rustc_target = find_candidate(candidates)
 diff --git a/build/moz.configure/toolchain.configure b/build/moz.configure/toolchain.configure
-index 96e7ef764ac0..f449505bd1fc 100644
+index 7e1270fa43cb..881933c2842e 100644
 --- a/build/moz.configure/toolchain.configure
 +++ b/build/moz.configure/toolchain.configure
 @@ -700,6 +700,14 @@ def check_compiler(

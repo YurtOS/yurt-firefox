@@ -12,16 +12,6 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
     (only third_party/wizer)
   18566eacce39 PBL: add weval annotations
     (only third_party/weval)
----
- third_party/weval/LICENSE | 220 +++++++++++++++++
- third_party/weval/weval.h | 489 ++++++++++++++++++++++++++++++++++++++
- third_party/wizer/LICENSE | 220 +++++++++++++++++
- third_party/wizer/wizer.h | 128 ++++++++++
- 4 files changed, 1057 insertions(+)
- create mode 100644 third_party/weval/LICENSE
- create mode 100644 third_party/weval/weval.h
- create mode 100644 third_party/wizer/LICENSE
- create mode 100644 third_party/wizer/wizer.h
 
 diff --git a/third_party/weval/LICENSE b/third_party/weval/LICENSE
 new file mode 100644

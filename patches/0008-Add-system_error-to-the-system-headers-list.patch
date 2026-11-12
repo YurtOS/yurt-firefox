@@ -9,9 +9,6 @@ hooks build.
 Source commits in YurtOS/firefox (yurt dff5cf534448):
   164f660a3602 Add hooks to allow for an external compiler.
     (only config/system-headers.mozbuild)
----
- config/system-headers.mozbuild | 1 +
- 1 file changed, 1 insertion(+)
 
 diff --git a/config/system-headers.mozbuild b/config/system-headers.mozbuild
 index b8c14159a7c5..59277ac3ba6e 100644

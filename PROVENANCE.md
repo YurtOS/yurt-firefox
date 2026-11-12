@@ -182,3 +182,29 @@ frame is above). Self-hosted scripts and scripts whose principals the current re
 does not name it) changes nothing, so the pinned gate passes with the current `NIGHTMONKEY_PIN`;
 NightMonkey implements the hook after the engine release that carries 0015. The hook table is appended
 to, not reordered, and `JSContext`'s layout is unchanged.
+
+
+## Rebase onto Firefox 160.0 (slice D, 2026-11-12)
+
+| What | Value |
+|---|---|
+| Base tag | `FIREFOX_160_0_RELEASE` = `2887d9de1f69c0e9776413da80e7ba0d1225dd9b` |
+| Queue tree | `8ece065f6b7563b52f46c2e29ade1c62e792cee7` (`UPSTREAM` `tree`, via `scripts/export-patches.sh --write`) |
+| Tracking | issue #44 |
+
+The fifteen patches were rebased with their intent unchanged. `git am` of the 159 queue onto 160.0 left
+exactly two rejected hunks; every other patch applies as it was (their hashes and context lines changed
+with the base):
+
+- **0002** `js/src/jsapi-tests/moz.build`: 160 added `SOURCE_HEADERS += ["testsJit.h"]` where the
+  `MOZ_JS_STREAMS` test list goes after; the list is added after that block.
+- **0009** `js/src/debugger/Script.cpp`: the `ScriptOffset` range check (a double outside `size_t`'s range
+  made the conversion undefined) is dropped: 160 rewrote the function to `mozilla::NumberEqualsInt64`
+  with an explicit `0..UINT32_MAX` check, which fixes the same thing.
+
+Not yet verified at the time of writing: the engine compiles (the spike build is this PR's first CI run)
+and NightMonkey runs on it. 160 re-encodes the `Value` tags again (`js/public/Value.h`: INT32 0x02,
+UNDEFINED 0x06, BOOLEAN 0x08, MAGIC 0x0a, PRIVATE_GCTHING 0x0b, BIGINT 0x0d, SYMBOL 0x0f), so NightMonkey
+needs `ff160` engine-version support before `NIGHTMONKEY_PIN` can move (layout-change rule); until then
+the gate on this PR is expected to be red. `vm/Opcodes.h`, `shadow/Object.h`, `ObjectFlags.h`, `Shape.h`,
+`Cell.h` and `JSContext.h` are identical between the patched 159 and 160 trees.

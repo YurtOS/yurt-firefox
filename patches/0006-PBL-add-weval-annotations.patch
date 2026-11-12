@@ -9,39 +9,12 @@ portable baseline interpreter and its CacheIR stubs, with two jit-tests.
 Source commits in YurtOS/firefox (yurt dff5cf534448):
   18566eacce39 PBL: add weval annotations
     (all included paths except third_party/weval)
----
- js/moz.configure                              |  15 +
- js/src/gc/GC.cpp                              |  10 +
- js/src/jit-test/tests/gc/bug-1791975.js       |   7 +
- js/src/jit-test/tests/strings/concat.js       |  15 +
- js/src/jit/BaselineCacheIRCompiler.cpp        |  13 +
- js/src/jit/CacheIR.cpp                        |   4 +
- js/src/jit/CacheIRCompiler.cpp                |  24 +
- js/src/jit/CacheIRCompiler.h                  |  25 +-
- js/src/jit/CacheIRSpewer.cpp                  |   2 +
- js/src/jit/CacheIRWriter.h                    |   3 +
- js/src/jit/CompactBuffer.h                    |   8 +-
- js/src/jit/moz.build                          |   5 +
- js/src/shell/js.cpp                           |   2 +-
- js/src/vm/JSScript.cpp                        |  11 +
- js/src/vm/JSScript.h                          |  20 +
- js/src/vm/PortableBaselineInterpret-defs.h    |  85 +++
- .../vm/PortableBaselineInterpret-weval-defs.h | 142 ++++
- js/src/vm/PortableBaselineInterpret.cpp       | 652 ++++++++++++------
- js/src/vm/PortableBaselineInterpret.h         |  18 +-
- js/src/vm/Weval.h                             |  35 +
- js/src/vm/moz.build                           |   5 +
- 21 files changed, 857 insertions(+), 244 deletions(-)
- create mode 100644 js/src/jit-test/tests/strings/concat.js
- create mode 100644 js/src/vm/PortableBaselineInterpret-defs.h
- create mode 100644 js/src/vm/PortableBaselineInterpret-weval-defs.h
- create mode 100644 js/src/vm/Weval.h
 
 diff --git a/js/moz.configure b/js/moz.configure
-index a78399f88b37..e5f20807f2a1 100644
+index 7343c8cc882b..067947fb3680 100644
 --- a/js/moz.configure
 +++ b/js/moz.configure
-@@ -176,6 +176,21 @@ set_config(
+@@ -172,6 +172,21 @@ set_define(
      depends_if("--enable-portable-baseline-interp-force")(lambda _: True),
  )
  
@@ -64,10 +37,10 @@ index a78399f88b37..e5f20807f2a1 100644
  option(
      "--enable-aot-ics",
 diff --git a/js/src/gc/GC.cpp b/js/src/gc/GC.cpp
-index 262d4283a97a..01cef4d7c8ac 100644
+index d9dff256f022..a095eaaa8c7f 100644
 --- a/js/src/gc/GC.cpp
 +++ b/js/src/gc/GC.cpp
-@@ -5805,6 +5805,16 @@ Realm* js::NewRealm(JSContext* cx, JSPrincipals* principals,
+@@ -5815,6 +5815,16 @@ Realm* js::NewRealm(JSContext* cx, JSPrincipals* principals,
      zone->compartments().infallibleAppend(compHolder.release());
    }
  
@@ -160,10 +133,10 @@ index bd11ae2028d5..fd09e42408bc 100644
  
    if (!lock.isSome()) {
 diff --git a/js/src/jit/CacheIR.cpp b/js/src/jit/CacheIR.cpp
-index 74ce9e8784fd..1a9743ed6453 100644
+index 673280088d75..875649889f3b 100644
 --- a/js/src/jit/CacheIR.cpp
 +++ b/js/src/jit/CacheIR.cpp
-@@ -16282,12 +16282,16 @@ AttachDecision BinaryArithIRGenerator::tryAttachStringConcat() {
+@@ -16321,12 +16321,16 @@ AttachDecision BinaryArithIRGenerator::tryAttachStringConcat() {
      return AttachDecision::NoAction;
    }
  
@@ -181,7 +154,7 @@ index 74ce9e8784fd..1a9743ed6453 100644
    ValOperandId lhsId(writer.setInputOperandId(0));
    ValOperandId rhsId(writer.setInputOperandId(1));
 diff --git a/js/src/jit/CacheIRCompiler.cpp b/js/src/jit/CacheIRCompiler.cpp
-index 1cf65a9bc437..fcb861755da8 100644
+index 969e69087fc4..8e99b6a55233 100644
 --- a/js/src/jit/CacheIRCompiler.cpp
 +++ b/js/src/jit/CacheIRCompiler.cpp
 @@ -46,6 +46,7 @@
@@ -230,7 +203,7 @@ index 1cf65a9bc437..fcb861755da8 100644
  static inline bool ShouldTraceWeakEdgeInStub(JSTracer* trc) {
    if constexpr (std::is_same_v<T, IonICStub>) {
 diff --git a/js/src/jit/CacheIRCompiler.h b/js/src/jit/CacheIRCompiler.h
-index 05f306ef75da..26f889f1ac9a 100644
+index 9dee04cabe33..55c84cfb45cf 100644
 --- a/js/src/jit/CacheIRCompiler.h
 +++ b/js/src/jit/CacheIRCompiler.h
 @@ -26,6 +26,10 @@ namespace js {
@@ -244,7 +217,7 @@ index 05f306ef75da..26f889f1ac9a 100644
  namespace jit {
  
  class BaselineCacheIRCompiler;
-@@ -1329,18 +1333,12 @@ class CacheIRStubInfo {
+@@ -1335,18 +1339,12 @@ class CacheIRStubInfo {
    uint8_t stubDataOffset_;
    bool makesGCCalls_;
  
@@ -268,7 +241,7 @@ index 05f306ef75da..26f889f1ac9a 100644
  
   public:
    CacheKind kind() const { return kind_; }
-@@ -1416,6 +1414,11 @@ class CacheIRStubInfo {
+@@ -1422,6 +1420,11 @@ class CacheIRStubInfo {
  
    void replaceStubRawValueBits(uint8_t* stubData, uint32_t offset,
                                 uint64_t oldBits, uint64_t newBits) const;
@@ -294,7 +267,7 @@ index 0a4b5ea32dce..b387f0eb7da5 100644
        return "Resizable";
    }
 diff --git a/js/src/jit/CacheIRWriter.h b/js/src/jit/CacheIRWriter.h
-index 08a44c134f82..3e0d21123b56 100644
+index 5e94e83d9ea0..2a7304504e56 100644
 --- a/js/src/jit/CacheIRWriter.h
 +++ b/js/src/jit/CacheIRWriter.h
 @@ -397,6 +397,9 @@ class MOZ_RAII CacheIRWriter : public JS::CustomAutoRooter {
@@ -339,7 +312,7 @@ index 1988529b1db6..4e3d382248ba 100644
  
    const uint8_t* currentPosition() const { return buffer_; }
 diff --git a/js/src/jit/moz.build b/js/src/jit/moz.build
-index a8355b4884ae..a72ddce0cde7 100644
+index 6239ad9bd81a..da91b0527969 100644
 --- a/js/src/jit/moz.build
 +++ b/js/src/jit/moz.build
 @@ -316,6 +316,11 @@ if CONFIG["ENABLE_JS_AOT_ICS"]:
@@ -355,10 +328,10 @@ index a8355b4884ae..a72ddce0cde7 100644
  LICENSED_UNDER["arm"].paths = [
      "arm64/vixl",
 diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
-index 5390df52d769..915ce7eaec2e 100644
+index 748036ae633d..1d7680aeda70 100644
 --- a/js/src/shell/js.cpp
 +++ b/js/src/shell/js.cpp
-@@ -12940,7 +12940,7 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
+@@ -12978,7 +12978,7 @@ Variant<JSAndShellContext, int> js::shell::ShellMain(int argc, char** argv,
    }
  
    if (!JS::SetLoggingInterface(shellLoggingInterface)) {
@@ -2327,10 +2300,10 @@ index 000000000000..fd805e3f943c
 +
 +#endif /* vm_Weval_h */
 diff --git a/js/src/vm/moz.build b/js/src/vm/moz.build
-index 2fb5b1cdc5bb..1c975fd8d7ab 100644
+index 076588a48490..67c2d2eab046 100644
 --- a/js/src/vm/moz.build
 +++ b/js/src/vm/moz.build
-@@ -153,6 +153,11 @@ else:
+@@ -156,6 +156,11 @@ else:
  if CONFIG["USE_LIBZ_RS"]:
      DEFINES["USE_LIBZ_RS"] = True
  

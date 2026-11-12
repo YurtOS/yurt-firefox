@@ -16,11 +16,6 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
     (only js/src/tests/lib)
   04031a147589 fix: fail interrupted jit-test runs
     (only js/src/tests/lib)
----
- js/src/tests/lib/jittests.py      |  2 +-
- js/src/tests/lib/test_jittests.py | 44 +++++++++++++++++++++++++++++++
- 2 files changed, 45 insertions(+), 1 deletion(-)
- create mode 100644 js/src/tests/lib/test_jittests.py
 
 diff --git a/js/src/tests/lib/jittests.py b/js/src/tests/lib/jittests.py
 index 4aac51d32589..b72bfe4ee4c8 100755
