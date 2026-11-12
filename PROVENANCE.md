@@ -164,3 +164,21 @@ from #24). 0013 appends a hook, `ExternalCompilerHooks::externalFramesLive(cx)`,
 never skips while it answers true. Null (every table that does not name it) changes nothing, so the
 pinned gate passes with the current `NIGHTMONKEY_PIN`; NightMonkey implements the hook after the
 engine release that carries 0013.
+
+
+## Patch 0015: scripted-caller queries see the external tier's calling frame (2026-11-11)
+
+Added after 0014 (the tree in `UPSTREAM` moved to `e1c78820b572dcaaeae6d1f51b8d76668786309d`; patches
+0001-0014 are unchanged byte for byte). `JS::DescribeScriptedCaller` and
+`js::DescribeScriptedCallerForCompilation` walk the engine's frames, and NightMonkey's compiled frames sit
+on no activation, so a native called from one (the shell's `loadRelativeToScript`, indirect `eval`,
+`new Function`) found no scripted caller, or reported the engine frame under the compiled one
+(NightMonkey issue #28). 0015 appends a hook, `ExternalCompilerHooks::innermostFrame(cx, &activation)`:
+the tier returns the script of its innermost calling frame and the activation that was current when it
+recorded it, and the engine reports that frame instead of its iterator's unless the iterator's activation
+is newer (an activation pushed after the tier's frame holds frames above it; the engine loop that owns an
+activation is blocked while a tier frame it called runs on it, so an equal activation means the tier's
+frame is above). Self-hosted scripts and scripts whose principals the current realm's do not subsume are never reported, as the iterators skip them. Null (every table that
+does not name it) changes nothing, so the pinned gate passes with the current `NIGHTMONKEY_PIN`;
+NightMonkey implements the hook after the engine release that carries 0015. The hook table is appended
+to, not reordered, and `JSContext`'s layout is unchanged.
