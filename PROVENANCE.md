@@ -206,6 +206,7 @@ Not yet verified at the time of writing: the engine compiles (the spike build is
 and NightMonkey runs on it. 160 re-encodes the `Value` tags again (`js/public/Value.h`: INT32 0x02,
 UNDEFINED 0x06, BOOLEAN 0x08, MAGIC 0x0a, PRIVATE_GCTHING 0x0b, BIGINT 0x0d, SYMBOL 0x0f), so NightMonkey
 needed `ff160` engine-version support before `NIGHTMONKEY_PIN` could move (layout-change rule). That
-landed in NightMonkey (#39), and `NIGHTMONKEY_PIN` is `87aa6acde2505cc0745a515f12cd7242b9b29144`, which also
-carries the #28 caller-frame hook (#40) and the ff160 jit-test exclusion fallback (#41). `vm/Opcodes.h`, `shadow/Object.h`, `ObjectFlags.h`, `Shape.h`,
+landed in NightMonkey (#39), and `NIGHTMONKEY_PIN` is `bcd5e0a0fe3fcc1ddef9f60b4a281b9e43dee0ab`, which also
+carries the #28 caller-frame hook (#40), the ff160 jit-test exclusion fallback (#41), the ff160
+`StrictConstantEq` operand fix (#42) and the ff160 exclusion lists (#43). `vm/Opcodes.h`, `shadow/Object.h`, `ObjectFlags.h`, `Shape.h`,
 `Cell.h` and `JSContext.h` are identical between the patched 159 and 160 trees.
