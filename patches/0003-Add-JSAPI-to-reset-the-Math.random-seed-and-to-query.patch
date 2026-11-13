@@ -12,12 +12,6 @@ Source commits in YurtOS/firefox (yurt dff5cf534448):
     (all included paths)
   51f29d2cfcf6 Add JS::HasJobsPending as a way to query the status of the internal Jobs queue
     (all included paths)
----
- js/src/builtin/Math.cpp |  6 ++++++
- js/src/jsfriendapi.h    | 10 ++++++++++
- js/src/vm/JSContext.cpp | 10 ++++++++++
- js/src/vm/Realm.h       |  4 ++++
- 4 files changed, 30 insertions(+)
 
 diff --git a/js/src/builtin/Math.cpp b/js/src/builtin/Math.cpp
 index 7fd0c2716d8f..7e918d281b67 100644

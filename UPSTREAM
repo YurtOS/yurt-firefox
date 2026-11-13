@@ -1,4 +1,4 @@
 url=https://github.com/mozilla-firefox/firefox
-tag=FIREFOX_159_0_RELEASE
-commit=9a2dc53c369c7ae5172018b35988e1d2ffeff402
-tree=e1c78820b572dcaaeae6d1f51b8d76668786309d
+tag=FIREFOX_160_0_RELEASE
+commit=2887d9de1f69c0e9776413da80e7ba0d1225dd9b
+tree=ab47fdf174a6ff3c26945d6c047731c3680bf7ac

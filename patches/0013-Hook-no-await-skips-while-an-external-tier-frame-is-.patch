@@ -34,7 +34,7 @@ index d2bb1ccf202a..589be66e2ad5 100644
  
  // Register (or, with nullptr, unregister) the hook table on a runtime. The
 diff --git a/js/src/builtin/Promise.cpp b/js/src/builtin/Promise.cpp
-index dff04f721cae..199eb86f82c8 100644
+index b8bc1115ecd9..110c2c717fa6 100644
 --- a/js/src/builtin/Promise.cpp
 +++ b/js/src/builtin/Promise.cpp
 @@ -11,6 +11,9 @@
@@ -47,7 +47,7 @@ index dff04f721cae..199eb86f82c8 100644
  #include "js/CallAndConstruct.h"      // JS::Construct, JS::IsCallable
  #include "js/experimental/JitInfo.h"  // JSJitGetterOp, JSJitInfo
  #include "js/ForOfIterator.h"         // JS::ForOfIterator
-@@ -8346,6 +8349,18 @@ void PromiseObject::dumpOwnStringContent(js::GenericPrinter& out) const {}
+@@ -8367,6 +8370,18 @@ void PromiseObject::dumpOwnStringContent(js::GenericPrinter& out) const {}
      return true;
    }
  

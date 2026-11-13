@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sunnymar <sunnym@gmail.com>
+Date: Fri, 13 Nov 2026 15:17:16 +0200
+Subject: [PATCH] BufferAllocator: do not shrink a large buffer in place on
+ WASI
+
+shrinkLarge frees the tail of a large buffer with UnmapPages. On WASI that is
+free() of an interior pointer of a posix_memalign block, which faults in dlfree
+(arrays/shrink-large-array.js). Treat WASI like Windows: report that the buffer
+cannot be shrunk.
+
+diff --git a/js/src/gc/BufferAllocator.cpp b/js/src/gc/BufferAllocator.cpp
+index a29759e3505a..b9d1590403aa 100644
+--- a/js/src/gc/BufferAllocator.cpp
++++ b/js/src/gc/BufferAllocator.cpp
+@@ -3680,12 +3680,16 @@ void BufferAllocator::freeLarge(void* alloc) {
+ 
+ bool BufferAllocator::shrinkLarge(LargeBuffer* buffer, size_t newBytes) {
+   MOZ_ASSERT(IsLargeAllocSize(newBytes));
+-#ifdef XP_WIN
++#if defined(XP_WIN) || defined(__wasi__)
+   // Can't unmap part of a region mapped with VirtualAlloc on Windows.
+   //
+   // It is possible to decommit the physical pages so we could do that and
+   // track virtual size as well as committed size. This would also allow us to
+   // grow the allocation again if necessary.
++  //
++  // The same goes for WASI, where MapAlignedPages is posix_memalign and
++  // UnmapPages is free(): freeing the tail would pass free() an interior
++  // pointer of the block.
+   return false;
+ #else
+   MOZ_ASSERT(buffer->zone() == zone);

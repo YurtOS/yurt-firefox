@@ -12,40 +12,12 @@ commit are not in the queue.
 Source commits in YurtOS/firefox (yurt dff5cf534448):
   71f34b31f32f Bring back the JS Streams implementation
     (all included paths except js/src/builtin/streams, js/public/Stream.h)
----
- js/moz.configure                              |   18 +
- js/public/ProtoKey.h                          |   21 +-
- js/public/RealmOptions.h                      |   14 +
- js/public/TypeDecls.h                         |    6 +
- js/public/Value.h                             |   18 +
- js/public/friend/ErrorNumbers.msg             |   60 +
- js/src/builtin/TestingFunctions.cpp           |   10 +
- js/src/frontend/FrontendContext.cpp           |    4 +-
- js/src/fuzz-tests/tests.cpp                   |    5 +-
- js/src/jsapi-tests/moz.build                  |    5 +
- js/src/jsapi-tests/testReadableStream.cpp     | 1195 +++++++++++++++++
- js/src/jsapi-tests/tests.cpp                  |    4 +-
- js/src/moz.build                              |   29 +
- js/src/shell/js.cpp                           |   26 +
- js/src/shell/jsshell.h                        |    5 +
- .../ReadableStream/readable-stream-globals.js |  367 +++++
- js/src/vm/CommonPropertyNames.h               |   13 +
- js/src/vm/GlobalObject.cpp                    |   23 +
- js/src/vm/List-inl.h                          |   65 +-
- js/src/vm/List.h                              |   13 +
- js/src/vm/NativeObject.h                      |    2 +
- js/src/vm/Runtime.h                           |   25 +
- js/xpconnect/src/XPCJSRuntime.cpp             |    1 +
- modules/libpref/init/StaticPrefList.yaml      |   16 +
- 24 files changed, 1940 insertions(+), 5 deletions(-)
- create mode 100644 js/src/jsapi-tests/testReadableStream.cpp
- create mode 100644 js/src/tests/non262/ReadableStream/readable-stream-globals.js
 
 diff --git a/js/moz.configure b/js/moz.configure
-index 5b4549c8d2dd..1327388db4a7 100644
+index c7778eed949d..3d25f5278c50 100644
 --- a/js/moz.configure
 +++ b/js/moz.configure
-@@ -206,6 +206,24 @@ set_config(
+@@ -194,6 +194,24 @@ set_define(
  )
  
  
@@ -150,10 +122,10 @@ index 7f0ea12920ba..cc132d409e00 100644
 +
  #endif /* js_TypeDecls_h */
 diff --git a/js/public/Value.h b/js/public/Value.h
-index 88e28b2ca2fe..78e757d2da4f 100644
+index aab93c26a2f0..6ad30a943424 100644
 --- a/js/public/Value.h
 +++ b/js/public/Value.h
-@@ -379,6 +379,24 @@ enum JSWhyMagic {
+@@ -384,6 +384,24 @@ enum JSWhyMagic {
    /** for local use */
    JS_GENERIC_MAGIC,
  
@@ -250,7 +222,7 @@ index 76a0f79c8b26..e1a0f2f77caa 100644
  MSG_DEF(JSMSG_WASM_ERROR_CONSUMING_RESPONSE,             0, JSEXN_TYPEERR,  "WebAssembly: There was an error consuming the Response")
  MSG_DEF(JSMSG_WASM_BAD_RESPONSE_VALUE,                   0, JSEXN_TYPEERR,  "WebAssembly: Expected Response or Promise resolving to Response")
 diff --git a/js/src/builtin/TestingFunctions.cpp b/js/src/builtin/TestingFunctions.cpp
-index d69dddd6f1f4..c3e10f21c624 100644
+index 7514a825790e..a55195ce730b 100644
 --- a/js/src/builtin/TestingFunctions.cpp
 +++ b/js/src/builtin/TestingFunctions.cpp
 @@ -5196,6 +5196,12 @@ static bool RejectPromise(JSContext* cx, unsigned argc, Value* vp) {
@@ -317,11 +289,11 @@ index cc96bb10c28c..e25ecc389dae 100644
                              JS::FireOnNewGlobalHook, options);
  }
 diff --git a/js/src/jsapi-tests/moz.build b/js/src/jsapi-tests/moz.build
-index bfadc461891b..b4d6e0680573 100644
+index c8c70a64c4ff..954306b47f44 100644
 --- a/js/src/jsapi-tests/moz.build
 +++ b/js/src/jsapi-tests/moz.build
-@@ -187,6 +187,11 @@ if not CONFIG["JS_CODEGEN_NONE"]:
-         "testsJit.cpp",
+@@ -191,6 +191,11 @@ if not CONFIG["JS_CODEGEN_NONE"]:
+         "testsJit.h",
      ]
  
 +if CONFIG["MOZ_JS_STREAMS"]:
@@ -1549,7 +1521,7 @@ index 3d0756217f81..71fb7003a0ad 100644
                                   JS::FireOnNewGlobalHook, options);
    if (!newGlobal) {
 diff --git a/js/src/moz.build b/js/src/moz.build
-index 81a49f76945a..27e557bc0082 100644
+index d03a55327d18..acf04c648f8a 100644
 --- a/js/src/moz.build
 +++ b/js/src/moz.build
 @@ -180,6 +180,7 @@ EXPORTS.js += [
@@ -1596,10 +1568,10 @@ index 81a49f76945a..27e557bc0082 100644
  # no-op symbols implemented in jsglean.cpp
  SOURCES += [
 diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
-index 44ac9793342e..84fd91e1cf60 100644
+index 2fc532c2080d..ed0ede3c93e6 100644
 --- a/js/src/shell/js.cpp
 +++ b/js/src/shell/js.cpp
-@@ -882,6 +882,12 @@ bool shell::enableTestWasmAwaitTier2 = false;
+@@ -886,6 +886,12 @@ bool shell::enableTestWasmAwaitTier2 = false;
  bool shell::enableSourcePragmas = true;
  bool shell::enableAsyncStacks = false;
  bool shell::enableAsyncStackCaptureDebuggeeOnly = false;
@@ -1612,7 +1584,7 @@ index 44ac9793342e..84fd91e1cf60 100644
  bool shell::enableToSource = false;
  #ifdef JS_GC_ZEAL
  uint32_t shell::gZealBits = 0;
-@@ -4474,6 +4480,7 @@ static void SetStandardRealmOptions(JSContext* cx, JS::RealmOptions& options) {
+@@ -4485,6 +4491,7 @@ static void SetStandardRealmOptions(JSContext* cx, JS::RealmOptions& options) {
    options.creationOptions()
        .setSharedMemoryAndAtomicsEnabled(enableSharedMemory)
        .setCoopAndCoepEnabled(false)
@@ -1620,7 +1592,7 @@ index 44ac9793342e..84fd91e1cf60 100644
        .setToSourceEnabled(enableToSource);
  }
  
-@@ -13183,6 +13190,20 @@ bool InitOptionParser(OptionParser& op) {
+@@ -13221,6 +13228,20 @@ bool InitOptionParser(OptionParser& op) {
        !op.addBoolOption('\0', "less-debug-code",
                          "Emit less machine code for "
                          "checking assertions under DEBUG.") ||
@@ -1641,7 +1613,7 @@ index 44ac9793342e..84fd91e1cf60 100644
        !op.addBoolOption('\0', "disable-tosource", "Disable toSource/uneval") ||
        !op.addBoolOption('\0', "disable-property-error-message-fix",
                          "Disable fix for the error message when accessing "
-@@ -14067,6 +14088,11 @@ bool SetContextWasmOptions(JSContext* cx, const OptionParser& op) {
+@@ -14105,6 +14126,11 @@ bool SetContextWasmOptions(JSContext* cx, const OptionParser& op) {
    }
  
    enableTestWasmAwaitTier2 = op.getBoolOption("test-wasm-await-tier2");
@@ -2295,10 +2267,10 @@ index bc9d1f0507f8..0f6f2c26f43c 100644
     * Remove and return the first element of the list.
     *
 diff --git a/js/src/vm/NativeObject.h b/js/src/vm/NativeObject.h
-index 78b165cfa288..3fd04ca15f10 100644
+index 259fcc55c77f..8921156cd5a5 100644
 --- a/js/src/vm/NativeObject.h
 +++ b/js/src/vm/NativeObject.h
-@@ -1777,6 +1777,8 @@ class NativeObject : public JSObject {
+@@ -1765,6 +1765,8 @@ class NativeObject : public JSObject {
    inline void ensureDenseInitializedLength(uint32_t index, uint32_t extra);
  
    void setDenseElement(uint32_t index, const Value& val) {
@@ -2351,10 +2323,10 @@ index e501e49181cd..2a5bf1741d30 100644
    struct GlobalObjectWatchersLinkAccess {
      static const mozilla::DoublyLinkedListElement<T>& Get(const T* aThis) {
 diff --git a/js/xpconnect/src/XPCJSRuntime.cpp b/js/xpconnect/src/XPCJSRuntime.cpp
-index 785c22271ba4..ca3521883d81 100644
+index 87932af3483a..abeab17952ac 100644
 --- a/js/xpconnect/src/XPCJSRuntime.cpp
 +++ b/js/xpconnect/src/XPCJSRuntime.cpp
-@@ -73,6 +73,7 @@
+@@ -75,6 +75,7 @@
  #include "js/MemoryMetrics.h"
  #include "js/Object.h"  // JS::GetClass
  #include "js/RealmIterators.h"
@@ -2363,10 +2335,10 @@ index 785c22271ba4..ca3521883d81 100644
  #include "js/UbiNode.h"
  #include "js/UbiNodeUtils.h"
 diff --git a/modules/libpref/init/StaticPrefList.yaml b/modules/libpref/init/StaticPrefList.yaml
-index 80be46d83cc0..67f4fd88b5c6 100644
+index 17f9237d1f05..aa62b697925a 100644
 --- a/modules/libpref/init/StaticPrefList.yaml
 +++ b/modules/libpref/init/StaticPrefList.yaml
-@@ -10029,6 +10029,22 @@
+@@ -10204,6 +10204,22 @@
    mirror: always  # LoadStartupJSPrefs
    do_not_use_directly: true
  

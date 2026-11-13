@@ -9,17 +9,9 @@ the standalone JS shell on WASI, js/src/shell/wizer.cpp.
 Source commits in YurtOS/firefox (yurt dff5cf534448):
   1e77c0d2599e JS shell on WASI: add basic Wizer integration for standalone testing.
     (all included paths except third_party/wizer)
----
- js/moz.configure       | 16 ++++++++
- js/src/shell/js.cpp    | 83 +++++++++++++++++++++++++++++-------------
- js/src/shell/jsshell.h | 15 ++++++++
- js/src/shell/moz.build |  2 +
- js/src/shell/wizer.cpp | 59 ++++++++++++++++++++++++++++++
- 5 files changed, 149 insertions(+), 26 deletions(-)
- create mode 100644 js/src/shell/wizer.cpp
 
 diff --git a/js/moz.configure b/js/moz.configure
-index 1327388db4a7..a78399f88b37 100644
+index 3d25f5278c50..7343c8cc882b 100644
 --- a/js/moz.configure
 +++ b/js/moz.configure
 @@ -55,6 +55,22 @@ def js_disable_shell(value):
@@ -46,7 +38,7 @@ index 1327388db4a7..a78399f88b37 100644
  
  set_define("JS_PUNBOX64", depends(target)(lambda t: t.bitness == 64 or None))
 diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
-index 84fd91e1cf60..5390df52d769 100644
+index ed0ede3c93e6..748036ae633d 100644
 --- a/js/src/shell/js.cpp
 +++ b/js/src/shell/js.cpp
 @@ -41,6 +41,7 @@
@@ -57,7 +49,7 @@ index 84fd91e1cf60..5390df52d769 100644
  #ifndef __wasi__
  #  include <signal.h>
  #endif
-@@ -12577,7 +12578,8 @@ ShellContext::~ShellContext() {
+@@ -12615,7 +12616,8 @@ ShellContext::~ShellContext() {
    MOZ_ASSERT(offThreadJobs.empty());
  }
  
@@ -67,7 +59,7 @@ index 84fd91e1cf60..5390df52d769 100644
  #ifdef JS_STRUCTURED_SPEW
    cx->spewer().enableSpewing();
  #endif
-@@ -12629,6 +12631,7 @@ static int Shell(JSContext* cx, OptionParser* op) {
+@@ -12667,6 +12669,7 @@ static int Shell(JSContext* cx, OptionParser* op) {
      if (!glob) {
        return 1;
      }
@@ -75,7 +67,7 @@ index 84fd91e1cf60..5390df52d769 100644
  
      JSAutoRealm ar(cx, glob);
  
-@@ -12884,7 +12887,13 @@ static bool SetGCParameterFromArg(JSContext* cx, char* arg) {
+@@ -12922,7 +12925,13 @@ static bool SetGCParameterFromArg(JSContext* cx, char* arg) {
    return true;
  }
  
@@ -90,7 +82,7 @@ index 84fd91e1cf60..5390df52d769 100644
    PreInit();
  
    sArgc = argc;
-@@ -12894,13 +12903,8 @@ int main(int argc, char** argv) {
+@@ -12932,13 +12941,8 @@ int main(int argc, char** argv) {
  
    setlocale(LC_ALL, "");
  
@@ -104,7 +96,7 @@ index 84fd91e1cf60..5390df52d769 100644
    SetOutputFile("JS_STDOUT", &rcStdout, &gOutFile);
    SetOutputFile("JS_STDERR", &rcStderr, &gErrFile);
  
-@@ -12912,27 +12916,27 @@ int main(int argc, char** argv) {
+@@ -12950,27 +12954,27 @@ int main(int argc, char** argv) {
  
    OptionParser op("Usage: {progname} [options] [[script] scriptArgs*]");
    if (!InitOptionParser(op)) {
@@ -138,7 +130,7 @@ index 84fd91e1cf60..5390df52d769 100644
    }
  
    if (!JS::SetLoggingInterface(shellLoggingInterface)) {
-@@ -12946,7 +12950,7 @@ int main(int argc, char** argv) {
+@@ -12984,7 +12988,7 @@ int main(int argc, char** argv) {
    // Start the engine.
    if (const char* message = JS_InitWithFailureDiagnostic()) {
      fprintf(gErrFile->fp, "JS_Init failed: %s\n", message);
@@ -147,7 +139,7 @@ index 84fd91e1cf60..5390df52d769 100644
    }
  
    // `selfHostedXDRBuffer` contains XDR buffer of the self-hosted JS.
-@@ -12958,11 +12962,11 @@ int main(int argc, char** argv) {
+@@ -12996,11 +13000,11 @@ int main(int argc, char** argv) {
    auto shutdownEngine = MakeScopeExit([] { JS_ShutDown(); });
  
    if (!SetGlobalOptionsPostJSInit(op)) {
@@ -161,7 +153,7 @@ index 84fd91e1cf60..5390df52d769 100644
    }
  
    JS::SetProcessBuildIdOp(ShellBuildId);
-@@ -12970,7 +12974,7 @@ int main(int argc, char** argv) {
+@@ -13008,7 +13012,7 @@ int main(int argc, char** argv) {
    /* Use the same parameters as the browser in xpcjsruntime.cpp. */
    JSContext* const cx = JS_NewContext(JS::DefaultHeapMaxBytes);
    if (!cx) {
@@ -170,7 +162,7 @@ index 84fd91e1cf60..5390df52d769 100644
    }
  
    // Register telemetry callbacks.
-@@ -12982,15 +12986,15 @@ int main(int argc, char** argv) {
+@@ -13020,15 +13024,15 @@ int main(int argc, char** argv) {
    UniquePtr<ShellContext> sc =
        MakeUnique<ShellContext>(cx, ShellContext::MainThread);
    if (!sc || !sc->registerWithCx(cx)) {
@@ -189,7 +181,7 @@ index 84fd91e1cf60..5390df52d769 100644
    }
  
    JS_SetTrustedPrincipals(cx, &ShellPrincipals::fullyTrusted);
-@@ -13005,7 +13009,7 @@ int main(int argc, char** argv) {
+@@ -13043,7 +13047,7 @@ int main(int argc, char** argv) {
    bufferStreamState = js_new<ExclusiveWaitableData<BufferStreamState>>(
        mutexid::BufferStreamState);
    if (!bufferStreamState) {
@@ -198,7 +190,7 @@ index 84fd91e1cf60..5390df52d769 100644
    }
    auto shutdownBufferStreams = MakeScopeExit([] {
      ShutdownBufferStreams();
-@@ -13047,7 +13051,7 @@ int main(int argc, char** argv) {
+@@ -13085,7 +13089,7 @@ int main(int argc, char** argv) {
    }
  
    if (!JS::InitSelfHostedCode(cx, xdrSpan, xdrWriter)) {
@@ -207,7 +199,7 @@ index 84fd91e1cf60..5390df52d769 100644
    }
  
    EnvironmentPreparer environmentPreparer(cx);
-@@ -13061,13 +13065,14 @@ int main(int argc, char** argv) {
+@@ -13099,13 +13103,14 @@ int main(int argc, char** argv) {
      if (!WasmCompileAndSerialize(cx)) {
        // Errors have been printed directly to stderr.
        MOZ_ASSERT(!cx->isExceptionPending());
@@ -225,7 +217,7 @@ index 84fd91e1cf60..5390df52d769 100644
  
  #ifdef DEBUG
    if (OOM_printAllocationCount) {
-@@ -13075,9 +13080,29 @@ int main(int argc, char** argv) {
+@@ -13113,9 +13118,29 @@ int main(int argc, char** argv) {
    }
  #endif
  
@@ -256,7 +248,7 @@ index 84fd91e1cf60..5390df52d769 100644
  bool InitOptionParser(OptionParser& op) {
    op.setDescription(
        "The SpiderMonkey shell provides a command line interface to the "
-@@ -13949,6 +13974,12 @@ bool SetGlobalOptionsPostJSInit(const OptionParser& op) {
+@@ -13987,6 +14012,12 @@ bool SetGlobalOptionsPostJSInit(const OptionParser& op) {
          JS::DelazificationOption::ParseEverythingEagerly;
    }
  
@@ -308,7 +300,7 @@ index 6caa4d93dcbb..0480cddb5147 100644
  } /* namespace js */
  
 diff --git a/js/src/shell/moz.build b/js/src/shell/moz.build
-index 93f6373a48c4..510e094d7596 100644
+index 14f1ad3d6491..745d46615796 100644
 --- a/js/src/shell/moz.build
 +++ b/js/src/shell/moz.build
 @@ -21,6 +21,7 @@ UNIFIED_SOURCES += [
