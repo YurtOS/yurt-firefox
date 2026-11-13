@@ -222,4 +222,4 @@ with `UnmapPages(endPtr, shrinkBytes)`. On WASI `MapAlignedPages` is `posix_mema
 `free()`, so that frees an interior pointer of the block and faults in `dlfree`; `arrays/shrink-large-array.js`
 (a 2 MB dense array shrunk to 1 MB) trapped in both gate lanes. Upstream already returns false there on
 Windows, which cannot unmap part of a region either; 0016 extends that guard to `__wasi__`, so the buffer is
-reallocated by copying instead. Stock native 160 never reaches it. Verified by gate run 43433973014.
+reallocated by copying instead. Native builds are unaffected: there `UnmapPages` is a real partial `munmap`. Verified by gate run 43433973014.
