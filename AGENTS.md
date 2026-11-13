@@ -2,7 +2,9 @@
 
 Read [docs/agents/org.md](docs/agents/org.md) first. It is a verbatim copy of
 YurtOS's shared policy; change the canonical kernel copy before syncing it. If
-it disagrees with this file, stop and tell the user.
+it disagrees with this file, stop and tell the user. This repository's hosted CI
+budget is
+[Hosted CI budget during draft review](#hosted-ci-budget-during-draft-review).
 
 ## Purpose
 
@@ -45,6 +47,39 @@ never the bare tag.
   (`release.yml`, tag `engine-v<version>-<n>`) and a NightMonkey PR that pins
   it (`scripts/update-engine-release.sh <tag>` there). This repository's
   `mozconfig` is the only copy; NightMonkey no longer keeps one.
+
+## Hosted CI budget during draft review
+
+This is the hosted CI budget that org.md's "Hosted CI cost during PR review"
+defers to for this repository, modeled on
+[yurtos-kernel's](https://github.com/YurtOS/yurtos-kernel/blob/main/docs/contributing/gates.md#manual-ci-budget-during-draft-review):
+**at most one hand-triggered full-gate round per draft PR, at its final
+head.** A round is one full `gate.yml` run (every jit-test over the four shard
+jobs) at the reviewed head, started by adding `ci:full` (or `gate`) or by one
+`workflow_dispatch` of `gate.yml` on the PR branch. It is not a separate budget
+for every review round.
+
+- Between review rounds, use what every push already runs (`engine.yml` and
+  `queue.yml` for a non-Markdown change, and the gate's `JIT_SUBSET` for an
+  engine input) and local checks narrowed to what changed. Do not add the label
+  or dispatch `gate.yml` after each round. While `ci:full` or `gate` is on,
+  every push reruns the full gate, so add it only for the final round and take
+  it off before any push that is not the fix for a failed final round.
+- A PR that changes `NIGHTMONKEY_PIN` runs the full gate on every push without
+  a label. Push it only at reviewed heads, a round's fixes together, so each
+  push is a deliberate round.
+- Complete the last fix, its review and the local checks before spending the
+  round. Check for existing runs at that exact head rather than duplicating
+  in-progress or successful coverage. Marking a PR ready runs nothing extra.
+- If that final round fails, fix the failure, review the delta and pass the
+  local checks before running once more at the corrected final head. Repeat
+  this only for an actual failed final round; a successful run does not
+  authorize speculative reruns.
+- `release.yml` builds and publishes an engine release; it is not a
+  draft-review lane.
+- This applies to every session and any agents or subagents it starts. Put a
+  link to this section and the instruction to follow it in their briefs,
+  including reviewer briefs.
 
 ## Worktree hygiene
 
