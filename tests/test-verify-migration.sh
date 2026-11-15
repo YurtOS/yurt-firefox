@@ -251,7 +251,7 @@ verify_sourced_under_caller_ifs() {
 verify_fails_closed() {
   local c failed=
   hostile_root
-  for c in "--git-path 1" "diff 1" "ls-tree 1" "update-index 1" "write-tree 1" "write-tree 2" "read-tree 1"; do
+  for c in "--git-path 1" "diff 1" "diff 2" "ls-tree 1" "update-index 1" "update-index 2" "write-tree 1" "write-tree 2" "read-tree 1"; do
     rm -rf "$R.shim"
     # shellcheck disable=SC2086
     set -- $c
@@ -266,6 +266,21 @@ verify_fails_closed() {
     OUT=$(PATH="$R.shim:$PATH" PQ_ROOT=$R "$VERIFY" "$YURT" 2>&1) || RC=$?
     case $RC:$OUT in 0:* | *PASS*) failed="$failed [$c: rc $RC: $OUT]" ;; esac
     case $OUT in *"$want"*) ;; *) failed="$failed [$c: shim not reached: $OUT]" ;; esac
+    # The failure must be what ended the run, not a later tree mismatch that
+    # would fail anyway if the script swallowed it: the two diffs report it
+    # themselves, and every other step returns before the summary line.
+    case $c in
+      "diff 1") need="pq: cannot diff" ;;
+      "diff 2") need="verify-migration: cannot diff" ;;
+      *) need= ;;
+    esac
+    if [ -n "$need" ]; then
+      case $OUT in *"$need"*) ;; *) failed="$failed [$c: script did not report '$need': $OUT]" ;; esac
+    else
+      case $OUT in
+        *"paths changed in tag"* | *"FAIL tree differs"*) failed="$failed [$c: run continued past the failed step: $OUT]" ;;
+      esac
+    fi
   done
   assert_eq "" "$failed" "git failures not propagated"
   mkdir "$BASE/lists-noexclude"
