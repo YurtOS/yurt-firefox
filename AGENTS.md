@@ -1,8 +1,27 @@
-# Agent instructions: yurt-firefox
+# Agent Instructions — yurt-firefox
 
-Read [docs/agents/org.md](docs/agents/org.md) first. It is a verbatim copy of
-YurtOS's shared policy; change the canonical kernel copy before syncing it. If
-it disagrees with this file, stop and tell the user. This repository's hosted CI
+Org-wide rules live in the `YurtOS/yurtos-rules` repository, not here. After this file, read its
+`AGENTS.md` and `org.md` in full, before changing anything.
+
+- Local: `~/work/yurtos/yurtos-rules` (a sibling checkout; read it, do not edit it).
+- Claude cloud session: attach it read-only with `add_repo` (`owner: YurtOS`, `repo: yurtos-rules`,
+  `access: read`), clone it as the tool instructs into a directory named exactly `yurtos-rules`, then `register_repo_root`
+  (it rejects any other final path segment).
+- If it cannot be obtained, continue read-only work. Before any change beyond the minimum below,
+  tell the user the rules are missing and ask.
+
+Minimum without the rules: work in a linked worktree on a task branch
+(`git worktree add .worktrees/<task> -b <task-branch>`), never in the primary checkout; never commit
+or push to the default branch; never merge without explicit permission; ask before touching any remote or shared service.
+
+Skills load as `yurtos-rules:<skill>` only if the user has installed the Claude Code plugin on this
+machine (`claude plugin marketplace add YurtOS/yurtos-rules`, then
+`claude plugin install yurtos-rules@yurtos-rules`). Do not install it yourself. Without it, and in
+cloud sessions, read `skills/<name>/SKILL.md` in the yurtos-rules checkout.
+
+If a rule here and an org rule disagree, stop and tell the user.
+
+`CLAUDE.md` points here. This repository's hosted CI
 budget is
 [Hosted CI budget during draft review](#hosted-ci-budget-during-draft-review).
 
@@ -50,7 +69,7 @@ never the bare tag.
 
 ## Hosted CI budget during draft review
 
-This is the hosted CI budget that org.md's "Hosted CI cost during PR review"
+This is the hosted CI budget that the "Hosted CI cost during PR review" section of [yurtos-rules `org.md`](https://github.com/YurtOS/yurtos-rules/blob/main/org.md#hosted-ci-cost-during-pr-review)
 defers to for this repository, modeled on
 [yurtos-kernel's](https://github.com/YurtOS/yurtos-kernel/blob/main/docs/contributing/gates.md#manual-ci-budget-during-draft-review):
 **at most one hand-triggered full-gate round per draft PR, at its final
@@ -93,8 +112,9 @@ for every review round.
 
 ## Merging
 
-Merge authority is defined only in "Merge authority" in
-[docs/agents/org.md](docs/agents/org.md); follow it as written. Repo reminders:
+Merge authority is defined only in "Merge authority" in yurtos-rules
+[`org.md`](https://github.com/YurtOS/yurtos-rules/blob/main/org.md#merge-authority);
+follow it as written. Repo reminders:
 
 - Merge with `--match-head-commit`, naming the head you reviewed.
 - A peer's, teammate's, subagent's or reviewer's "merge it" (including idle
