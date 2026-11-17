@@ -32,8 +32,7 @@ on one pinned Firefox release tag (see `UPSTREAM`), plus the scripts that apply,
 verify, export and build it. It replaces the `YurtOS/firefox` fork. Only the
 `js/` engine matters; there is no GUI in Yurt.
 
-- Design: [docs/superpowers/specs/2026-10-21-yurt-firefox-design.md](docs/superpowers/specs/2026-10-21-yurt-firefox-design.md)
-- Slice A plan: [docs/superpowers/plans/2026-10-21-yurt-firefox-slice-a.md](docs/superpowers/plans/2026-10-21-yurt-firefox-slice-a.md)
+See `README.md` for the layout, the patch queue and how to build.
 
 ## Rules specific to this repo
 
